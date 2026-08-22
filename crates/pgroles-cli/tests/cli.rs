@@ -4891,6 +4891,214 @@ schemas:
         ));
     }
 
+    /// A role declaring `preserve_undeclared_grants` keeps grants the manifest
+    /// does not declare, while explicit `ensure: absent` assertions still
+    /// revoke (issue #201: verifiable brownfield adoption).
+    #[test]
+    #[ignore]
+    fn preserve_undeclared_grants_flag_protects_out_of_band_access() {
+        let schema = unique_name("preserve_schema");
+        let role = unique_name("preserve_role");
+
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{role}";
+            CREATE ROLE "{role}" NOLOGIN;
+            CREATE SCHEMA "{schema}";
+            CREATE TABLE "{schema}".widgets (id integer);
+            GRANT SELECT ON "{schema}".widgets TO "{role}";
+            "#
+        ));
+
+        // Nothing declares the table SELECT; preservation keeps it. The
+        // schema-USAGE grant brings the schema into inspection scope.
+        let manifest_file = write_temp_manifest(&format!(
+            r#"
+roles:
+  - name: {role}
+    nologin: true
+    preserve_undeclared_grants: true
+
+grants:
+  - role: {role}
+    privileges: [USAGE]
+    object: {{ type: schema, name: {schema} }}
+"#
+        ));
+
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success();
+
+        assert!(
+            query_has_relation_privilege(&role, &format!("{schema}.widgets"), "SELECT"),
+            "undeclared grant should survive under preserve_undeclared_grants"
+        );
+
+        // The same manifest with an explicit absence assertion revokes.
+        let asserting_manifest = write_temp_manifest(&format!(
+            r#"
+roles:
+  - name: {role}
+    nologin: true
+    preserve_undeclared_grants: true
+
+grants:
+  - role: {role}
+    ensure: absent
+    privileges: [SELECT]
+    object: {{ type: table, schema: {schema}, name: widgets }}
+"#
+        ));
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                asserting_manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success();
+
+        assert!(
+            !query_has_relation_privilege(&role, &format!("{schema}.widgets"), "SELECT"),
+            "ensure: absent must revoke despite preserve_undeclared_grants"
+        );
+
+        // Without the flag, the undeclared grant would have been revoked in
+        // the first apply — sanity-check that baseline behavior still holds.
+        execute_sql(&format!(
+            "GRANT SELECT ON \"{schema}\".widgets TO \"{role}\";"
+        ));
+        let plain_manifest = write_temp_manifest(&format!(
+            r#"
+roles:
+  - name: {role}
+    nologin: true
+
+grants:
+  - role: {role}
+    privileges: [USAGE]
+    object: {{ type: schema, name: {schema} }}
+"#
+        ));
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                plain_manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success();
+        assert!(
+            !query_has_relation_privilege(&role, &format!("{schema}.widgets"), "SELECT"),
+            "without the flag, adopt mode revokes undeclared grants"
+        );
+
+        // Cleanup
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{role}";
+            "#
+        ));
+    }
+
+    /// Adopt mode refuses to transfer schema ownership away from the live
+    /// owner unless `--allow-schema-owner-transfers` is passed (issue #201).
+    #[test]
+    #[ignore]
+    fn adopt_apply_refuses_schema_owner_transfer_without_flag() {
+        let schema = unique_name("transfer_schema");
+        let live_owner = unique_name("transfer_live_owner");
+        let declared_owner = unique_name("transfer_decl_owner");
+
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{live_owner}";
+            DROP ROLE IF EXISTS "{declared_owner}";
+            CREATE ROLE "{live_owner}" NOLOGIN;
+            CREATE ROLE "{declared_owner}" NOLOGIN;
+            CREATE SCHEMA "{schema}" AUTHORIZATION "{live_owner}";
+            "#
+        ));
+
+        let manifest_file = write_temp_manifest(&format!(
+            r#"
+schemas:
+  - name: {schema}
+    owner: {declared_owner}
+"#
+        ));
+
+        // Refused without the flag.
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("allow-schema-owner-transfers"));
+        assert_eq!(
+            query_schema_owner(&schema),
+            Some(live_owner.clone()),
+            "ownership must be untouched after refusal"
+        );
+
+        // Allowed with the flag.
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+                "--allow-schema-owner-transfers",
+            ])
+            .assert()
+            .success();
+        assert_eq!(
+            query_schema_owner(&schema),
+            Some(declared_owner.clone()),
+            "flagged apply should transfer ownership"
+        );
+
+        // Cleanup
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{live_owner}";
+            DROP ROLE IF EXISTS "{declared_owner}";
+            "#
+        ));
+    }
+
     /// Inspect without a manifest shows PUBLIC grants for the current database.
     /// A fresh database should have at least CONNECT and TEMPORARY granted to
     /// PUBLIC, and USAGE on the "public" schema.
