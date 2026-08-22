@@ -34,7 +34,11 @@ status:
     members_added: 1
     members_removed: 0
     total: 8
+  plan_warnings:
+    - "adopt mode transfers ownership of schema \"etl\" to \"pgloader_pg\""
 ```
+
+`plan_warnings` lists advisory warnings from the last reconciliation's computed plan — an undeclared `default_owner`, or adopt-mode schema ownership transfers. The policy still reconciles; these are shapes worth reviewing, surfaced so they outlive the operator log window.
 
 An insufficient-privilege failure looks more like:
 

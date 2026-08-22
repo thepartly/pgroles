@@ -118,8 +118,11 @@ pgroles apply --bundle path/to/pgroles.bundle.yaml --database-url postgres://loc
 | `--database-url` | PostgreSQL connection string (or `DATABASE_URL` env) |
 | `--mode` | Reconciliation mode: `authoritative` (default), `additive`, or `adopt` |
 | `--dry-run` | Print the SQL without executing it |
+| `--allow-schema-owner-transfers` | Permit adopt mode to run `ALTER SCHEMA ... OWNER TO` on schemas whose live owner differs |
 
 `apply` executes the plan inside a single database transaction. Individual changes may still render to multiple SQL statements internally, but the whole apply either commits or rolls back together.
+
+In adopt mode, apply **refuses** a plan that would transfer schema ownership (`ALTER SCHEMA ... OWNER TO ...`) unless `--allow-schema-owner-transfers` is passed — adopt filters role drops, not ownership convergence, and a silent transfer away from a live owner has broken brownfield rollouts before. `diff --mode adopt` warns instead of refusing, so CI drift checks keep working.
 
 Before executing changes, `apply` detects the connecting role's privilege level — true superuser, cloud provider superuser (for the explicitly supported providers), or regular user — and warns about any planned changes that exceed the detected privileges (for example setting `SUPERUSER` or `BYPASSRLS` through a managed-service admin role).
 

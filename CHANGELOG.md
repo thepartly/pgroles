@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Plan-time warnings for silently-destructive policy shapes.** `diff`/`apply` warn when adopt mode transfers schema ownership away from the live owner (adopt filters role drops, not ownership convergence), and — in both the CLI and the operator — when `default_owner` names a role the policy never declares, since every un-owned schema binding silently resolves to it while the role's own privileges stay uninspected. (#201)
+- **`preserve_undeclared_grants` per-role adoption assertion.** A role marked with the flag keeps its undeclared in-scope grants through adopt and authoritative convergence — brownfield access survives while declared privileges still converge. Explicit `ensure: absent` assertions revoke regardless, so the flag is a reviewable stepping stone, not an escape hatch: remove it once the manifest declares the role's real grant surface. Available on both manifest roles and the operator's `RoleSpec`. (#201)
+- **Adopt mode refuses schema-ownership transfers without `--allow-schema-owner-transfers`.** Adopt filters role drops, not ownership convergence; `apply --mode adopt` now fails a plan containing `ALTER SCHEMA ... OWNER TO ...` on a schema whose live owner differs, naming the schemas and the flag. `diff` warns instead of refusing so CI drift checks keep working. (#201)
+- **Operator surfaces plan warnings in policy status.** `status.plan_warnings` records advisory warnings from the last reconciliation — undeclared `default_owner`, adopt-mode ownership transfers — so they outlive the reconcile log window. (#201)
+- **Plan-time CLI warnings for silently-destructive policy shapes.** `diff`/`apply` warn when adopt mode transfers schema ownership away from the live owner (adopt filters role drops, not ownership convergence), and both the CLI and the operator warn when `default_owner` names a role the policy never declares, since every un-owned schema binding silently resolves to it while the role's own privileges stay uninspected. (#201)
 
 ## [0.10.0-alpha.1] - 2026-08-21
 
