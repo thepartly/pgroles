@@ -4731,6 +4731,123 @@ grants:
         ));
     }
 
+    /// A pre-existing role that owns relations and holds explicit grants must
+    /// not have its inherent owner privileges revoked (issue #201). Once a
+    /// grant materializes the table ACL, PostgreSQL records the owner's
+    /// implicit privileges in it; inspection must not read that entry as
+    /// granted state and plan revokes against it.
+    #[test]
+    #[ignore]
+    fn adopt_mode_does_not_revoke_owner_inherent_privileges() {
+        let schema = unique_name("owner_acl_schema");
+        let owner = unique_name("owner_acl_role");
+
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{owner}";
+            CREATE ROLE "{owner}" NOLOGIN;
+            CREATE SCHEMA "{schema}" AUTHORIZATION "{owner}";
+            CREATE TABLE "{schema}".widgets (id integer);
+            ALTER TABLE "{schema}".widgets OWNER TO "{owner}";
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}"
+                TO "{owner}";
+            "#
+        ));
+
+        let manifest_file = write_temp_manifest(&format!(
+            r#"
+default_owner: {owner}
+
+roles:
+  - name: {owner}
+    nologin: true
+
+profiles:
+  writer:
+    grants:
+      - object: {{ type: schema }}
+        privileges: [USAGE]
+      - object: {{ type: table, name: "*" }}
+        privileges: [SELECT, INSERT]
+
+schemas:
+  - name: {schema}
+    profiles: [writer]
+"#
+        ));
+
+        let diff_output = pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .output()
+            .expect("failed to run diff");
+        let diff_stdout = String::from_utf8_lossy(&diff_output.stdout);
+        assert!(
+            !diff_stdout.contains("REVOKE"),
+            "adopt plan must not revoke anything from the table owner; got:\n{diff_stdout}"
+        );
+
+        pgroles_cmd()
+            .args([
+                "apply",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success();
+
+        // The owner keeps DML on its own tables — including DELETE and
+        // TRUNCATE/REFERENCES/TRIGGER, which nobody ever granted explicitly.
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+        ] {
+            assert!(
+                query_has_relation_privilege(&owner, &format!("{schema}.widgets"), privilege),
+                "owner should retain {privilege} on its own table"
+            );
+        }
+
+        // Converged: no regrant churn on re-inspection.
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest_file.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No changes needed"));
+
+        // Cleanup
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{owner}";
+            "#
+        ));
+    }
+
     /// Inspect without a manifest shows PUBLIC grants for the current database.
     /// A fresh database should have at least CONNECT and TEMPORARY granted to
     /// PUBLIC, and USAGE on the "public" schema.

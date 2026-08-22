@@ -411,6 +411,10 @@ pgroles apply --database-url postgres://localhost/mydb --mode adopt
 
 Adopt mode filters out: `DROP ROLE`, `DROP OWNED`, `REASSIGN OWNED`, and `TERMINATE SESSIONS`. Revokes and membership removals for managed roles still apply. `ensure: absent` rules apply in this mode.
 
+{% callout type="warning" title="Adopt does not preserve undeclared grants" %}
+Adopt only filters role drops. Every privilege a declared role holds that the manifest does not declare — including out-of-band grants from migrations or manual SQL — is revoked. Review the full plan (`pgroles diff --mode adopt`) before applying, and stay in additive mode until the manifest declares everything the database relies on.
+{% /callout %}
+
 {% callout type="note" title="Adoption path" %}
 A common adoption path is: start with `--mode additive` to verify the manifest produces the right grants, then move to `--mode adopt` to start revoking excess grants within managed roles, and finally switch to `--mode authoritative` when you're confident the manifest is complete.
 {% /callout %}
