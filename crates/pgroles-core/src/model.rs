@@ -561,6 +561,7 @@ mod tests {
         let definition = RoleDefinition {
             name: "test".to_string(),
             external: false,
+            preserve_undeclared_grants: false,
             login: Some(true),
             superuser: None,
             createdb: Some(true),

@@ -40,6 +40,7 @@ pub fn role_graph_to_manifest(graph: &RoleGraph) -> PolicyManifest {
             RoleDefinition {
                 name: name.clone(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: if state.login != defaults.login {
                     Some(state.login)
                 } else {

@@ -437,6 +437,15 @@ pub struct RoleDefinition {
     #[serde(default, skip_serializing_if = "is_false")]
     pub external: bool,
 
+    /// Preserve this role's undeclared in-scope object grants during
+    /// convergence. Revokes against the role are skipped unless the revoked
+    /// privileges are explicitly asserted absent (`ensure: absent`), so a
+    /// brownfield role can be brought under pgroles management before its
+    /// full grant surface is declared. Declared grants still converge and
+    /// owner-inherent privileges are unaffected.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserve_undeclared_grants: bool,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<bool>,
 
@@ -1145,6 +1154,7 @@ pub fn expand_manifest(manifest: &PolicyManifest) -> Result<ExpandedManifest, Ma
             roles.push(RoleDefinition {
                 name: role_name.clone(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: profile.login,
                 superuser: None,
                 createdb: None,

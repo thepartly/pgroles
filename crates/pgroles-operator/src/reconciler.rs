@@ -208,6 +208,39 @@ const K8S_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// `call` names the request in the log and in the resulting status condition,
 /// so the next occurrence identifies which request stalled instead of leaving
 /// a silent gap in the log.
+/// Advisory warnings about a computed plan, mirrored into
+/// `status.plan_warnings` so they outlive the reconcile log window.
+///
+/// Two shapes today: an undeclared `default_owner` (uninspected role that
+/// still claims every un-owned schema binding), and adopt-mode schema
+/// ownership transfers.
+pub(crate) fn plan_advisory_warnings(
+    manifest: &pgroles_core::manifest::PolicyManifest,
+    expanded: &pgroles_core::manifest::ExpandedManifest,
+    mode: pgroles_core::diff::ReconciliationMode,
+    changes: &[pgroles_core::diff::Change],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(owner) = &manifest.default_owner
+        && !expanded.roles.iter().any(|role| &role.name == owner)
+    {
+        warnings.push(format!(
+            "default_owner \"{owner}\" is not declared under roles; it will not be inspected \
+             or converged, but every schema binding without an explicit owner resolves to it"
+        ));
+    }
+    if mode == pgroles_core::diff::ReconciliationMode::Adopt {
+        for change in changes {
+            if let pgroles_core::diff::Change::AlterSchemaOwner { name, owner } = change {
+                warnings.push(format!(
+                    "adopt mode transfers ownership of schema \"{name}\" to \"{owner}\""
+                ));
+            }
+        }
+    }
+    warnings
+}
+
 async fn bounded_k8s_call<T, F>(call: &'static str, future: F) -> Result<T, ReconcileError>
 where
     F: std::future::Future<Output = Result<T, kube::Error>>,
@@ -1343,6 +1376,16 @@ async fn apply_under_lock(
         reconciliation_mode,
     );
     changes = pgroles_core::diff::filter_external_role_changes(changes, &expanded.roles);
+    changes = pgroles_core::diff::filter_preserved_grant_revokes(
+        changes,
+        &expanded.roles,
+        &effective_desired,
+    );
+
+    let plan_warnings = plan_advisory_warnings(manifest, expanded, reconciliation_mode, &changes);
+    if !plan_warnings.is_empty() {
+        tracing::warn!(name, namespace, warnings = ?plan_warnings, "plan advisory warnings");
+    }
 
     let resolved_passwords = resolve_passwords_from_secrets(ctx, resource, namespace).await?;
     let (password_changes, mut applied_password_source_versions) =
@@ -1742,6 +1785,7 @@ async fn apply_under_lock(
                 status.last_attempted_generation = generation;
                 status.last_successful_reconcile_time = Some(crate::crd::now_rfc3339());
                 status.change_summary = Some(summary);
+                status.plan_warnings = plan_warnings.clone();
                 status.last_reconcile_mode = Some(PolicyMode::Apply);
                 status.last_error = None;
                 status.applied_password_source_versions = applied_password_source_versions;
@@ -2002,6 +2046,7 @@ async fn apply_under_lock(
                                 });
                                 status.last_attempted_generation = generation;
                                 status.change_summary = Some(summary.clone());
+                                status.plan_warnings = plan_warnings.clone();
                                 status.last_reconcile_mode = Some(PolicyMode::Apply);
                                 status.last_error = None;
                                 status.transient_failure_count = 0;
@@ -2152,6 +2197,7 @@ async fn apply_under_lock(
                             status.last_attempted_generation = generation;
                             status.last_successful_reconcile_time = Some(crate::crd::now_rfc3339());
                             status.change_summary = Some(summary);
+                            status.plan_warnings = plan_warnings.clone();
                             status.last_reconcile_mode = Some(PolicyMode::Apply);
                             status.last_error = None;
                             status.applied_password_source_versions =
@@ -2303,6 +2349,7 @@ async fn apply_under_lock(
                                 });
                                 status.last_attempted_generation = generation;
                                 status.change_summary = Some(summary.clone());
+                                status.plan_warnings = plan_warnings.clone();
                                 status.current_plan_ref = Some(crate::crd::PlanReference {
                                     name: replacement.clone(),
                                 });
@@ -2363,6 +2410,7 @@ async fn apply_under_lock(
                             });
                             status.last_attempted_generation = generation;
                             status.change_summary = Some(summary.clone());
+                            status.plan_warnings = plan_warnings.clone();
                             // The summary and the plan reference must always
                             // describe the same effects; the plan was just
                             // confirmed to still hold them.
@@ -2462,6 +2510,7 @@ async fn apply_under_lock(
                 });
                 status.last_attempted_generation = generation;
                 status.change_summary = Some(summary.clone());
+                status.plan_warnings = plan_warnings.clone();
                 status.last_reconcile_mode = Some(PolicyMode::Apply);
                 status.last_error = None;
                 status.transient_failure_count = 0;
@@ -3472,6 +3521,67 @@ mod tests {
     }
 
     #[test]
+    fn plan_advisory_warnings_covers_undeclared_default_owner_and_adopt_transfers() {
+        use pgroles_core::manifest::{expand_manifest, parse_manifest};
+
+        let manifest_with_owner =
+            parse_manifest("default_owner: pgloader_pg").expect("manifest parses");
+        let role_manifest = parse_manifest("roles:\n  - name: app_rw\n").expect("manifest parses");
+        let mut expanded = expand_manifest(&role_manifest).expect("expands");
+
+        // Undeclared default owner is flagged regardless of mode.
+        let warnings = plan_advisory_warnings(
+            &manifest_with_owner,
+            &expanded,
+            pgroles_core::diff::ReconciliationMode::Authoritative,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("pgloader_pg"));
+
+        // Declared default owner is not.
+        expanded.roles.push(
+            expand_manifest(&parse_manifest("roles:\n  - name: pgloader_pg\n").expect("parses"))
+                .expect("expands")
+                .roles
+                .pop()
+                .expect("one role"),
+        );
+        assert!(
+            plan_advisory_warnings(
+                &manifest_with_owner,
+                &expanded,
+                pgroles_core::diff::ReconciliationMode::Authoritative,
+                &[],
+            )
+            .is_empty()
+        );
+
+        // Adopt-mode schema ownership transfer is flagged; authoritative is not.
+        let changes = vec![pgroles_core::diff::Change::AlterSchemaOwner {
+            name: "etl".to_string(),
+            owner: "pgloader_pg".to_string(),
+        }];
+        let adopt_warnings = plan_advisory_warnings(
+            &manifest_with_owner,
+            &expanded,
+            pgroles_core::diff::ReconciliationMode::Adopt,
+            &changes,
+        );
+        assert_eq!(adopt_warnings.len(), 1);
+        assert!(adopt_warnings[0].contains("etl"));
+        assert!(
+            plan_advisory_warnings(
+                &manifest_with_owner,
+                &expanded,
+                pgroles_core::diff::ReconciliationMode::Authoritative,
+                &changes,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn the_overlay_handed_to_candidates_is_only_what_the_overlay_added() {
         let mut declared = pgroles_core::model::RoleGraph::default();
         declared.memberships.insert(edge("app_rw", "service"));
@@ -3657,6 +3767,7 @@ mod tests {
                 roles: vec![RoleSpec {
                     name: role_name.to_string(),
                     external: false,
+                    preserve_undeclared_grants: false,
                     login: Some(true),
                     superuser: None,
                     createdb: None,
@@ -3888,6 +3999,7 @@ mod tests {
                     RoleSpec {
                         name: "app".to_string(),
                         external: false,
+                        preserve_undeclared_grants: false,
                         login: Some(true),
                         superuser: None,
                         createdb: None,
@@ -3910,6 +4022,7 @@ mod tests {
                     RoleSpec {
                         name: "reporter".to_string(),
                         external: false,
+                        preserve_undeclared_grants: false,
                         login: Some(true),
                         superuser: None,
                         createdb: None,

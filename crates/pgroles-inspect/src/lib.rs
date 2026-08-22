@@ -762,14 +762,9 @@ pub async fn inspect_all(
         // No wildcard patterns and no PUBLIC scopes: `generate` reads only
         // explicit managed-role state and never invents PUBLIC or absence
         // policy from what it finds.
-        let privileges = privileges::fetch_privileges_with_wildcards(
-            pool,
-            &schema_refs,
-            &role_refs,
-            &[],
-            &[],
-        )
-        .await?;
+        let privileges =
+            privileges::fetch_privileges_with_wildcards(pool, &schema_refs, &role_refs, &[], &[])
+                .await?;
         for (key, state) in privileges.grants {
             graph.grants.insert(key, state);
         }

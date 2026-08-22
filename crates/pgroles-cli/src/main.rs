@@ -22,7 +22,7 @@ use pgroles_cli::{
 };
 use pgroles_core::diff::{
     ReconciliationMode, additive_ignores_absence_assertions, filter_changes,
-    filter_external_role_changes,
+    filter_external_role_changes, filter_preserved_grant_revokes,
 };
 use pgroles_core::ownership::validate_changes_against_managed_surface;
 use pgroles_core::visual::{self, VisualManagedScope, VisualSource};
@@ -118,6 +118,14 @@ enum Commands {
         /// - adopt: manage declared roles fully, but never drop undeclared roles.
         #[arg(long, default_value = "authoritative")]
         mode: CliReconciliationMode,
+
+        /// Allow adopt mode to transfer schema ownership to the declared
+        /// owner. Without this flag, apply refuses an adopt plan that would
+        /// run `ALTER SCHEMA ... OWNER TO` on a schema whose live owner
+        /// differs; additive filters these transfers and authoritative
+        /// intends them.
+        #[arg(long)]
+        allow_schema_owner_transfers: bool,
     },
 
     /// Inspect the current database state for roles and privileges.
@@ -441,6 +449,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             database_url,
             dry_run,
             mode,
+            allow_schema_owner_transfers,
         } => {
             cmd_apply(
                 file.as_deref(),
@@ -448,6 +457,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 &database_url,
                 dry_run,
                 mode.into(),
+                allow_schema_owner_transfers,
             )
             .await?;
             Ok(ExitCode::SUCCESS)
@@ -829,15 +839,19 @@ async fn cmd_diff(
         let current = inspect_current_for_plan_with_config(&pool, &inspect_config).await?;
         info!(%mode, "reconciliation mode");
         warn_additive_absence_assertions(&validated.composed.desired, mode);
-        let changes = filter_external_role_changes(
-            filter_changes(
-                apply_role_retirements(
-                    compute_plan(&current, &validated.composed.desired),
-                    &validated.composed.manifest.retirements,
+        let changes = filter_preserved_grant_revokes(
+            filter_external_role_changes(
+                filter_changes(
+                    apply_role_retirements(
+                        compute_plan(&current, &validated.composed.desired),
+                        &validated.composed.manifest.retirements,
+                    ),
+                    mode,
                 ),
-                mode,
+                &validated.composed.expanded.roles,
             ),
             &validated.composed.expanded.roles,
+            &validated.composed.desired,
         );
         warn_adopt_schema_owner_transfers(mode, &changes);
         warn_undeclared_default_owner(
@@ -899,15 +913,19 @@ async fn cmd_diff(
 
     info!(%mode, "reconciliation mode");
     warn_additive_absence_assertions(&validated.desired, mode);
-    let changes = filter_external_role_changes(
-        filter_changes(
-            apply_role_retirements(
-                compute_plan(&current, &validated.desired),
-                &validated.manifest.retirements,
+    let changes = filter_preserved_grant_revokes(
+        filter_external_role_changes(
+            filter_changes(
+                apply_role_retirements(
+                    compute_plan(&current, &validated.desired),
+                    &validated.manifest.retirements,
+                ),
+                mode,
             ),
-            mode,
+            &validated.expanded.roles,
         ),
         &validated.expanded.roles,
+        &validated.desired,
     );
     warn_adopt_schema_owner_transfers(mode, &changes);
     warn_undeclared_default_owner(
@@ -960,6 +978,7 @@ async fn cmd_apply(
     database_url: &str,
     dry_run: bool,
     mode: ReconciliationMode,
+    allow_schema_owner_transfers: bool,
 ) -> Result<()> {
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
@@ -977,17 +996,22 @@ async fn cmd_apply(
 
         info!(%mode, "reconciliation mode");
         warn_additive_absence_assertions(&validated.composed.desired, mode);
-        let changes = filter_external_role_changes(
-            filter_changes(
-                apply_role_retirements(
-                    compute_plan(&current, &validated.composed.desired),
-                    &validated.composed.manifest.retirements,
+        let changes = filter_preserved_grant_revokes(
+            filter_external_role_changes(
+                filter_changes(
+                    apply_role_retirements(
+                        compute_plan(&current, &validated.composed.desired),
+                        &validated.composed.manifest.retirements,
+                    ),
+                    mode,
                 ),
-                mode,
+                &validated.composed.expanded.roles,
             ),
             &validated.composed.expanded.roles,
+            &validated.composed.desired,
         );
         warn_adopt_schema_owner_transfers(mode, &changes);
+        enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
         warn_undeclared_default_owner(
             validated.composed.manifest.default_owner.as_deref(),
             &validated.composed.expanded.roles,
@@ -1072,17 +1096,22 @@ async fn cmd_apply(
 
     info!(%mode, "reconciliation mode");
     warn_additive_absence_assertions(&validated.desired, mode);
-    let changes = filter_external_role_changes(
-        filter_changes(
-            apply_role_retirements(
-                compute_plan(&current, &validated.desired),
-                &validated.manifest.retirements,
+    let changes = filter_preserved_grant_revokes(
+        filter_external_role_changes(
+            filter_changes(
+                apply_role_retirements(
+                    compute_plan(&current, &validated.desired),
+                    &validated.manifest.retirements,
+                ),
+                mode,
             ),
-            mode,
+            &validated.expanded.roles,
         ),
         &validated.expanded.roles,
+        &validated.desired,
     );
     warn_adopt_schema_owner_transfers(mode, &changes);
+    enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
     warn_undeclared_default_owner(
         validated.manifest.default_owner.as_deref(),
         &validated.expanded.roles,
@@ -1755,6 +1784,41 @@ fn warn_additive_absence_assertions(
              use adopt or authoritative mode to enforce absence"
         );
     }
+}
+
+/// Refuse an adopt-mode apply that would transfer schema ownership.
+///
+/// Adopt filters role drops, not ownership convergence: a binding whose
+/// declared owner differs from the live one is transferred even under adopt,
+/// which has surprised brownfield adopters whose schemas were owned by
+/// another system. `--allow-schema-owner-transfers` acknowledges it.
+fn enforce_adopt_owner_transfer_guard(
+    mode: ReconciliationMode,
+    allow_schema_owner_transfers: bool,
+    changes: &[pgroles_core::diff::Change],
+) -> Result<()> {
+    if mode != ReconciliationMode::Adopt || allow_schema_owner_transfers {
+        return Ok(());
+    }
+    let transfers: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            pgroles_core::diff::Change::AlterSchemaOwner { name, owner } => {
+                Some(format!("\"{name}\" -> \"{owner}\""))
+            }
+            _ => None,
+        })
+        .collect();
+    if transfers.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "adopt mode would transfer ownership of {} schema(s): {}. \
+         Pass --allow-schema-owner-transfers to permit this, use additive mode to skip \
+         transfers, or declare each schema's current owner.",
+        transfers.len(),
+        transfers.join(", ")
+    );
 }
 
 /// Warn when adopt mode transfers schema ownership.
