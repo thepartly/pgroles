@@ -844,7 +844,6 @@ async fn cmd_diff(
             validated.composed.manifest.default_owner.as_deref(),
             &validated.composed.expanded.roles,
         );
-        warn_owner_targeted_changes(&pool, &changes).await?;
         let resolved_passwords = resolve_passwords(&validated.composed.expanded)
             .context("failed to resolve role passwords")?;
         let changes = inject_password_changes(changes, &resolved_passwords);
@@ -915,7 +914,6 @@ async fn cmd_diff(
         validated.manifest.default_owner.as_deref(),
         &validated.expanded.roles,
     );
-    warn_owner_targeted_changes(&pool, &changes).await?;
     let resolved_passwords =
         resolve_passwords(&validated.expanded).context("failed to resolve role passwords")?;
     let changes = inject_password_changes(changes, &resolved_passwords);
@@ -994,7 +992,6 @@ async fn cmd_apply(
             validated.composed.manifest.default_owner.as_deref(),
             &validated.composed.expanded.roles,
         );
-        warn_owner_targeted_changes(&pool, &changes).await?;
         let resolved_passwords = resolve_passwords(&validated.composed.expanded)
             .context("failed to resolve role passwords")?;
         let changes = inject_password_changes(changes, &resolved_passwords);
@@ -1090,7 +1087,6 @@ async fn cmd_apply(
         validated.manifest.default_owner.as_deref(),
         &validated.expanded.roles,
     );
-    warn_owner_targeted_changes(&pool, &changes).await?;
     let resolved_passwords =
         resolve_passwords(&validated.expanded).context("failed to resolve role passwords")?;
     let changes = inject_password_changes(changes, &resolved_passwords);
@@ -1759,63 +1755,6 @@ fn warn_additive_absence_assertions(
              use adopt or authoritative mode to enforce absence"
         );
     }
-}
-
-/// Warn when the plan grants or revokes privileges on roles that own
-/// relations in the affected schemas.
-///
-/// Inspection cannot see an ACL entry whose grantee is the object's owner —
-/// PostgreSQL records the owner's inherent privileges there, and treating it
-/// as granted state made older plans revoke privileges nobody had granted.
-/// Two consequences deserve a warning:
-///
-/// - a `Revoke` against a role's own objects can break ownership-based
-///   access (foreign-key key-share checks run with the table owner's
-///   privileges);
-/// - a `Grant` to a role on its own objects is invisible to re-inspection,
-///   so it will be re-emitted on every reconcile.
-async fn warn_owner_targeted_changes(
-    pool: &PgPool,
-    changes: &[pgroles_core::diff::Change],
-) -> Result<()> {
-    let mut schemas: Vec<&str> = Vec::new();
-    let mut targets: Vec<&str> = Vec::new();
-    for change in changes {
-        if let pgroles_core::diff::Change::Grant { role, schema, .. }
-        | pgroles_core::diff::Change::Revoke { role, schema, .. } = change
-        {
-            if let Some(schema) = schema.as_deref()
-                && !schemas.contains(&schema)
-            {
-                schemas.push(schema);
-            }
-            if !targets.contains(&role.as_str()) {
-                targets.push(role.as_str());
-            }
-        }
-    }
-    if schemas.is_empty() || targets.is_empty() {
-        return Ok(());
-    }
-
-    let owned = pgroles_inspect::fetch_owned_relation_counts(pool, &schemas, &targets)
-        .await
-        .context("failed to inspect relation ownership")?;
-    for change in changes {
-        let (role, change_kind) = match change {
-            pgroles_core::diff::Change::Grant { role, .. } => (role, "grant"),
-            pgroles_core::diff::Change::Revoke { role, .. } => (role, "revoke"),
-            _ => continue,
-        };
-        if let Some(count) = owned.get(role.as_str()) {
-            eprintln!(
-                "Warning: plan {change_kind}s privileges to \"{role}\", which owns {count} \
-                 relation(s) in the affected schemas; owner privileges are implicit, so this \
-                 may break owner access or be re-emitted on every reconcile"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Warn when adopt mode transfers schema ownership.

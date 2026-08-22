@@ -33,8 +33,8 @@ pub use identity::detect_system_identifier;
 pub use memberships::fetch_memberships;
 pub use preflight::{AuthorityIssue, preflight_authority_issues};
 pub use privileges::{
-    fetch_column_level_grants, fetch_database_privileges, fetch_object_inventory,
-    fetch_owned_relation_counts, fetch_privileges, fetch_relation_inventory,
+    fetch_column_level_grants, fetch_database_privileges, fetch_object_inventory, fetch_privileges,
+    fetch_relation_inventory,
 };
 pub use public_grants::{PublicGrants, fetch_public_grants, format_public_grants};
 pub use roles::fetch_roles;
@@ -762,21 +762,28 @@ pub async fn inspect_all(
         // No wildcard patterns and no PUBLIC scopes: `generate` reads only
         // explicit managed-role state and never invents PUBLIC or absence
         // policy from what it finds.
-        let privilege_grants =
-            privileges::fetch_privileges_with_wildcards(pool, &schema_refs, &role_refs, &[], &[])
-                .await?
-                .grants;
-        for (key, state) in privilege_grants {
+        let privileges = privileges::fetch_privileges_with_wildcards(
+            pool,
+            &schema_refs,
+            &role_refs,
+            &[],
+            &[],
+        )
+        .await?;
+        for (key, state) in privileges.grants {
             graph.grants.insert(key, state);
         }
+        // Owner-inherent entries are never exported: nobody granted them.
+        graph.inherent_grants.extend(privileges.inherent);
         remove_redundant_schema_owner_grants(&mut graph);
     }
 
     // Database privileges
-    let db_grants = fetch_database_privileges(pool, &role_refs).await?;
+    let (db_grants, db_inherent) = fetch_database_privileges(pool, &role_refs).await?;
     for (key, state) in db_grants {
         graph.grants.insert(key, state);
     }
+    graph.inherent_grants.extend(db_inherent);
 
     // Default privileges (schema layer only — no declared scopes, so no
     // global rows and no PUBLIC rows)

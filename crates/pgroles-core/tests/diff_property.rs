@@ -309,6 +309,7 @@ fn gen_graph(rng: &mut Rng, allow_none: bool, messy: bool) -> RoleGraph {
         roles,
         schemas: gen_schemas(rng, allow_none),
         grants: gen_grants(rng, &role_names),
+        inherent_grants: BTreeSet::new(),
         grant_absences: BTreeMap::new(),
         default_privileges: gen_default_privs(rng, &role_names),
         default_privilege_absences: BTreeMap::new(),

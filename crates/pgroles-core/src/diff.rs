@@ -771,6 +771,12 @@ fn diff_grants(
                     continue;
                 }
 
+                // An owner-grantee entry carries the owner's inherent
+                // privileges; none of it is revocable state.
+                if current.inherent_grants.contains(key) {
+                    continue;
+                }
+
                 let to_remove: BTreeSet<Privilege> = current_state
                     .privileges
                     .difference(&desired_state.privileges)
@@ -792,6 +798,11 @@ fn diff_grants(
             continue;
         }
 
+        // Owner-inherent entries are not revocable state.
+        if current.inherent_grants.contains(key) {
+            continue;
+        }
+
         let to_revoke = shadow_filter(key, current_state.privileges.clone());
         if !to_revoke.is_empty() {
             revokes.entry(key.clone()).or_default().extend(to_revoke);
@@ -801,7 +812,10 @@ fn diff_grants(
     // Absence assertions: revoke `absent ∩ current`. A wildcard assertion
     // range-scans every current key under its (grantee, type, schema) prefix,
     // so one `ON ALL` revoke covers however many objects still hold the
-    // privilege, and an empty range is vacuously converged.
+    // privilege, and an empty range is vacuously converged. Owner-inherent
+    // entries are excluded throughout: an owner's privileges are intrinsic,
+    // so an absence assertion cannot be enforced against them and revoking
+    // would only break owner access.
     for (key, absent_privileges) in &desired.grant_absences {
         let held: BTreeSet<Privilege> = if key.name.as_deref() == Some("*") {
             let range_start = GrantKey {
@@ -816,8 +830,11 @@ fn diff_grants(
                 .take_while(|(k, _)| {
                     k.role == key.role && k.object_type == key.object_type && k.schema == key.schema
                 })
+                .filter(|(k, _)| !current.inherent_grants.contains(k))
                 .flat_map(|(_, state)| state.privileges.iter().copied())
                 .collect()
+        } else if current.inherent_grants.contains(key) {
+            BTreeSet::new()
         } else {
             current
                 .grants
@@ -1491,6 +1508,96 @@ memberships:
             }
             other => panic!("expected Grant, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn owner_inherent_entry_is_never_revoked() {
+        let key = GrantKey {
+            role: "app_owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".to_string()),
+            name: Some("widgets".to_string()),
+        };
+        let mut current = empty_graph();
+        current.grants.insert(
+            key.clone(),
+            GrantState {
+                privileges: BTreeSet::from([
+                    Privilege::Select,
+                    Privilege::Insert,
+                    Privilege::Truncate,
+                ]),
+            },
+        );
+        current.inherent_grants.insert(key);
+
+        // Nothing in the manifest covers the owner's table entry.
+        let changes = diff(&current, &empty_graph());
+        assert!(
+            changes.iter().all(|change| !matches!(
+                change,
+                Change::Revoke { role, .. } if role.as_str() == "app_owner"
+            )),
+            "owner-inherent entries must not be revoked, got: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn owner_inherent_entry_covers_declared_grant() {
+        // The owner inherently holds every privilege, so a manifest declaring
+        // a subset on the owner's own table needs no GRANT and no REVOKE.
+        let key = GrantKey {
+            role: "app_owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".to_string()),
+            name: Some("widgets".to_string()),
+        };
+        let mut current = empty_graph();
+        current.grants.insert(
+            key.clone(),
+            GrantState {
+                privileges: BTreeSet::from([Privilege::Select, Privilege::Insert]),
+            },
+        );
+        current.inherent_grants.insert(key);
+        let mut desired = empty_graph();
+        desired.grants.insert(
+            GrantKey {
+                role: "app_owner".into(),
+                object_type: ObjectType::Table,
+                schema: Some("app".to_string()),
+                name: Some("widgets".to_string()),
+            },
+            GrantState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+
+        assert!(diff(&current, &desired).is_empty());
+    }
+
+    #[test]
+    fn absence_assertions_cannot_target_owner_inherent_privileges() {
+        let key = GrantKey {
+            role: "app_owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".to_string()),
+            name: Some("widgets".to_string()),
+        };
+        let mut current = empty_graph();
+        current.grants.insert(
+            key.clone(),
+            GrantState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        current.inherent_grants.insert(key.clone());
+        let mut desired = empty_graph();
+        desired
+            .grant_absences
+            .insert(key, BTreeSet::from([Privilege::Select]));
+
+        assert!(diff(&current, &desired).is_empty());
     }
 
     #[test]

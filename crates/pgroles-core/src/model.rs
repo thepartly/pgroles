@@ -366,6 +366,17 @@ pub struct RoleGraph {
     /// Privileges asserted absent per default-privilege rule.
     /// Only the desired graph populates this; inspection leaves it empty.
     pub default_privilege_absences: BTreeMap<DefaultPrivKey, BTreeSet<Privilege>>,
+    /// Grant targets whose current ACL entry belongs to the object's owner.
+    ///
+    /// PostgreSQL records a grantee==owner entry carrying the owner's
+    /// inherent privileges as soon as any grant materializes an object's
+    /// ACL. Inspection keeps those entries here rather than in `grants`
+    /// semantics alone: the diff engine never revokes them (the privilege
+    /// is intrinsic and revoking breaks owner DML and FK key-share checks)
+    /// and treats them as covering any declared grant on the same target,
+    /// so declaring privileges on an owner's own objects still converges.
+    /// Only populated by inspection.
+    pub inherent_grants: BTreeSet<GrantKey>,
 }
 
 impl RoleGraph {
