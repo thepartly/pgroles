@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inspection no longer treats an object owner's inherent ACL entry as granted state.** PostgreSQL records the owner's implicit privileges (`arwdDxtm`) in a relation's ACL as soon as any grant materializes it. Inspection read that entry back as explicit grants, so convergence planned `REVOKE`s against table owners for privileges nobody had granted — including `TRUNCATE`, `REFERENCES`, and `TRIGGER` — and applying such a plan broke the owner's DML and foreign-key key-share checks. Owner-grantee entries are now excluded from relation, schema, function, type, and database privilege inspection, mirroring what schema-level reconciliation already did. Because of this, a manifest that declares explicit privileges for a role on its own objects can no longer converge (the entries are invisible to re-inspection); declare privileges on an owner's objects for other roles instead. (#201)
+
+### Added
+
+- **Plan-time warnings for destructive convergence against owners.** `diff`/`apply` warn when a plan revokes or grants privileges to a role owning relations in the affected schemas (revokes can break ownership-based access; grants to owners re-emit on every reconcile), when adopt mode transfers schema ownership away from the live owner, and — in both the CLI and the operator — when `default_owner` names a role the policy never declares, since every un-owned schema binding silently resolves to it. (#201)
+
 ## [0.10.0-alpha.1] - 2026-08-21
 
 ### Added

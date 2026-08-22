@@ -67,6 +67,10 @@ default_owner: app_migrator
 
 Individual schemas can override this with their own `owner` field.
 
+`default_owner` is an ownership claim, not an annotation: every schema binding without an explicit `owner:` resolves to it, so plans include `ALTER SCHEMA ... OWNER TO <default_owner>` wherever the live schema owner differs. If the named role is not declared under `roles:`, pgroles warns — the role's own privileges are neither inspected nor converged, while every un-owned binding still resolves to it.
+
+Inspection never treats an object's owner-grantee ACL entry as granted state: PostgreSQL records the owner's inherent privileges there once any grant materializes the ACL, and planning revokes against it would strip access PostgreSQL considers intrinsic (including foreign-key key-share checks, which run with the table owner's privileges). Explicit grants made to a role on its own objects are therefore invisible to re-inspection and will be re-emitted on every reconcile — declare privileges on an owner's objects for other roles instead.
+
 ## profiles
 
 Profiles are reusable templates that expand into concrete roles, grants, and default privileges when bound to schemas.

@@ -1656,6 +1656,12 @@ fn all_privileges() -> BTreeSet<Privilege> {
 ///   'r' = table, 'v' = view, 'm' = materialized view, 'S' = sequence, 'p' = partitioned table
 ///
 /// Only explicit ACLs are inspected. NULL ACLs produce no rows.
+///
+/// ACL entries whose grantee is the relation's owner are excluded: once any
+/// grant materializes a relation's ACL, PostgreSQL records the owner's
+/// inherent privileges in it, and treating that entry as granted state makes
+/// the diff plan revokes of privileges nobody granted (breaking owner DML and
+/// owner-executed FK key-share checks).
 async fn fetch_relation_privileges(
     pool: &PgPool,
     managed_schemas: &[&str],
@@ -1682,6 +1688,7 @@ async fn fetch_relation_privileges(
         WHERE n.nspname = ANY($1)
           AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
           AND grantee.rolname = ANY($2)
+          AND grantee.rolname <> pg_get_userbyid(c.relowner)
         ORDER BY n.nspname, c.relname
         "#,
     )
@@ -1695,6 +1702,7 @@ async fn fetch_relation_privileges(
 ///
 /// Uses `pg_namespace`. For schema grants, the object_name is the schema name itself.
 /// Only explicit ACLs are inspected. NULL ACLs produce no rows.
+/// Owner-grantee entries are excluded (see `fetch_relation_privileges`).
 async fn fetch_schema_privileges(
     pool: &PgPool,
     managed_schemas: &[&str],
@@ -1713,6 +1721,7 @@ async fn fetch_schema_privileges(
         JOIN pg_roles grantee ON grantee.oid = acl.grantee
         WHERE n.nspname = ANY($1)
           AND grantee.rolname = ANY($2)
+          AND grantee.rolname <> pg_get_userbyid(n.nspowner)
         ORDER BY n.nspname
         "#,
     )
@@ -1728,6 +1737,7 @@ async fn fetch_schema_privileges(
 /// Function names can be overloaded, so we include the OID-derived
 /// identity signature via `pg_catalog.pg_get_function_identity_arguments()`.
 /// Only explicit ACLs are inspected. NULL ACLs produce no rows.
+/// Owner-grantee entries are excluded (see `fetch_relation_privileges`).
 async fn fetch_function_privileges(
     pool: &PgPool,
     managed_schemas: &[&str],
@@ -1747,6 +1757,7 @@ async fn fetch_function_privileges(
         JOIN pg_roles grantee ON grantee.oid = acl.grantee
         WHERE n.nspname = ANY($1)
           AND grantee.rolname = ANY($2)
+          AND grantee.rolname <> pg_get_userbyid(p.proowner)
         ORDER BY n.nspname, p.proname
         "#,
     )
@@ -1762,6 +1773,7 @@ async fn fetch_function_privileges(
 /// We filter out internal/array types (typname not starting with '_',
 /// typtype not 'p' for pseudo-types).
 /// Only explicit ACLs are inspected. NULL ACLs produce no rows.
+/// Owner-grantee entries are excluded (see `fetch_relation_privileges`).
 async fn fetch_type_privileges(
     pool: &PgPool,
     managed_schemas: &[&str],
@@ -1783,6 +1795,7 @@ async fn fetch_type_privileges(
           AND t.typname NOT LIKE '\_%'
           AND t.typtype <> 'p'
           AND grantee.rolname = ANY($2)
+          AND grantee.rolname <> pg_get_userbyid(t.typowner)
         ORDER BY n.nspname, t.typname
         "#,
     )
@@ -1813,6 +1826,7 @@ pub async fn fetch_database_privileges(
         JOIN pg_roles grantee ON grantee.oid = acl.grantee
         WHERE db.datname = current_database()
           AND grantee.rolname = ANY($1)
+          AND grantee.rolname <> pg_get_userbyid(db.datdba)
         ORDER BY db.datname
         "#,
     )
@@ -1846,6 +1860,39 @@ pub async fn fetch_database_privileges(
     }
 
     Ok(grants)
+}
+
+/// Count the relations (tables, views, materialized views, sequences) each
+/// of `role_names` owns inside `managed_schemas`.
+///
+/// Ownership is what makes an ACL entry invisible to inspection — see
+/// `fetch_relation_privileges` — so callers use this to warn when a plan
+/// grants or revokes privileges on a role's own objects.
+pub async fn fetch_owned_relation_counts(
+    pool: &PgPool,
+    managed_schemas: &[&str],
+    role_names: &[&str],
+) -> Result<BTreeMap<String, i64>, sqlx::Error> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT
+            pg_get_userbyid(c.relowner) AS owner_name,
+            count(*)::bigint AS owned
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY($1)
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
+          AND pg_get_userbyid(c.relowner) = ANY($2)
+        GROUP BY 1
+        ORDER BY 1
+        "#,
+    )
+    .bind(managed_schemas)
+    .bind(role_names)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().collect())
 }
 
 /// A raw column-level ACL row returned by `fetch_column_level_grants`.

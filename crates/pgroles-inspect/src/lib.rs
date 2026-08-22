@@ -33,8 +33,8 @@ pub use identity::detect_system_identifier;
 pub use memberships::fetch_memberships;
 pub use preflight::{AuthorityIssue, preflight_authority_issues};
 pub use privileges::{
-    fetch_column_level_grants, fetch_database_privileges, fetch_object_inventory, fetch_privileges,
-    fetch_relation_inventory,
+    fetch_column_level_grants, fetch_database_privileges, fetch_object_inventory,
+    fetch_owned_relation_counts, fetch_privileges, fetch_relation_inventory,
 };
 pub use public_grants::{PublicGrants, fetch_public_grants, format_public_grants};
 pub use roles::fetch_roles;

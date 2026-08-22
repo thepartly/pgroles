@@ -999,6 +999,16 @@ async fn reconcile_apply_inner(
 
     // 3. Build desired RoleGraph from expanded manifest.
     let default_owner = manifest.default_owner.as_deref();
+    if let Some(owner) = default_owner
+        && !expanded.roles.iter().any(|role| role.name == owner)
+    {
+        tracing::warn!(
+            name,
+            namespace,
+            "default_owner {owner} is not declared under roles; it will not be inspected or \
+             converged, but every schema binding without an explicit owner resolves to it"
+        );
+    }
     let desired = pgroles_core::model::RoleGraph::from_expanded(&expanded, default_owner)?;
 
     // 4. Get a database pool.

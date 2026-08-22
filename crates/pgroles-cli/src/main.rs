@@ -748,6 +748,10 @@ async fn wait_for_reconcile_handled(
 fn cmd_validate(file: Option<&Path>, bundle: Option<&Path>) -> Result<()> {
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
+        warn_undeclared_default_owner(
+            validated.composed.manifest.default_owner.as_deref(),
+            &validated.composed.expanded.roles,
+        );
         print!("{}", format_bundle_validation_result(&validated));
         return Ok(());
     }
@@ -755,6 +759,10 @@ fn cmd_validate(file: Option<&Path>, bundle: Option<&Path>) -> Result<()> {
     let file_path = file.unwrap_or_else(|| Path::new("pgroles.yaml"));
     let yaml = read_manifest_file(file_path)?;
     let validated = validate_manifest(&yaml)?;
+    warn_undeclared_default_owner(
+        validated.manifest.default_owner.as_deref(),
+        &validated.expanded.roles,
+    );
     print!("{}", format_validation_result(&validated));
     Ok(())
 }
@@ -831,6 +839,12 @@ async fn cmd_diff(
             ),
             &validated.composed.expanded.roles,
         );
+        warn_adopt_schema_owner_transfers(mode, &changes);
+        warn_undeclared_default_owner(
+            validated.composed.manifest.default_owner.as_deref(),
+            &validated.composed.expanded.roles,
+        );
+        warn_owner_targeted_changes(&pool, &changes).await?;
         let resolved_passwords = resolve_passwords(&validated.composed.expanded)
             .context("failed to resolve role passwords")?;
         let changes = inject_password_changes(changes, &resolved_passwords);
@@ -896,6 +910,12 @@ async fn cmd_diff(
         ),
         &validated.expanded.roles,
     );
+    warn_adopt_schema_owner_transfers(mode, &changes);
+    warn_undeclared_default_owner(
+        validated.manifest.default_owner.as_deref(),
+        &validated.expanded.roles,
+    );
+    warn_owner_targeted_changes(&pool, &changes).await?;
     let resolved_passwords =
         resolve_passwords(&validated.expanded).context("failed to resolve role passwords")?;
     let changes = inject_password_changes(changes, &resolved_passwords);
@@ -969,6 +989,12 @@ async fn cmd_apply(
             ),
             &validated.composed.expanded.roles,
         );
+        warn_adopt_schema_owner_transfers(mode, &changes);
+        warn_undeclared_default_owner(
+            validated.composed.manifest.default_owner.as_deref(),
+            &validated.composed.expanded.roles,
+        );
+        warn_owner_targeted_changes(&pool, &changes).await?;
         let resolved_passwords = resolve_passwords(&validated.composed.expanded)
             .context("failed to resolve role passwords")?;
         let changes = inject_password_changes(changes, &resolved_passwords);
@@ -1059,6 +1085,12 @@ async fn cmd_apply(
         ),
         &validated.expanded.roles,
     );
+    warn_adopt_schema_owner_transfers(mode, &changes);
+    warn_undeclared_default_owner(
+        validated.manifest.default_owner.as_deref(),
+        &validated.expanded.roles,
+    );
+    warn_owner_targeted_changes(&pool, &changes).await?;
     let resolved_passwords =
         resolve_passwords(&validated.expanded).context("failed to resolve role passwords")?;
     let changes = inject_password_changes(changes, &resolved_passwords);
@@ -1725,6 +1757,106 @@ fn warn_additive_absence_assertions(
         eprintln!(
             "Warning: additive reconciliation ignores every `ensure: absent` assertion; \
              use adopt or authoritative mode to enforce absence"
+        );
+    }
+}
+
+/// Warn when the plan grants or revokes privileges on roles that own
+/// relations in the affected schemas.
+///
+/// Inspection cannot see an ACL entry whose grantee is the object's owner —
+/// PostgreSQL records the owner's inherent privileges there, and treating it
+/// as granted state made older plans revoke privileges nobody had granted.
+/// Two consequences deserve a warning:
+///
+/// - a `Revoke` against a role's own objects can break ownership-based
+///   access (foreign-key key-share checks run with the table owner's
+///   privileges);
+/// - a `Grant` to a role on its own objects is invisible to re-inspection,
+///   so it will be re-emitted on every reconcile.
+async fn warn_owner_targeted_changes(
+    pool: &PgPool,
+    changes: &[pgroles_core::diff::Change],
+) -> Result<()> {
+    let mut schemas: Vec<&str> = Vec::new();
+    let mut targets: Vec<&str> = Vec::new();
+    for change in changes {
+        if let pgroles_core::diff::Change::Grant { role, schema, .. }
+        | pgroles_core::diff::Change::Revoke { role, schema, .. } = change
+        {
+            if let Some(schema) = schema.as_deref()
+                && !schemas.contains(&schema)
+            {
+                schemas.push(schema);
+            }
+            if !targets.contains(&role.as_str()) {
+                targets.push(role.as_str());
+            }
+        }
+    }
+    if schemas.is_empty() || targets.is_empty() {
+        return Ok(());
+    }
+
+    let owned = pgroles_inspect::fetch_owned_relation_counts(pool, &schemas, &targets)
+        .await
+        .context("failed to inspect relation ownership")?;
+    for change in changes {
+        let (role, change_kind) = match change {
+            pgroles_core::diff::Change::Grant { role, .. } => (role, "grant"),
+            pgroles_core::diff::Change::Revoke { role, .. } => (role, "revoke"),
+            _ => continue,
+        };
+        if let Some(count) = owned.get(role.as_str()) {
+            eprintln!(
+                "Warning: plan {change_kind}s privileges to \"{role}\", which owns {count} \
+                 relation(s) in the affected schemas; owner privileges are implicit, so this \
+                 may break owner access or be re-emitted on every reconcile"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Warn when adopt mode transfers schema ownership.
+///
+/// Adopt filters role drops, not ownership convergence: a binding whose
+/// declared owner differs from the live one is transferred even under adopt.
+fn warn_adopt_schema_owner_transfers(
+    mode: ReconciliationMode,
+    changes: &[pgroles_core::diff::Change],
+) {
+    if mode != ReconciliationMode::Adopt {
+        return;
+    }
+    for change in changes {
+        if let pgroles_core::diff::Change::AlterSchemaOwner { name, owner } = change {
+            eprintln!(
+                "Warning: adopt mode transfers ownership of schema \"{name}\" to \"{owner}\"; \
+                 use additive mode if the current owner must be preserved"
+            );
+        }
+    }
+}
+
+/// Warn when `default_owner` names a role the manifest never declares.
+///
+/// An undeclared default owner is invisible to inspection — its privileges
+/// are neither inspected nor converged — while still claiming ownership of
+/// every schema binding without an explicit `owner:`. A typo here therefore
+/// silently changes what the policy claims.
+fn warn_undeclared_default_owner(
+    default_owner: Option<&str>,
+    expanded_roles: &[pgroles_core::manifest::RoleDefinition],
+) {
+    let Some(owner) = default_owner else {
+        return;
+    };
+    if !expanded_roles.iter().any(|role| role.name == owner) {
+        eprintln!(
+            "Warning: default_owner \"{owner}\" is not declared under roles; it will not be \
+             inspected or converged, but every schema binding without an explicit owner \
+             resolves to it. Declare it (external: true) or set the owner per schema."
         );
     }
 }
