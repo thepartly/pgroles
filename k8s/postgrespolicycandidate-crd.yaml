@@ -671,6 +671,10 @@
                               "nullable": true,
                               "type": "string"
                             },
+                            "preserve_undeclared_grants": {
+                              "description": "Preserve this role's undeclared in-scope object grants during\nconvergence. Revokes against the role are skipped unless the revoked\nprivileges are explicitly asserted absent (`ensure: absent`).",
+                              "type": "boolean"
+                            },
                             "replication": {
                               "nullable": true,
                               "type": "boolean"

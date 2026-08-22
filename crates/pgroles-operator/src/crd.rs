@@ -696,6 +696,11 @@ pub struct RoleSpec {
     /// password-manage, or manage memberships granted from this role.
     #[serde(default)]
     pub external: bool,
+    /// Preserve this role's undeclared in-scope object grants during
+    /// convergence. Revokes against the role are skipped unless the revoked
+    /// privileges are explicitly asserted absent (`ensure: absent`).
+    #[serde(default)]
+    pub preserve_undeclared_grants: bool,
     #[serde(default)]
     pub login: Option<bool>,
     #[serde(default)]
@@ -940,6 +945,12 @@ pub struct PostgresPolicyStatus {
     /// Summary of changes applied in the last reconciliation.
     #[serde(default)]
     pub change_summary: Option<ChangeSummary>,
+
+    /// Advisory warnings from the last reconciliation's computed plan — for
+    /// example adopt-mode schema ownership transfers or an undeclared
+    /// `default_owner`. Populated even when the plan applied cleanly.
+    #[serde(default)]
+    pub plan_warnings: Vec<String>,
 
     /// The reconciliation mode used for the last successful reconcile.
     #[serde(default)]
@@ -2119,6 +2130,7 @@ fn build_policy_manifest<'a>(
         .map(|r| RoleDefinition {
             name: r.name.clone(),
             external: r.external,
+            preserve_undeclared_grants: r.preserve_undeclared_grants,
             login: r.login,
             superuser: r.superuser,
             createdb: r.createdb,
@@ -3074,6 +3086,7 @@ mod tests {
             roles: vec![RoleSpec {
                 name: "analytics".to_string(),
                 external: true,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -3226,6 +3239,7 @@ mod tests {
             roles: vec![RoleSpec {
                 name: "app-service".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -4169,6 +4183,7 @@ params:
         spec.roles = vec![RoleSpec {
             name: "app".into(),
             external: false,
+            preserve_undeclared_grants: false,
             login: Some(true),
             password: Some(PasswordSpec {
                 secret_ref: Some(SecretReference {
@@ -4839,6 +4854,7 @@ retirements:
                 RoleSpec {
                     name: "role-a".to_string(),
                     external: false,
+                    preserve_undeclared_grants: false,
                     login: Some(true),
                     password: Some(PasswordSpec {
                         secret_ref: Some(SecretReference {
@@ -4861,6 +4877,7 @@ retirements:
                 RoleSpec {
                     name: "role-b".to_string(),
                     external: false,
+                    preserve_undeclared_grants: false,
                     login: Some(true),
                     password: Some(PasswordSpec {
                         secret_ref: Some(SecretReference {
@@ -4883,6 +4900,7 @@ retirements:
                 RoleSpec {
                     name: "role-c".to_string(),
                     external: false,
+                    preserve_undeclared_grants: false,
                     login: None,
                     password: None,
                     password_valid_until: None,
@@ -4941,6 +4959,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(false),
                 superuser: None,
                 createdb: None,
@@ -4994,6 +5013,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: None, // omitted, not explicitly false
                 superuser: None,
                 createdb: None,
@@ -5047,6 +5067,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -5104,6 +5125,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -5159,6 +5181,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -5215,6 +5238,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,
@@ -5270,6 +5294,7 @@ retirements:
             roles: vec![RoleSpec {
                 name: "app-user".to_string(),
                 external: false,
+                preserve_undeclared_grants: false,
                 login: Some(true),
                 superuser: None,
                 createdb: None,

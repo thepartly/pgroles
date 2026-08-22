@@ -964,6 +964,11 @@
                           "nullable": true,
                           "type": "string"
                         },
+                        "preserve_undeclared_grants": {
+                          "default": false,
+                          "description": "Preserve this role's undeclared in-scope object grants during\nconvergence. Revokes against the role are skipped unless the revoked\nprivileges are explicitly asserted absent (`ensure: absent`).",
+                          "type": "boolean"
+                        },
                         "replication": {
                           "nullable": true,
                           "type": "boolean"
@@ -1242,6 +1247,14 @@
                   "owned_schemas": {
                     "default": [],
                     "description": "Schemas claimed by this policy's declared ownership scope.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "plan_warnings": {
+                    "default": [],
+                    "description": "Advisory warnings from the last reconciliation's computed plan — for\nexample adopt-mode schema ownership transfers or an undeclared\n`default_owner`. Populated even when the plan applied cleanly.",
                     "items": {
                       "type": "string"
                     },
