@@ -4839,6 +4839,49 @@ schemas:
             .success()
             .stdout(predicate::str::contains("No changes needed"));
 
+        // A manifest that explicitly declares SELECT for the owner on its own
+        // table also converges: the inherent entry covers the declared grant,
+        // so neither a GRANT nor a REVOKE is planned.
+        let declaring_manifest = write_temp_manifest(&format!(
+            r#"
+default_owner: {owner}
+
+roles:
+  - name: {owner}
+    nologin: true
+
+profiles:
+  writer:
+    grants:
+      - object: {{ type: schema }}
+        privileges: [USAGE]
+      - object: {{ type: table, name: "*" }}
+        privileges: [SELECT, INSERT]
+
+grants:
+  - role: {owner}
+    privileges: [SELECT]
+    object: {{ type: table, schema: {schema}, name: "*" }}
+
+schemas:
+  - name: {schema}
+    profiles: [writer]
+"#
+        ));
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                declaring_manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "adopt",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No changes needed"));
+
         // Cleanup
         execute_sql(&format!(
             r#"

@@ -94,14 +94,11 @@ predefined roles as external; do not attempt to manage system-role lifecycle.
 Schema ownership is modeled specially: pgroles converges the declared owner and
 ensures that owner has effective `CREATE` and `USAGE` on the schema.
 
-Table, sequence, function, and type ownership is not modeled. Inspection never
-treats an owner-grantee ACL entry as granted state — PostgreSQL records the
-owner's inherent privileges there once any grant materializes the ACL — so
-plans do not revoke privileges the grantee holds as owner. Two consequences:
-declaring explicit grants for a role on its own objects cannot converge (the
-entries are invisible to re-inspection and re-emit every reconcile), and a plan
-that revokes or grants privileges to a role which owns relations in the target
-schemas warns that ownership-based access may be affected.
+Table, sequence, function, and type ownership is not modeled. Inspection tags
+owner-grantee ACL entries as inherent — PostgreSQL records the owner's
+privileges there once any grant materializes the ACL — so plans never revoke
+them, declared grants on an owner's own objects converge as no-ops, and
+`generate` never exports them.
 
 PostgreSQL materializes an object's whole ACL, owner entry included, the first
 time anything is granted or revoked on it. Any first-time grant does this, and
