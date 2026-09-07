@@ -66,6 +66,9 @@ operator:
   # `OTEL_EXPORTER_OTLP_ENDPOINT` enables OTLP metrics and logs, including
   # structured ephemeral-access audit events; `OTEL_LOGS_EXPORTER=none` disables
   # the log half when another agent already ships container logs off-cluster;
+  # `OTEL_RESOURCE_ATTRIBUTES` overrides default service identity and adds
+  # deployment attributes to both signals; nonempty `OTEL_SERVICE_NAME` takes
+  # precedence over `service.name`; see the Downward API example in `values.yaml`;
   # `EPHEMERAL_ACCESS_MAXIMUM_DURATION` (default `24h`) and
   # `EPHEMERAL_ACCESS_MAX_PENDING_TTL` (default `1h`) are the only cluster-wide
   # ceilings on ephemeral access, and an access policy exceeding either is
@@ -87,6 +90,24 @@ operator:
     #   value: otlp
     # - name: OTEL_LOGS_EXPORTER
     #   value: otlp
+    # Resource identity is shared by metrics and logs. Define Downward API
+    # variables before OTEL_RESOURCE_ATTRIBUTES so Kubernetes expands them.
+    # - name: POD_NAME
+    #   valueFrom:
+    #     fieldRef:
+    #       fieldPath: metadata.name
+    # - name: POD_NAMESPACE
+    #   valueFrom:
+    #     fieldRef:
+    #       fieldPath: metadata.namespace
+    # - name: POD_UID
+    #   valueFrom:
+    #     fieldRef:
+    #       fieldPath: metadata.uid
+    # - name: OTEL_RESOURCE_ATTRIBUTES
+    #   value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.uid=$(POD_UID),service.instance.id=$(POD_UID)"
+    # - name: OTEL_SERVICE_NAME
+    #   value: pgroles-operator
     # - name: EPHEMERAL_ACCESS_MAXIMUM_DURATION
     #   value: 24h
     # - name: EPHEMERAL_ACCESS_MAX_PENDING_TTL

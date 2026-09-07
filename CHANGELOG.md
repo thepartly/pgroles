@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- OTLP metrics and logs share a configurable resource identity, including a default process instance ID. Standard resource environment variables and an optional Helm Downward API example support deployment attribution. (#224)
+- Controller readiness waits for required watch synchronization and clears during relists and shutdown. Watch synchronization, watch events, and controller progress have bounded telemetry labels. (#225)
+- Optional policy-state monitoring examples include tested alert rules, Collector configuration, operational queries, and a real Kubernetes resource-state/Collector smoke test. (#226)
+
 ### Fixed
 
 - Release notes use only the matching changelog entry, without GitHub's duplicated change list. Missing or empty release notes stop draft creation.

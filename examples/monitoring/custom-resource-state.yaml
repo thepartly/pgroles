@@ -1,0 +1,60 @@
+kind: CustomResourceStateMetrics
+spec:
+  resources:
+    - groupVersionKind:
+        group: pgroles.io
+        version: v1alpha1
+        kind: PostgresPolicy
+      metricNamePrefix: pgroles_policy
+      labelsFromPath:
+        namespace: [metadata, namespace]
+        policy: [metadata, name]
+        uid: [metadata, uid]
+      metrics:
+        - name: info
+          help: Policy inventory independent of operator status.
+          each:
+            type: Info
+            info:
+              labelsFromPath:
+                mode: [spec, mode]
+                approval: [spec, approval]
+                interval: [spec, interval]
+        - name: created_seconds
+          help: Kubernetes creation timestamp in Unix seconds.
+          each:
+            type: Gauge
+            gauge:
+              path: [metadata, creationTimestamp]
+        - name: suspended
+          help: Whether reconciliation is suspended.
+          each:
+            type: Gauge
+            gauge:
+              path: [spec, suspend]
+              nilIsZero: true
+        - name: condition
+          help: Policy condition boolean; unknown maps to zero.
+          errorLogV: 10
+          each:
+            type: Gauge
+            gauge:
+              path: [status, conditions]
+              labelsFromPath:
+                type: [type]
+                reason: [reason]
+              valueFrom: [status]
+        - name: last_success_seconds
+          help: Last successful reconcile Unix timestamp; zero until first success.
+          each:
+            type: Gauge
+            gauge:
+              path: [status, last_successful_reconcile_time]
+              nilIsZero: true
+        - name: stale_after_seconds
+          help: Optional monitoring grace override in seconds.
+          each:
+            type: Gauge
+            gauge:
+              path: [metadata, annotations, monitoring.pgroles.io/stale-after-seconds]
+              nilIsZero: true

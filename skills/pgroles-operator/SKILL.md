@@ -322,3 +322,21 @@ unblock replacement creation.
 
 Policy deletion means stop managing. The operator intentionally leaves roles and
 grants in the database.
+
+## Monitoring
+
+Use the version-matched `examples/monitoring` reference for optional Collector
+and Kubernetes policy-state collection. Keep monitoring inventory independent
+of the operator: empty installations need a runtime signal, and expected-policy
+records distinguish missing extraction from intentional absence. Policy alerts
+should retain cluster, namespace, name and UID, while dropping changing failure
+reasons from their identity. Give never-successful policies a creation-time
+grace, exclude suspension and observe mode from enforcement alerts, and tune
+`monitoring.pgroles.io/stale-after-seconds` with `spec.interval`. Manual approval
+waiting normally reports Ready=True and is not a failure.
+
+Verify actual exported metric names and units before applying dashboard queries.
+Counters count observations/reconciliations, not distinct policies. Preserve
+resource instance identity across replicas, use only one log ingestion path, and
+retain lifecycle audit events externally. Validate monitoring changes with
+`scripts/check-monitoring.sh` and `scripts/check-monitoring-e2e.sh`.

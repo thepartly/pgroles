@@ -52,6 +52,7 @@ const navigation = [
             {title: 'CRD API reference', href: '/docs/operator-api-reference'},
             {title: 'Upgrading', href: '/docs/operator-upgrades'},
             {title: 'Status and telemetry', href: '/docs/operator-status'},
+            {title: 'Monitoring', href: '/docs/operator-monitoring'},
             {title: 'Troubleshooting index', href: '/docs/operator-troubleshooting'},
             {title: 'RBAC and security', href: '/docs/operator-security'},
             {title: 'Production status', href: '/docs/operator-production-status'},

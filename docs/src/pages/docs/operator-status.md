@@ -87,7 +87,21 @@ The operator exposes health probes on its internal HTTP port:
 - `/livez`
 - `/readyz`
 
-The Helm chart configures these probes automatically. Metrics are exported via OpenTelemetry OTLP when standard OTel endpoint environment variables are set, for example:
+The Helm chart configures these probes automatically. `/readyz` returns 503
+until all eight controller watches finish their initial lists and the reflected
+caches/request index have processed those objects. Empty collections also
+synchronize. A watch relist makes readiness false until that list completes;
+SIGTERM/Ctrl+C clears readiness before draining controller work. Unexpected
+controller-loop completion drains the remaining loops and exits with an error.
+
+Readiness establishes cache synchronization and controller lifecycle state. It
+does not prove ongoing API connectivity, database access, telemetry delivery or
+policy convergence, and cannot detect every stalled controller. Quiet watches
+and reconnects have no time-since-event timeout, since an unchanged collection
+can be healthy. `/livez` reports that the HTTP handler can respond.
+
+Metrics are exported via OpenTelemetry OTLP when standard OTel endpoint
+environment variables are set, for example:
 
 ```yaml
 operator:
@@ -99,23 +113,31 @@ operator:
 ```
 
 The intended deployment model is operator -> OpenTelemetry Collector -> your metrics backend.
+See [Monitoring the operator](/docs/operator-monitoring) for optional policy-state
+collection, tested alerts and dashboard queries.
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
+| `pgroles.watch.synced` | `watch` | Current initial-list synchronization state (0 or 1) for each of eight fixed watches, emitted on every collection |
+| `pgroles.watch.events` | `watch`, `result` | Cumulative watch events and errors; quiet watches need not increase |
+| `pgroles.controller.progress` | `controller`, `result` | Cumulative controller results, including reconcile and primary-watch errors, for policy, access-policy and access-request controllers |
 | `pgroles.reconcile.total` | `result`, `reason` | Reconcile outcomes |
-| `pgroles.reconcile.duration` | - | Reconcile wall time |
+| `pgroles.reconcile.duration` | - | Reconcile wall time in milliseconds |
 | `pgroles.reconcile.inflight` | - | Reconciles currently running |
-| `pgroles.plan.total` | `result` | Plans computed |
-| `pgroles.plan.changes` | - | Changes per plan |
+| `pgroles.plan.total` | `result` | Cumulative successful observe-mode reconciliations |
+| `pgroles.plan.changes` | - | Cumulative changes observed across observe-mode reconciliations; repeated plans can count the same change again |
 | `pgroles.apply.total` | `result` | Applies attempted |
 | `pgroles.apply.statements` | - | SQL statements executed |
 | `pgroles.lock_contention.total` | - | Reconciles that lost the per-database lock |
 | `pgroles.policy.conflicts` | - | Overlapping-ownership conflicts detected |
 | `pgroles.database.connection_failures` | - | Failed database connections |
 | `pgroles.invalid_spec.total` | - | Specs rejected as invalid |
-| `pgroles.deprecated.approval_unset` | `inferred` | Policies relying on the deprecated `spec.approval` inference |
-| `pgroles.inspect.duration` | `phase` | Duration for each inspection phase |
-| `pgroles.inspect.items` | `kind` | Counts of inspected objects by kind |
+| `pgroles.deprecated.approval_unset` | `inferred` | Cumulative reconciliations relying on deprecated `spec.approval` inference, not distinct policies |
+| `pgroles.deprecated.mode_plan` | - | Cumulative reconciliations using the deprecated `mode: plan` spelling |
+| `pgroles.processing.duration` | `phase` | Synchronous policy processing duration in milliseconds |
+| `pgroles.runtime.scheduling_lag` | - | Milliseconds of delay of a one-second runtime timer, not HTTP probe latency |
+| `pgroles.inspect.duration` | `phase` | Duration for each inspection phase in milliseconds |
+| `pgroles.inspect.items` | `kind` | Cumulative inspected objects by kind, including repeat inspections |
 | `pgroles.wildcard.grantability_queries` | - | Wildcard grantability catalog queries issued |
 | `pgroles.wildcard.unsatisfied_grants` | - | Wildcard grants missing privileges before grantability checks |
 | `pgroles.candidate.planning.duration` | - | Milliseconds to plan one candidate, end to end |
@@ -127,13 +149,13 @@ The intended deployment model is operator -> OpenTelemetry Collector -> your met
 | `pgroles.ephemeral_access.role_retirement_blocked` | - | Role retirements blocked by an in-flight request |
 | `pgroles.ephemeral_access.cached_requests` | - | Request-cache size sampled at reconcile start |
 | `pgroles.ephemeral_access.relevant_requests` | `lookup` | Requests returned by an indexed lookup |
-| `pgroles.ephemeral_access.reconcile.duration` | `kind`, `request_count` | Ephemeral reconcile wall time, bucketed by request count |
+| `pgroles.ephemeral_access.reconcile.duration` | `kind`, `request_count` | Ephemeral reconcile wall time in milliseconds, bucketed by request count |
 | `pgroles.ephemeral_access.reconcile.inflight` | `kind` | Ephemeral reconciles currently running |
 
 Useful alerting signals: `Degraded=True` for reconcile failure, sustained
 `Drifted=True` on an auto-applying policy, `pgroles.lock_contention.total`
-rising steadily, and `pgroles.deprecated.approval_unset` as the count of
-policies still relying on the deprecated inference.
+rising steadily, and `pgroles.deprecated.approval_unset` as a cumulative count of
+reconciliations still relying on the deprecated inference.
 
 A policy waiting on plan approval is healthy and reports `Ready=True` with
 reason `Planned`, alongside `Drifted=True`. `Drifted` is what distinguishes it
