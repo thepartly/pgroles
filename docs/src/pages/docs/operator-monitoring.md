@@ -182,9 +182,11 @@ The second creates and deletes a uniquely named kind cluster with its own tempor
 kubeconfig. It installs the actual CRD, KSM configuration and Collector, verifies
 extraction from real policy objects and status updates, and sends an OTLP histogram
 through the Collector to assert metric names, values and resource labels. It does
-not need a database or apply PostgreSQL changes. The test covers both an OTLP protocol fixture and the production Rust SDK
-via the prebuilt `telemetry-smoke` example. Set `PGROLES_TELEMETRY_SMOKE_BIN`
-when using a different Cargo target directory.
+not need a database or apply PostgreSQL changes. The test covers both an OTLP
+protocol fixture and the production Rust SDK
+via the prebuilt `telemetry-smoke` example, then verifies that both producers'
+inactive samples disappear under the reference Collector's two-minute expiration.
+Set `PGROLES_TELEMETRY_SMOKE_BIN` when using a different Cargo target directory.
 
 Configuration references:
 [KSM custom resource metrics](https://github.com/kubernetes/kube-state-metrics/blob/v2.15.0/docs/metrics/extend/customresourcestate-metrics.md),

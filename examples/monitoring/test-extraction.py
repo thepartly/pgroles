@@ -6,9 +6,10 @@ import datetime
 import json
 import os
 import pathlib
-import selectors
+import queue
 import re
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -36,23 +37,32 @@ def forward(service, remote):
         stderr=subprocess.STDOUT,
         text=True,
     )
+    address = queue.Queue(maxsize=1)
+
+    def drain_output():
+        # Keep consuming kubectl's per-connection messages while the caller
+        # scrapes. An unread pipe eventually fills and blocks port-forward.
+        announced = False
+        for line in proc.stdout:
+            match = re.search(r"127\.0\.0\.1:(\d+) ->", line)
+            if match and not announced:
+                address.put(f"http://127.0.0.1:{match[1]}")
+                announced = True
+        if not announced:
+            address.put(None)
+
+    reader = threading.Thread(target=drain_output, daemon=True)
+    reader.start()
     try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(proc.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 30
-            output = []
-            while time.monotonic() < deadline:
-                if not selector.select(timeout=1):
-                    continue
-                line = proc.stdout.readline()
-                output.append(line)
-                match = re.search(r"127\.0\.0\.1:(\d+) ->", line)
-                if match:
-                    yield f"http://127.0.0.1:{match[1]}"
-                    return
-                if proc.poll() is not None:
-                    break
-            raise RuntimeError("port-forward did not start: " + "".join(output))
+        try:
+            endpoint = address.get(timeout=30)
+        except queue.Empty as error:
+            raise RuntimeError(
+                "port-forward did not start within 30 seconds"
+            ) from error
+        if endpoint is None:
+            raise RuntimeError("port-forward exited before announcing an address")
+        yield endpoint
     finally:
         proc.terminate()
         try:
@@ -60,6 +70,7 @@ def forward(service, remote):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        reader.join(timeout=5)
 
 
 def get(url):
@@ -84,13 +95,13 @@ def samples(text, name, **labels):
     return found
 
 
-def eventually(check):
-    deadline = time.monotonic() + 60
+def eventually(check, timeout=60):
+    deadline = time.monotonic() + timeout
     while True:
         try:
             check()
             return
-        except (AssertionError, urllib.error.URLError):
+        except (AssertionError, urllib.error.URLError, TimeoutError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(1)
@@ -336,6 +347,25 @@ with (
         )
 
     eventually(rust_exported)
+
+    # Scraping must not keep a dead producer's cumulative samples alive. Use
+    # the reference configuration's real two-minute expiration, with margin
+    # for batching and scheduling rather than asserting an exact deadline.
+    print(
+        "Waiting for the reference Collector to expire inactive samples...", flush=True
+    )
+
+    def expired():
+        text = get(prom + "/metrics")
+        for name, instance in [
+            ("pgroles_reconcile_total", "smoke-instance"),
+            ("pgroles_runtime_scheduling_lag_count", "fixture-instance"),
+            ("pgroles_runtime_scheduling_lag_sum", "fixture-instance"),
+        ]:
+            remaining = samples(text, name, service_instance_id=instance)
+            assert not remaining, ("inactive metric did not expire", name, remaining)
+
+    eventually(expired, timeout=180)
 print(
-    "Actual KSM extraction, updates, deletion, Collector conversion and Rust export passed."
+    "Actual KSM extraction, updates, deletion, Collector conversion, Rust export and metric expiration passed."
 )
