@@ -73,12 +73,12 @@ diff(current, effective desired) → Vec<Change> → sql::render_all_with_contex
 - **pgroles-operator** — Kubernetes operator. Reconciles `PostgresPolicy` CRDs (`pgroles.io/v1alpha1`). Has a `crdgen` binary for generating the CRD YAML.
   - Kubernetes identifiers: every name and label value derived from user input goes through `k8s_names`. Do not hand-roll truncation or character filtering elsewhere — a cut that lands on a separator yields a value the API server rejects, which surfaces as a policy that silently stops reconciling. Invariants are enforced by property tests in `tests/identifier_properties.rs`.
   - Health endpoints: `/livez`, `/readyz`
-  - Reconciliation modes: `apply`, `plan`
+  - Execution modes: `apply`, `observe` (`plan` is a deprecated spelling of `observe`; omitted approval defaults to manual for either)
   - Metrics/telemetry: prefer OTLP export via OpenTelemetry Collector; do not add a built-in Prometheus scrape endpoint by default unless the change explicitly requires it.
 
 ### Diff Change Ordering
 
-`diff()` assembles changes in dependency order: creates → alters/comments → grants → default privileges → membership removes → membership adds → default privilege revocations → revocations → drops. Retirement steps (terminate sessions, reassign owned, drop owned) are inserted immediately before the matching `DropRole` by `apply_role_retirements()`. `apply` executes the whole plan in a single transaction.
+`diff()` assembles changes in dependency order: creates → alters/comments → grants → default privileges → object revocations → membership removes → membership adds → default privilege revocations → drops. Retirement steps (terminate sessions, reassign owned, drop owned) are inserted immediately before the matching `DropRole` by `apply_role_retirements()`. `apply` executes the whole plan in a single transaction.
 
 ## CI
 

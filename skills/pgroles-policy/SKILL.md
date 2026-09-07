@@ -207,7 +207,12 @@ Before completing a change:
 2. render bundles before reviewing their effective policy
 3. inspect `pgroles graph` and the complete SQL diff
 4. confirm external roles and referenced undeclared schemas already exist
-5. verify the executor has ownership, grant options, and role administration
+5. verify executor authority for each SQL phase: `ADMIN` manages role
+   memberships, `INHERIT` makes owner privileges available, and `SET` permits
+   switching roles. Default-privilege grants precede membership additions, so a
+   membership declared in the same plan cannot bootstrap those grants. Schema
+   assignment needs a usable SET path; transferring an existing schema also
+   requires database `CREATE` for its new owner
 6. apply first in a non-production environment when possible
 7. run positive and negative SQL checks as the actual login roles
 8. run a second diff and require no changes within the selected mode

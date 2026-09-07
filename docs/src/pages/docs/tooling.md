@@ -72,7 +72,12 @@ Some PostgreSQL-backed libraries and platform features create their own tables, 
 
 Do not point pgroles at an internally managed schema and expect it to understand that system's upgrade invariants. pgroles manages privileges around those objects; the schema-owning system still owns its DDL.
 
-If the owner role is also managed by pgroles in `authoritative` mode, declare the privileges that role should keep on its own schema. PostgreSQL owners effectively have broad access to their objects, and pgroles treats undeclared visible privileges as drift.
+Since v0.11.0, pgroles preserves owner-inherent ACL entries on tables,
+sequences, functions, and types; declaring those grants is not needed to prevent
+revocation. Schema ownership also ensures effective `CREATE` and `USAGE` on the
+schema. Owning a schema does not imply ownership of its contents: declare grants
+or memberships for access to objects owned by another role, and default
+privileges for each role that creates future objects.
 
 ## Bundles for teams
 
