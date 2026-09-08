@@ -1,0 +1,394 @@
+{
+  "description": "Auto-generated derived type for EphemeralAccessRequestSpec via `CustomResource`",
+  "properties": {
+    "spec": {
+      "description": "One immutable runtime request for a bounded access bundle.",
+      "properties": {
+        "accessPolicyRef": {
+          "description": "EphemeralAccessPolicy in this namespace that defines the requested bundle.",
+          "properties": {
+            "name": {
+              "description": "Name of the referenced resource in the same namespace.",
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "justification": {
+          "description": "Reason for requesting access; required when the policy demands it.",
+          "maxLength": 2048,
+          "nullable": true,
+          "type": "string"
+        },
+        "requestedBy": {
+          "description": "Kubernetes identity which created the request. The supplied Kyverno\nreference policy overwrites this from authenticated admission `userInfo`.",
+          "properties": {
+            "groups": {
+              "default": [],
+              "description": "Kubernetes groups recorded for this actor.",
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "uid": {
+              "description": "Optional Kubernetes user UID recorded by admission.",
+              "maxLength": 128,
+              "nullable": true,
+              "type": "string"
+            },
+            "username": {
+              "description": "Kubernetes username asserted for this actor; authenticated only when enforced by admission.",
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "type": "object"
+        },
+        "requestedDuration": {
+          "description": "Requested access duration; omission uses the access policy default.",
+          "maxLength": 64,
+          "nullable": true,
+          "pattern": "^([0-9]+[smh])+$",
+          "type": "string"
+        },
+        "subject": {
+          "description": "PostgreSQL role receiving the temporary memberships.",
+          "properties": {
+            "role": {
+              "description": "Existing PostgreSQL role receiving temporary access.",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "role"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "accessPolicyRef",
+        "requestedBy",
+        "subject"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "request spec is immutable",
+          "rule": "self == oldSelf"
+        }
+      ]
+    },
+    "status": {
+      "description": "Controller lifecycle state and approval decisions for an access request.",
+      "nullable": true,
+      "properties": {
+        "activatedAt": {
+          "description": "Timestamp at which the requested access became active.",
+          "maxLength": 64,
+          "nullable": true,
+          "type": "string"
+        },
+        "approvalExpiresAt": {
+          "description": "Timestamp after which a pending approval is no longer actionable.",
+          "maxLength": 64,
+          "nullable": true,
+          "type": "string"
+        },
+        "conditions": {
+          "default": [],
+          "description": "Lifecycle observations and terminal Approved or Denied decisions.",
+          "items": {
+            "properties": {
+              "bundleHash": {
+                "description": "Digest of the membership bundle to which this decision applies.",
+                "maxLength": 71,
+                "nullable": true,
+                "type": "string"
+              },
+              "grantedDuration": {
+                "description": "Access duration to which this decision applies.",
+                "maxLength": 64,
+                "nullable": true,
+                "type": "string"
+              },
+              "lastTransitionTime": {
+                "description": "Timestamp of the last condition-state transition.",
+                "maxLength": 64,
+                "nullable": true,
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable explanation of the condition.",
+                "maxLength": 2048,
+                "nullable": true,
+                "type": "string"
+              },
+              "reason": {
+                "description": "Machine-readable reason for the condition.",
+                "maxLength": 128,
+                "nullable": true,
+                "type": "string"
+              },
+              "status": {
+                "description": "Condition state, conventionally True, False, or Unknown.",
+                "maxLength": 16,
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "description": "Lifecycle or decision condition name.",
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "type"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "decidedBy": {
+          "description": "Kubernetes identity which approved or denied the request. The supplied\nKyverno reference policy overwrites this from authenticated admission\n`userInfo` in the same status update as the terminal decision.",
+          "nullable": true,
+          "properties": {
+            "groups": {
+              "default": [],
+              "description": "Kubernetes groups recorded for this actor.",
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "uid": {
+              "description": "Optional Kubernetes user UID recorded by admission.",
+              "maxLength": 128,
+              "nullable": true,
+              "type": "string"
+            },
+            "username": {
+              "description": "Kubernetes username asserted for this actor; authenticated only when enforced by admission.",
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "type": "object"
+        },
+        "endedAt": {
+          "description": "Timestamp at which the request reached its terminal state.",
+          "maxLength": 64,
+          "nullable": true,
+          "type": "string"
+        },
+        "expiresAt": {
+          "description": "Timestamp at which active access must be revoked.",
+          "maxLength": 64,
+          "nullable": true,
+          "type": "string"
+        },
+        "lastError": {
+          "description": "Most recent controller error for this request.",
+          "maxLength": 4096,
+          "nullable": true,
+          "type": "string"
+        },
+        "phase": {
+          "default": "Pending",
+          "description": "Current request lifecycle phase.",
+          "enum": [
+            "Pending",
+            "PendingApproval",
+            "Applying",
+            "Active",
+            "Revoking",
+            "Ended",
+            "Revoked",
+            "Cancelled",
+            "Denied",
+            "ApprovalExpired",
+            "Failed"
+          ],
+          "type": "string"
+        },
+        "resolvedAccess": {
+          "description": "Write-once snapshot of the resolved target, duration, and exact memberships,\nrecorded before approval so the decision binds to this access bundle.",
+          "nullable": true,
+          "properties": {
+            "accessPolicyGeneration": {
+              "description": "Generation of the access policy resolved for this request.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "accessPolicyUid": {
+              "description": "UID of the access policy resolved for this request.",
+              "maxLength": 128,
+              "type": "string"
+            },
+            "bundleEncoding": {
+              "description": "Versioned encoding used to compute the canonical bundle digest.",
+              "maxLength": 128,
+              "type": "string"
+            },
+            "bundleHash": {
+              "description": "SHA-256 digest of the canonical target and membership bundle.",
+              "maxLength": 71,
+              "type": "string"
+            },
+            "grantedDuration": {
+              "description": "Resolved duration for which access is granted.",
+              "maxLength": 64,
+              "type": "string"
+            },
+            "memberships": {
+              "description": "Exact membership edges frozen for activation and revocation.",
+              "items": {
+                "properties": {
+                  "inherit": {
+                    "description": "Whether privileges from role memberships are inherited automatically.",
+                    "type": "boolean"
+                  },
+                  "member": {
+                    "description": "PostgreSQL role receiving the membership.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "role": {
+                    "description": "Granted PostgreSQL role.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "inherit",
+                  "member",
+                  "role"
+                ],
+                "type": "object"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "targetDatabaseFingerprint": {
+              "description": "SHA-256 fingerprint of resolved host, port, and database name. It binds\nactivation and revocation to one database without persisting secrets.",
+              "maxLength": 71,
+              "type": "string"
+            },
+            "targetPolicyGeneration": {
+              "description": "Generation of the target PostgresPolicy at resolution.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "targetPolicyUid": {
+              "description": "UID of the PostgresPolicy managing the resolved database.",
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          "required": [
+            "accessPolicyGeneration",
+            "accessPolicyUid",
+            "bundleEncoding",
+            "bundleHash",
+            "grantedDuration",
+            "memberships",
+            "targetDatabaseFingerprint",
+            "targetPolicyGeneration",
+            "targetPolicyUid"
+          ],
+          "type": "object"
+        },
+        "retainedMemberships": {
+          "default": [],
+          "description": "Memberships retained because another active request or the base policy still requires them.",
+          "items": {
+            "properties": {
+              "inherit": {
+                "description": "Whether privileges from role memberships are inherited automatically.",
+                "type": "boolean"
+              },
+              "member": {
+                "description": "PostgreSQL role receiving the membership.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              },
+              "role": {
+                "description": "Granted PostgreSQL role.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "inherit",
+              "member",
+              "role"
+            ],
+            "type": "object"
+          },
+          "maxItems": 32,
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "resolvedAccess is write-once",
+          "rule": "!has(oldSelf.resolvedAccess) || (has(self.resolvedAccess) && self.resolvedAccess == oldSelf.resolvedAccess)"
+        },
+        {
+          "message": "Approved=True and Denied=True are mutually exclusive",
+          "rule": "!(self.conditions.exists(c, c.type == 'Approved' && c.status == 'True') && self.conditions.exists(c, c.type == 'Denied' && c.status == 'True'))"
+        },
+        {
+          "message": "approval decisions are terminal",
+          "rule": "oldSelf.conditions.filter(c, (c.type == 'Approved' || c.type == 'Denied') && c.status == 'True').size() == 0 || self.conditions.filter(c, (c.type == 'Approved' || c.type == 'Denied') && c.status == 'True') == oldSelf.conditions.filter(c, (c.type == 'Approved' || c.type == 'Denied') && c.status == 'True')"
+        },
+        {
+          "message": "decision identity is write-once",
+          "rule": "!has(oldSelf.decidedBy) || (has(self.decidedBy) && self.decidedBy == oldSelf.decidedBy)"
+        },
+        {
+          "message": "a terminal approval decision and decidedBy identity must be recorded together",
+          "rule": "self.conditions.exists(c, (c.type == 'Approved' || c.type == 'Denied') && c.status == 'True') == has(self.decidedBy)"
+        },
+        {
+          "message": "request conditions must use a declared lifecycle or decision type",
+          "rule": "self.conditions.all(c, c.type in ['Approved', 'Denied', 'Resolved', 'Ready', 'Applied'])"
+        }
+      ]
+    }
+  },
+  "required": [
+    "spec"
+  ],
+  "title": "EphemeralAccessRequest",
+  "type": "object"
+}
