@@ -175,6 +175,9 @@ the authenticated login/session: `SET ROLE` does not load target-role settings.
 pgroles reads the setting without enabling it. Later default revokes can
 instead use inherited authority established by the plan's membership additions;
 removals and inheritance downgrades must not leave them without authority.
+A planned grant requires a surviving usable administrator, not just membership
+or SET access to one. Preflight conservatively excludes administrator paths
+established by other additions; stage those bootstrap steps separately.
 v0.11.0 preflight rejects new owners even with this setting; this support
 requires the upcoming release. On v0.11.0 pre-create the owner and grant inherited
 membership, or bootstrap separately.

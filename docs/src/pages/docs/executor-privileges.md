@@ -68,7 +68,12 @@ are needed. Membership additions in the manifest run after schema changes and
 default-privilege grants, so they cannot supply those earlier prerequisites.
 Default-privilege revocations run later and can use inherited authority acquired
 by those additions. Preflight checks that membership removals or inheritance
-downgrades do not leave a later revoke without authority.
+downgrades do not leave a later revoke without authority. A planned membership
+counts toward that authority only if its administrator is the executor or a
+role whose privileges the executor still inherits. SET access alone does not
+suffice. This check is conservative: it does not use newly added administrator
+paths to authorize other additions; split such bootstrap steps into separate
+applies if preflight rejects them.
 
 **Version note:** v0.11.0 preflight rejects new default-privilege owners for
 non-superusers even with this setting. The behavior above requires the fix in

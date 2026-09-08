@@ -610,6 +610,7 @@ pub async fn preflight_authority_issues(
                 &[],
                 &created,
                 &creation_edges,
+                &removed_edges,
             )
             .await?
             {
@@ -642,6 +643,7 @@ pub async fn preflight_authority_issues(
                 &added_edges,
                 &created,
                 &creation_edges,
+                &removed_edges,
             )
             .await?
             {
@@ -988,8 +990,10 @@ struct GrantorAuthorityRow {
 /// executor never had. Planned roles and automatic creation grants are
 /// included before membership removals and additions. Removals and inheritance
 /// downgrades conservatively remove every grantor edge for the named pair.
-/// Additions count only with existing ADMIN authority, or the automatic ADMIN
-/// grant a CREATEROLE executor receives for a role it creates.
+/// Additions require a surviving ADMIN grant held by the executor or a role
+/// it inherits after removals/downgrades, or automatic ADMIN on a new role.
+/// Conservatively, additions cannot establish their own grant prerequisites;
+/// newly acquired administrator paths are not used to authorize other additions.
 /// Superusers are never passed here.
 async fn roles_unreachable_in_graph(
     pool: &PgPool,
@@ -998,6 +1002,7 @@ async fn roles_unreachable_in_graph(
     added: &[(String, String)],
     created: &[String],
     creation_edges: &[(String, String)],
+    admin_removed: &[(String, String)],
 ) -> Result<Vec<(String, bool)>, sqlx::Error> {
     if roles.is_empty() {
         return Ok(Vec::new());
@@ -1005,12 +1010,17 @@ async fn roles_unreachable_in_graph(
     let (removed_roles, removed_members): (Vec<String>, Vec<String>) =
         removed.iter().cloned().unzip();
     let (added_roles, added_members): (Vec<String>, Vec<String>) = added.iter().cloned().unzip();
+    let (admin_removed_roles, admin_removed_members): (Vec<String>, Vec<String>) =
+        admin_removed.iter().cloned().unzip();
     let (creation_roles, creation_members): (Vec<String>, Vec<String>) =
         creation_edges.iter().cloned().unzip();
     let rows: Vec<(String, bool)> = sqlx::query_as(
         r#"
         WITH RECURSIVE removed(rolname, memname) AS (
             SELECT * FROM unnest($2::text[], $3::text[])
+        ),
+        admin_removed(rolname, memname) AS (
+            SELECT * FROM unnest($9::text[], $10::text[])
         ),
         added(rolname, memname) AS (
             SELECT * FROM unnest($4::text[], $5::text[])
@@ -1027,12 +1037,33 @@ async fn roles_unreachable_in_graph(
             WHERE m.inherit_option
             UNION SELECT * FROM unnest($7::text[], $8::text[])
         ),
-        edges(rolname, memname) AS (
+        surviving_edges(rolname, memname) AS (
             SELECT e.rolname, e.memname FROM initial_edges e
             WHERE NOT EXISTS (
                 SELECT 1 FROM removed d
                 WHERE d.rolname = e.rolname AND d.memname = e.memname
             )
+        ),
+        grantor_reach(rolname) AS (
+            SELECT current_user::text
+            UNION
+            SELECT e.rolname FROM surviving_edges e
+            JOIN grantor_reach r ON e.memname = r.rolname
+        ),
+        usable_admin(rolname) AS (
+            SELECT g.rolname::text
+            FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid
+            JOIN pg_roles mem ON mem.oid = m.member
+            JOIN grantor_reach r ON r.rolname = mem.rolname
+            WHERE m.admin_option
+              AND NOT EXISTS (
+                  SELECT 1 FROM admin_removed d
+                  WHERE d.rolname = g.rolname AND d.memname = mem.rolname
+              )
+        ),
+        edges(rolname, memname) AS (
+            SELECT * FROM surviving_edges
             UNION
             SELECT a.rolname, a.memname FROM added a
             JOIN known g ON g.rolname = a.rolname
@@ -1041,7 +1072,8 @@ async fn roles_unreachable_in_graph(
             WHERE CASE WHEN live_role.oid IS NULL THEN
                 a.rolname = ANY($6)
                 AND (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user)
-            ELSE pg_has_role(current_user, live_role.oid, 'MEMBER WITH ADMIN OPTION')
+            ELSE a.rolname <> current_user
+                 AND a.rolname IN (SELECT rolname FROM usable_admin)
             END
         ),
         reach(rolname) AS (
@@ -1065,6 +1097,8 @@ async fn roles_unreachable_in_graph(
     .bind(created)
     .bind(&creation_roles)
     .bind(&creation_members)
+    .bind(&admin_removed_roles)
+    .bind(&admin_removed_members)
     .fetch_all(pool)
     .await?;
     Ok(rows)

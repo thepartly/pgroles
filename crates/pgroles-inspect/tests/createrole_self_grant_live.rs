@@ -358,3 +358,170 @@ async fn default_owner_bootstrap_matches_postgres() {
     }
     pool.close().await;
 }
+
+/// ADMIN reachable through plain membership is insufficient for rendered GRANT:
+/// the executor must retain inherited access to a usable grantor at that phase.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a superuser"]
+async fn planned_owner_grants_require_surviving_admin_authority() {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+        .await
+        .unwrap();
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if version < 160_000 {
+        return;
+    }
+
+    for (case, inherits_admin, remove_admin, downgrade_admin, independent_admin) in [
+        ("noninherited admin", false, false, false, false),
+        ("retained inherited admin", true, false, false, false),
+        ("removed inherited admin", true, true, false, false),
+        (
+            "independent admin survives removal",
+            true,
+            true,
+            false,
+            true,
+        ),
+        ("downgraded inherited admin", true, false, true, false),
+        (
+            "independent admin survives downgrade",
+            true,
+            false,
+            true,
+            true,
+        ),
+    ] {
+        pool.execute(
+            "BEGIN;
+             CREATE ROLE csg_gap_owner;
+             CREATE ROLE csg_gap_executor CREATEROLE NOINHERIT;
+             SET LOCAL ROLE csg_gap_executor;
+             SET LOCAL createrole_self_grant = 'inherit';
+             CREATE ROLE csg_gap_admin",
+        )
+        .await
+        .unwrap();
+        if !inherits_admin {
+            pool.execute("GRANT csg_gap_admin TO csg_gap_executor WITH INHERIT FALSE")
+                .await
+                .unwrap();
+        }
+        pool.execute(
+            "RESET ROLE;
+             GRANT csg_gap_owner TO csg_gap_admin WITH ADMIN TRUE, INHERIT FALSE",
+        )
+        .await
+        .unwrap();
+        if independent_admin {
+            pool.execute("GRANT csg_gap_owner TO csg_gap_executor WITH ADMIN TRUE, INHERIT FALSE")
+                .await
+                .unwrap();
+        }
+        pool.execute("SET LOCAL ROLE csg_gap_executor")
+            .await
+            .unwrap();
+        // All setups pass the broad catalog predicate that previously
+        // admitted infeasible grants. The owner's privileges are not inherited.
+        let catalog_admin: bool = sqlx::query_scalar(
+            "SELECT pg_has_role(current_user, 'csg_gap_owner', 'MEMBER WITH ADMIN OPTION')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut changes = vec![Change::CreateRole {
+            name: "csg_gap_bridge".into(),
+            state: RoleState::default(),
+        }];
+        if remove_admin {
+            changes.push(Change::RemoveMember {
+                role: "csg_gap_admin".into(),
+                member: "csg_gap_executor".into(),
+                grantor: Some("csg_gap_executor".into()),
+            });
+        }
+        if downgrade_admin {
+            changes.push(Change::AddMember {
+                role: "csg_gap_admin".into(),
+                member: "csg_gap_executor".into(),
+                inherit: false,
+                admin: false,
+            });
+        }
+        if independent_admin {
+            // admin:false omits ADMIN in the renderer; it must not erase the
+            // existing independent ADMIN grant when preflight models this plan.
+            changes.push(Change::AddMember {
+                role: "csg_gap_owner".into(),
+                member: "csg_gap_executor".into(),
+                inherit: false,
+                admin: false,
+            });
+        }
+        changes.extend([
+            Change::AddMember {
+                role: "csg_gap_owner".into(),
+                member: "csg_gap_bridge".into(),
+                inherit: true,
+                admin: false,
+            },
+            Change::RevokeDefaultPrivilege {
+                owner: "csg_gap_owner".into(),
+                scope: DefaultPrivilegeScope::Global,
+                on_type: ObjectType::Function,
+                grantee: Grantee::Public,
+                privileges: [Privilege::Execute].into(),
+            },
+        ]);
+        let issues = preflight_authority_issues(&pool, &changes, &RoleGraph::default()).await;
+        let mut failure = None;
+        'plan: for change in &changes {
+            for statement in render_statements(change) {
+                if let Err(error) = pool.execute(statement.as_str()).await {
+                    failure = Some((statement, error));
+                    break 'plan;
+                }
+            }
+        }
+        pool.execute("ROLLBACK").await.unwrap();
+
+        assert!(catalog_admin, "setup: {case}");
+        let executable = independent_admin || (inherits_admin && !remove_admin && !downgrade_admin);
+        assert_eq!(
+            issues.unwrap(),
+            if executable {
+                vec![]
+            } else {
+                vec![AuthorityIssue::DefaultPrivilegeOwner {
+                    owner: "csg_gap_owner".into(),
+                    executor: "csg_gap_executor".into(),
+                }]
+            },
+            "preflight: {case}"
+        );
+        if executable {
+            assert!(failure.is_none(), "SQL: {case}: {failure:?}");
+        } else {
+            let (statement, error) = failure.expect("membership GRANT must fail");
+            assert!(
+                statement.starts_with("GRANT \"csg_gap_owner\""),
+                "{case}: {statement}: {error}"
+            );
+            // PostgreSQL versions differ in whether they reject the missing
+            // grantor as insufficient privilege or fail grantor selection.
+            assert!(
+                matches!(
+                    error.as_database_error().and_then(|e| e.code()).as_deref(),
+                    Some("42501" | "XX000")
+                ),
+                "{case}: {statement}: {error}"
+            );
+        }
+    }
+    pool.close().await;
+}
