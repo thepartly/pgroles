@@ -140,7 +140,23 @@ async fn providers_export_consistent_identity_and_respect_signal_opt_in() {
         let logs = std::mem::take(&mut *receiver.logs.lock().unwrap());
         assert_eq!(!metrics.is_empty(), expected_metrics, "{mode}");
         assert_eq!(!logs.is_empty(), expected_logs, "{mode}");
+        let sdk_resource = opentelemetry_sdk::Resource::builder_empty()
+            .with_detector(Box::new(
+                opentelemetry_sdk::resource::TelemetryResourceDetector,
+            ))
+            .build();
         let expected = BTreeMap::from([
+            ("telemetry.sdk.name".into(), "opentelemetry".into()),
+            ("telemetry.sdk.language".into(), "rust".into()),
+            (
+                "telemetry.sdk.version".into(),
+                sdk_resource
+                    .get(&opentelemetry::Key::from_static_str(
+                        "telemetry.sdk.version",
+                    ))
+                    .unwrap()
+                    .to_string(),
+            ),
             ("service.name".into(), "configured-operator".into()),
             ("service.version".into(), env!("CARGO_PKG_VERSION").into()),
             ("service.instance.id".into(), "pod-uid".into()),

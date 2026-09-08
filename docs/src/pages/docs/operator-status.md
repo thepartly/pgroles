@@ -127,7 +127,7 @@ collection, tested alerts and dashboard queries.
 | `pgroles.plan.total` | `result` | Cumulative successful observe-mode reconciliations |
 | `pgroles.plan.changes` | - | Cumulative changes observed across observe-mode reconciliations; repeated plans can count the same change again |
 | `pgroles.apply.total` | `result` | Applies attempted |
-| `pgroles.apply.statements` | - | SQL statements executed |
+| `pgroles.apply.statements` | - | Reserved instrument; not currently recorded by production apply paths |
 | `pgroles.lock_contention.total` | - | Reconciles that lost the per-database lock |
 | `pgroles.policy.conflicts` | - | Overlapping-ownership conflicts detected |
 | `pgroles.database.connection_failures` | - | Failed database connections |

@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::resource::EnvResourceDetector;
+use opentelemetry_sdk::resource::{EnvResourceDetector, TelemetryResourceDetector};
 
 /// Capture configuration once so providers cannot acquire different identities.
 /// Environment attributes override application defaults; OTEL_SERVICE_NAME takes
@@ -14,6 +14,7 @@ pub(crate) fn operator_resource() -> Resource {
     RESOURCE
         .get_or_init(|| {
             let mut builder = Resource::builder_empty()
+                .with_detector(Box::new(TelemetryResourceDetector))
                 .with_attributes([
                     KeyValue::new("service.name", "pgroles-operator"),
                     KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
@@ -99,6 +100,18 @@ mod tests {
     fn defaults_are_stable_within_process_and_distinct_between_processes() {
         let first = probe(None, None);
         let second = probe(None, None);
+        assert_eq!(first["telemetry.sdk.name"], "opentelemetry");
+        assert_eq!(first["telemetry.sdk.language"], "rust");
+        let sdk_resource = Resource::builder_empty()
+            .with_detector(Box::new(TelemetryResourceDetector))
+            .build();
+        assert_eq!(
+            first["telemetry.sdk.version"],
+            sdk_resource
+                .get(&Key::from_static_str("telemetry.sdk.version"))
+                .unwrap()
+                .to_string()
+        );
         assert_eq!(first["service.name"], "pgroles-operator");
         assert_eq!(first["service.version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(first["service.instance.id"].len(), 32);

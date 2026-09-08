@@ -61,7 +61,8 @@ Kubernetes Events and pod logs alone are not a durable audit archive.
 
 Metrics and logs share one process resource. Defaults are `service.name` =
 `pgroles-operator`, the binary's `service.version`, and a random per-process
-`service.instance.id`. `OTEL_RESOURCE_ATTRIBUTES` overrides defaults, then a
+`service.instance.id`. The resource also includes the SDK name, language and
+version as `telemetry.sdk.*`. `OTEL_RESOURCE_ATTRIBUTES` overrides defaults, then a
 nonempty `OTEL_SERVICE_NAME` overrides the service name. Configuration is captured
 once when telemetry is enabled; restart the operator after changing it.
 
@@ -73,6 +74,26 @@ attributes onto exported series so replicas remain distinguishable. Aggregate
 counters with `sum(rate(...))`, applying `rate` before summing to handle independent
 resets. Do not put database URLs, SQL, usernames or arbitrary policy contents in
 resource attributes.
+
+## OpenTelemetry conventions
+
+Service and Kubernetes resource attributes use the standard OpenTelemetry names.
+The `pgroles.*` instruments are application-specific metrics, not standardized
+HTTP, database-client or Kubernetes metrics. Their units are carried in OTLP
+metadata; durations retain milliseconds (`ms`) for compatibility with existing
+queries. OpenTelemetry recommends seconds for new duration instruments. Changing
+existing units requires a coordinated migration of dashboards, thresholds and
+stored series.
+
+The default instance ID is an opaque random 128-bit value. It provides per-process
+uniqueness; the service conventions recommend UUIDs but do not mandate their
+format. An explicit instance ID must distinguish every concurrent operator
+instance within the same service name and service namespace. Use a pod UID only
+when one operator instance with that service identity runs in each pod.
+
+See the [service conventions](https://opentelemetry.io/docs/specs/semconv/resource/service/),
+[resource conventions](https://opentelemetry.io/docs/specs/semconv/resource/), and
+[metric conventions](https://opentelemetry.io/docs/specs/semconv/general/metrics/).
 
 ## Alert semantics
 
