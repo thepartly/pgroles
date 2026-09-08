@@ -334,6 +334,41 @@ pub async fn preflight_authority_issues(
             .await?;
     let server_major = (server_version_num / 10_000) as u32;
 
+    let created: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::CreateRole { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    // PostgreSQL 16+ can grant inherited authority immediately at CREATE ROLE.
+    // SET alone is insufficient: default-privilege SQL does not SET ROLE.
+    let inherits_created = if server_major >= 16
+        && executor_has_createrole
+        && !executor_is_superuser
+        && !created.is_empty()
+    {
+        let setting: String = sqlx::query_scalar("SHOW createrole_self_grant")
+            .fetch_one(pool)
+            .await?;
+        setting.split(',').any(|option| {
+            option
+                .trim()
+                .trim_matches('"')
+                .eq_ignore_ascii_case("inherit")
+        })
+    } else {
+        false
+    };
+    let creation_edges: Vec<(String, String)> = if inherits_created {
+        created
+            .iter()
+            .map(|role| (role.clone(), executor.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // --- Predefined-role membership authority ---
     // Granting or revoking membership in a predefined (`pg_*`) role requires
     // ADMIN OPTION on it. `pg_has_role(..., 'MEMBER WITH ADMIN OPTION')`
@@ -515,9 +550,7 @@ pub async fn preflight_authority_issues(
             _ => None,
         })
         .collect();
-    // Only inheriting additions extend USAGE. An added edge referencing a
-    // role the plan also creates cannot resolve against pg_roles yet and is
-    // conservatively ignored.
+    // Only inheriting additions extend USAGE.
     let added_edges: Vec<(String, String)> = changes
         .iter()
         .filter_map(|change| match change {
@@ -530,9 +563,25 @@ pub async fn preflight_authority_issues(
             _ => None,
         })
         .collect();
+    // GRANT ... INHERIT FALSE can overwrite an automatic creation grant,
+    // even without a preceding RemoveMember (the role did not exist at
+    // inspection). Apply these downgrades only after the addition phase.
+    let defaults_removed_edges: Vec<(String, String)> = removed_edges
+        .iter()
+        .cloned()
+        .chain(changes.iter().filter_map(|change| match change {
+            Change::AddMember {
+                role,
+                member,
+                inherit: false,
+                ..
+            } => Some((role.clone(), member.clone())),
+            _ => None,
+        }))
+        .collect();
     // Owners of `SetDefaultPrivilege` changes, which execute before any
-    // membership change: the current-state owner check below judges them, so
-    // the phase check must not also report an owner that carries both kinds.
+    // membership change: the owner check below judges their initial authority.
+    // The later phase check avoids duplicating that check's failures.
     let set_owners: BTreeSet<String> = changes
         .iter()
         .filter_map(|change| match change {
@@ -545,7 +594,7 @@ pub async fn preflight_authority_issues(
     // current graph — is authoritative for RevokeDefaultPrivilege owners, so
     // the current-state owner check below must not double-judge them.
     let revoke_owners_phase_checked =
-        phase_checks_active && !(removed_edges.is_empty() && added_edges.is_empty());
+        phase_checks_active && !(defaults_removed_edges.is_empty() && added_edges.is_empty());
     if phase_checks_active {
         let mut broken_by_plan: BTreeSet<String> = BTreeSet::new();
         let mut never_usable: BTreeSet<String> = BTreeSet::new();
@@ -554,9 +603,15 @@ pub async fn preflight_authority_issues(
         // any addition, so only removals can affect them.
         if !removed_edges.is_empty() && !membership_grantors.is_empty() {
             let membership_phase_roles: Vec<String> = membership_grantors.iter().cloned().collect();
-            for (grantor, usable_now) in
-                roles_unreachable_in_graph(pool, &membership_phase_roles, &removed_edges, &[])
-                    .await?
+            for (grantor, usable_now) in roles_unreachable_in_graph(
+                pool,
+                &membership_phase_roles,
+                &removed_edges,
+                &[],
+                &created,
+                &creation_edges,
+            )
+            .await?
             {
                 // A grantor the executor cannot use even now was already
                 // flagged exactly (ForeignGrantorMembershipRevoke) above.
@@ -583,8 +638,10 @@ pub async fn preflight_authority_issues(
             for (owner, usable_now) in roles_unreachable_in_graph(
                 pool,
                 &defaults_phase_roles,
-                &removed_edges,
+                &defaults_removed_edges,
                 &added_edges,
+                &created,
+                &creation_edges,
             )
             .await?
             {
@@ -603,9 +660,10 @@ pub async fn preflight_authority_issues(
             });
         }
         for owner in never_usable {
-            // An owner that also carries a SetDefaultPrivilege change gets
-            // the identical issue from the current-state check below.
-            if set_owners.contains(&owner) {
+            // Avoid duplicating a failing grant-phase check. A new owner
+            // with inherited creation authority passes that check, but can
+            // still lose authority before its later revoke.
+            if set_owners.contains(&owner) && !(inherits_created && created.contains(&owner)) {
                 continue;
             }
             issues.push(AuthorityIssue::DefaultPrivilegeOwner {
@@ -651,28 +709,22 @@ pub async fn preflight_authority_issues(
                 });
             }
         }
-        // A non-superuser cannot act as a role merely because the same plan
-        // creates it. PostgreSQL's automatic CREATEROLE administration grant
-        // does not provide the USAGE authority ALTER DEFAULT PRIVILEGES
-        // requires. Reject before the transaction starts; superusers can
-        // safely create the owner and alter its defaults atomically.
-        let created: BTreeSet<&str> = changes
-            .iter()
-            .filter_map(|change| match change {
-                Change::CreateRole { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
+        // Creation precedes default grants; later revokes use the phase graph
+        // when memberships change, including CREATE ROLE's automatic edges.
         for owner in &owners {
             if known.contains(owner) {
                 continue;
             }
-            if created.contains(owner.as_str()) && !executor_is_superuser {
+            if created.contains(owner)
+                && !executor_is_superuser
+                && !inherits_created
+                && (set_owners.contains(owner) || !revoke_owners_phase_checked)
+            {
                 issues.push(AuthorityIssue::DefaultPrivilegeOwner {
                     owner: owner.clone(),
                     executor: executor.clone(),
                 });
-            } else if !created.contains(owner.as_str()) {
+            } else if !created.contains(owner) {
                 issues.push(AuthorityIssue::MissingDefaultPrivilegeOwner {
                     owner: owner.clone(),
                 });
@@ -933,14 +985,17 @@ struct GrantorAuthorityRow {
 /// phase equivalent of `pg_has_role(current_user, role, 'USAGE')`. Each
 /// unreachable role is returned with whether the executor can use it *now*,
 /// so callers can distinguish authority the plan breaks from authority the
-/// executor never had. Additions resolve against `pg_roles`, so an edge
-/// referencing a role the plan also creates is conservatively ignored.
+/// executor never had. Planned roles and automatic creation grants are
+/// included before membership removals and additions. Removals and inheritance
+/// downgrades conservatively remove every grantor edge for the named pair.
 /// Superusers are never passed here.
 async fn roles_unreachable_in_graph(
     pool: &PgPool,
     roles: &[String],
     removed: &[(String, String)],
     added: &[(String, String)],
+    created: &[String],
+    creation_edges: &[(String, String)],
 ) -> Result<Vec<(String, bool)>, sqlx::Error> {
     if roles.is_empty() {
         return Ok(Vec::new());
@@ -948,6 +1003,8 @@ async fn roles_unreachable_in_graph(
     let (removed_roles, removed_members): (Vec<String>, Vec<String>) =
         removed.iter().cloned().unzip();
     let (added_roles, added_members): (Vec<String>, Vec<String>) = added.iter().cloned().unzip();
+    let (creation_roles, creation_members): (Vec<String>, Vec<String>) =
+        creation_edges.iter().cloned().unzip();
     let rows: Vec<(String, bool)> = sqlx::query_as(
         r#"
         WITH RECURSIVE removed(rolname, memname) AS (
@@ -956,31 +1013,40 @@ async fn roles_unreachable_in_graph(
         added(rolname, memname) AS (
             SELECT * FROM unnest($4::text[], $5::text[])
         ),
-        edges(roleid, member) AS (
-            SELECT m.roleid, m.member
+        known(rolname) AS (
+            SELECT rolname::text FROM pg_roles
+            UNION SELECT unnest($6::text[])
+        ),
+        initial_edges(rolname, memname) AS (
+            SELECT g.rolname::text, mem.rolname::text
             FROM pg_auth_members m
             JOIN pg_roles g ON g.oid = m.roleid
             JOIN pg_roles mem ON mem.oid = m.member
             WHERE m.inherit_option
-              AND NOT EXISTS (
-                  SELECT 1 FROM removed d
-                  WHERE d.rolname = g.rolname AND d.memname = mem.rolname
-              )
-            UNION
-            SELECT g.oid, mem.oid
-            FROM added a
-            JOIN pg_roles g ON g.rolname = a.rolname
-            JOIN pg_roles mem ON mem.rolname = a.memname
+            UNION SELECT * FROM unnest($7::text[], $8::text[])
         ),
-        reach(oid) AS (
-            SELECT oid FROM pg_roles WHERE rolname = current_user
+        edges(rolname, memname) AS (
+            SELECT e.rolname, e.memname FROM initial_edges e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM removed d
+                WHERE d.rolname = e.rolname AND d.memname = e.memname
+            )
             UNION
-            SELECT e.roleid FROM edges e JOIN reach r ON e.member = r.oid
+            SELECT a.rolname, a.memname FROM added a
+            JOIN known g ON g.rolname = a.rolname
+            JOIN known mem ON mem.rolname = a.memname
+        ),
+        reach(rolname) AS (
+            SELECT current_user::text
+            UNION
+            SELECT e.rolname FROM edges e JOIN reach r ON e.memname = r.rolname
         )
-        SELECT r.rolname::text, pg_has_role(current_user, r.oid, 'USAGE')
-        FROM pg_roles r
-        WHERE r.rolname = ANY($1)
-          AND r.oid NOT IN (SELECT oid FROM reach)
+        SELECT k.rolname,
+               CASE WHEN r.oid IS NULL THEN false
+                    ELSE pg_has_role(current_user, r.oid, 'USAGE') END
+        FROM known k LEFT JOIN pg_roles r ON r.rolname = k.rolname
+        WHERE k.rolname = ANY($1)
+          AND k.rolname NOT IN (SELECT rolname FROM reach)
         "#,
     )
     .bind(roles)
@@ -988,6 +1054,9 @@ async fn roles_unreachable_in_graph(
     .bind(&removed_members)
     .bind(&added_roles)
     .bind(&added_members)
+    .bind(created)
+    .bind(&creation_roles)
+    .bind(&creation_members)
     .fetch_all(pool)
     .await?;
     Ok(rows)

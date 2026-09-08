@@ -43,18 +43,37 @@ PostgreSQL 16 changed `CREATEROLE` semantics: a role with `CREATEROLE` automatic
 - inherited privileges of each default-privilege creator role (which need not be the schema owner)
 
 Automatic `ADMIN OPTION` does not itself provide `INHERIT` or `SET` access.
-PostgreSQL's [createrole_self_grant](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT)
-can give a non-superuser immediate inheritance or SET access to roles it creates.
-However, pgroles v0.11.0 preflight does not account for that setting: it rejects
-plans that create a default-privilege owner and alter its defaults as a
-non-superuser. This is a pgroles limitation, not a PostgreSQL prohibition.
+On PostgreSQL 16+, [createrole_self_grant](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT)
+can give a non-superuser immediate inherited authority over roles it creates.
+With `'inherit'` (or `'set, inherit'`), pgroles can create a default-privilege
+owner and grant its defaults in one apply. `'set'` alone is insufficient:
+pgroles does not switch roles when altering defaults. The setting affects
+newly created roles only.
 
-For owner-bound defaults, pre-create the owner and grant the executor the
-required access, bootstrap in two stages, or use a superuser for the atomic
-first apply. Creating a schema owned by another role likewise needs a usable
-`SET ROLE` path before the schema statement. Declaring a membership in the same
-manifest cannot supply these earlier prerequisites: pgroles adds memberships
-after schema changes and default-privilege grants.
+Configure the authenticated login role, then reconnect:
+
+```sql
+ALTER ROLE pgroles_executor SET createrole_self_grant = 'inherit';
+```
+
+If the connection uses `connection.params.setRole`, configure the login
+identity or the session, not just the target role:
+[`SET ROLE` does not load the target role's settings](https://www.postgresql.org/docs/18/sql-set-role.html).
+Verify `SHOW createrole_self_grant` using the same connection configuration
+as pgroles. pgroles reads this setting; it does not enable it automatically.
+
+Creating a schema owned by another role also needs a usable `SET ROLE` path
+before the schema statement; use `'set, inherit'` when both kinds of authority
+are needed. Membership additions in the manifest run after schema changes and
+default-privilege grants, so they cannot supply those earlier prerequisites.
+Default-privilege revocations run later and can use inherited authority acquired
+by those additions. Preflight checks that membership removals or inheritance
+downgrades do not leave a later revoke without authority.
+
+**Version note:** v0.11.0 preflight rejects new default-privilege owners for
+non-superusers even with this setting. The behavior above requires the fix in
+the upcoming release. On v0.11.0, pre-create the owner and grant the required
+access, bootstrap in two stages, or use a superuser for the atomic first apply.
 
 The friction also shows up in **brownfield** adoption. `CREATEROLE` does not retroactively grant `ADMIN OPTION` on roles that already existed before the executor was created. For every pre-existing role pgroles needs to alter, drop, or manage memberships on, a superuser or existing admin must explicitly grant the executor admin rights:
 
@@ -90,8 +109,8 @@ Steps 1–2 suffice only when the plan needs no additional owner authority.
 Step 3 gives the executor an inheritance path to the owner for default
 privileges and a SET path for schema assignment; grant only the options
 the plan needs. Repeat for each relevant owner. For owners created by the policy,
-use the staged bootstrap above. Step 4 covers pre-existing roles requiring
-administration.
+configure the self-grant setting described above or use staged bootstrap.
+Step 4 covers pre-existing roles requiring administration.
 
 ## Cloud providers
 
