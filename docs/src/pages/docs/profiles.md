@@ -89,7 +89,7 @@ Each `schema x profile` combination produces:
 2. **Grants** from the profile, scoped to the schema
 3. **Default privileges** from the profile, scoped to the schema
 
-The example above generates four roles: `inventory-editor`, `inventory-viewer`, `catalog-viewer`, plus all their associated grants and default privileges.
+The example above generates three roles: `inventory-editor`, `inventory-viewer`, `catalog-viewer`, plus all their associated grants and default privileges.
 
 ## Custom role naming
 

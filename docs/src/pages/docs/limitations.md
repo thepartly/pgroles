@@ -11,6 +11,14 @@ What pgroles does not cover, so you know where the edges of the declared-state m
 
 `GRANT SELECT (col) ON table` remains unmanaged by pgroles: column-level grants are not diffed, not revoked, and `pgroles generate` does not export them — manifests only describe table-level access. pgroles does, however, detect column-level grants during `diff` and `apply` — in schemas whose privileges it manages (schemas referenced by grants or default privileges in the manifest): if any are found, it prints a warning (schema, table, grantee, affected columns, and privileges) so the gap is visible instead of silent. The warning does not block `diff`/`apply` and the grants themselves are still not managed — you must review and, if needed, revoke them manually.
 
+## MAINTAIN privilege
+
+PostgreSQL 17 introduced the table-level `MAINTAIN` privilege; it is also
+available in PostgreSQL 18. pgroles v0.11.0 cannot declare or reconcile it, and
+its ACL inspection omits it. A clean diff therefore does not verify maintenance
+access. Review it directly in PostgreSQL. See the
+[PostgreSQL 17 release notes](https://www.postgresql.org/docs/17/release-17.html).
+
 ## Membership SET option
 
 On PostgreSQL 15 and older there is no per-membership `INHERIT` option at all: inheritance is governed solely by the member role's `INHERIT` attribute, which pgroles already manages as a role attribute. Inspection on those versions reports the member's attribute as the edge's `inherit` value, so a membership whose member role sets `inherit: false` diffs against the edge default of `true` and plans a revoke-and-regrant that cannot change anything — the plan re-appears on every run. On pre-16 servers, leave the per-member `inherit` field unset and manage inheritance through the role's own `inherit` attribute.
@@ -38,7 +46,11 @@ warns and `apply` blocks. It checks authority against the plan's execution order
 so removing a membership cannot silently invalidate a later statement's authority.
 
 Wildcard revocations expand to concrete changes because different objects may
-have different owners and grantors. Owner-inherent privileges are preserved.
+have different owners and grantors. pgroles preserves existing owner-grantee
+ACL entries. This is a reconciliation choice: PostgreSQL allows an owner to
+revoke ordinary privileges from itself, while ownership rights and implicit
+grant options remain inherent. Missing declared owner privileges can still be
+granted. See [PostgreSQL privileges](https://www.postgresql.org/docs/18/ddl-priv.html).
 The plan can therefore contain more entries than the wildcard rules in the
 manifest; review its complete SQL. This behavior is available since
 v0.11.0. In 0.10.0–0.10.1, wildcard-collapsed revokes can fall back to a plain revoke
