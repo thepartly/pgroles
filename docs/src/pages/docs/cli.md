@@ -47,7 +47,7 @@ pgroles diff --bundle path/to/pgroles.bundle.yaml --database-url postgres://loca
 | `-f`, `--file` | Manifest file path (default: `pgroles.yaml`) |
 | `--bundle` | Bundle root file path |
 | `--database-url` | PostgreSQL connection string (or `DATABASE_URL` env) |
-| `--format` | Output format: `sql` (default), `summary`, `json`, or `markdown` (available since v0.11.0) |
+| `--format` | Output format: `sql` (default), `summary`, `json`, or `markdown` |
 | `--mode` | Reconciliation mode: `authoritative` (default), `additive`, or `adopt` |
 | `--exit-code` | Exit with code 2 when drift is detected (default: `true`) |
 | `--no-exit-code` | Always exit 0, even when drift is detected |

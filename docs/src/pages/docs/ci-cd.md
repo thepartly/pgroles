@@ -181,7 +181,7 @@ pgroles apply -f pgroles.yaml --database-url "$PROD_DATABASE_URL"
 
 ## Review summaries
 
-`--format markdown` is available in v0.11.0 and later. Use it to produce a redacted table for a review artifact:
+Use `--format markdown` to produce a redacted table for a review artifact:
 
 ```bash
 pgroles diff -f pgroles.yaml --mode adopt --format markdown > pgroles-review.md
