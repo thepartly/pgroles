@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-08
+
+### Upgrade notes
+
+- No CRD schema changes from v0.11.0. Continue deploying the CRDs from the matching chart version.
+- Readiness now waits for all required watches to initialize and clears during relists and shutdown. Individual policy failures remain separate from process readiness; allow time for initial synchronization during rollout.
+- Candidate plans now honor `preserve_undeclared_grants` before computing approval effects. Review replanned candidates after upgrading: obsolete revokes disappear, and changed effects use the existing revalidation and approval rules.
+- Consecutive grantor revokes share role blocks. SQL hashes and statement counts may change; semantic approval identity does not change merely because SQL formatting changes.
+- OTLP exports include per-process instance identity and standard SDK metadata. Review backend resource-label mapping and aggregation across replicas. Existing metric names and millisecond units remain unchanged.
+
 ### Added
 
 - OTLP metrics and logs share a configurable resource identity, including a default process instance ID. Standard resource environment variables and an optional Helm Downward API example support deployment attribution. (#224)
@@ -19,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQL rendering and execution combine consecutive grantor-specific revocations into shared role blocks, preserving change order and restoring the configured execution role. Full SQL, redacted previews, and CLI/operator execution use the same renderer. (#230)
 - Authority preflight recognizes PostgreSQL 16+ `createrole_self_grant=inherit` when a non-superuser creates a default-privilege owner in the same plan. Later default revokes account for planned roles, automatic inherited memberships, and membership removals, additions, and inheritance downgrades.
 - Release notes use only the matching changelog entry, without GitHub's duplicated change list. Missing or empty release notes stop draft creation.
+
+- Update the locked `chacha20` dependency from yanked 0.10.1 to 0.10.2.
+
+### Documentation
+
+- Correct PostgreSQL 18 privilege, membership, schema-ownership, and candidate-preview guidance; document executor preflight boundaries and upgrade behavior. (#228, #229, #230)
 
 ## [0.11.0] - 2026-09-06
 

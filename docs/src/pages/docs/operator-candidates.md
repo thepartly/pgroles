@@ -55,7 +55,7 @@ grants differ, the candidate reports `Ready=True` with reason `NoEffects` and
 creates no approval plan.
 
 In v0.11.0, candidate planning omitted this filter and could preview revokes that
-the parent would suppress after promotion. This is fixed in the next release.
+the parent would suppress after promotion. This is fixed in v0.12.0.
 
 Candidate planning still omits executor-authority preflight, plan advisory
 warnings, and the adopt-mode schema-owner-transfer guard. `Ready=True` means a

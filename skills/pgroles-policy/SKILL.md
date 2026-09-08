@@ -179,7 +179,7 @@ A planned grant requires a surviving usable administrator, not just membership
 or SET access to one. Preflight conservatively excludes administrator paths
 established by other additions; stage those bootstrap steps separately.
 v0.11.0 preflight rejects new owners even with this setting; this support
-requires the upcoming release. On v0.11.0 pre-create the owner and grant inherited
+requires v0.12.0. On v0.11.0 pre-create the owner and grant inherited
 membership, or bootstrap separately.
 
 Schema defaults add to the global layer and cannot subtract from it. Removing
