@@ -15,9 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Candidate plans apply the same undeclared object-grant preservation filter as normal reconciliation before computing review SQL and approval effects.
-- SQL rendering and execution combine consecutive grantor-specific revocations into shared role blocks, preserving change order and restoring the configured execution role.
-
+- Candidate plans apply the same undeclared object-grant preservation filter as normal reconciliation before computing review SQL and approval effects. Explicit absence assertions, default privileges, and memberships retain their existing semantics. (#230)
+- SQL rendering and execution combine consecutive grantor-specific revocations into shared role blocks, preserving change order and restoring the configured execution role. Full SQL, redacted previews, and CLI/operator execution use the same renderer. (#230)
+- Authority preflight recognizes PostgreSQL 16+ `createrole_self_grant=inherit` when a non-superuser creates a default-privilege owner in the same plan. Later default revokes account for planned roles, automatic inherited memberships, and membership removals, additions, and inheritance downgrades.
 - Release notes use only the matching changelog entry, without GitHub's duplicated change list. Missing or empty release notes stop draft creation.
 
 ## [0.11.0] - 2026-09-06
