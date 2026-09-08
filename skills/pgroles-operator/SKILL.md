@@ -225,7 +225,7 @@ Interpretation:
 - `Ready=False, reason=BlockedByActivePolicy` means the parent is failing or
   has its own plan awaiting a decision; the candidate is planned once the
   parent settles.
-- Candidate planning filters undeclared object-grant revokes using the proposed roles' `preserve_undeclared_grants` setting, before SQL and approval digest generation. Explicit absence, default privileges, and memberships retain their normal semantics. v0.11.0 omitted this filter; v0.12.0 fixes that gap.
+- Candidate planning filters undeclared object-grant revokes using the proposed roles' `preserve_undeclared_grants` setting, before SQL and approval digest generation. Explicit absence, default privileges, and memberships retain their normal semantics.
 - Candidate planning still omits executor-authority preflight, advisory warnings,
   and the adopt-mode schema-owner-transfer guard. `Ready=True` does not prove
   apply will succeed. Check executor authority and parent execution settings

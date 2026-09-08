@@ -48,7 +48,7 @@ pgroles graph desired -f pgroles.yaml
 pgroles diff -f pgroles.yaml --database-url "$DATABASE_URL"
 ```
 
-With v0.11.0 or later, use
+Use
 `pgroles diff --format markdown` for a review artifact and retain stderr
 warnings. Bundle changes are attributed to their owning source document. The
 redacted report fingerprint identifies that report, not database state or an
@@ -107,7 +107,7 @@ the provider or IaC rollout completes before pgroles apply.
 
 ## Membership SET Option
 
-In v0.11.0, pgroles manages membership `inherit` and `admin`, but not `SET`.
+pgroles manages membership `inherit` and `admin`, but not `SET`.
 Changing those options can revoke and recreate an edge with PostgreSQL's
 default `SET TRUE`. Do not use `SET FALSE` as a security boundary on a
 pgroles-managed membership; a clean diff does not verify its SET option.
@@ -167,7 +167,7 @@ is one schema or the owner-wide global layer. A default owner declaration does
 not retroactively grant existing objects and does not cover objects created by
 another role.
 
-When a non-superuser plan creates an owner and grants its defaults before membership additions, PostgreSQL 16+ needs `CREATEROLE` and `createrole_self_grant = 'inherit'` (or `'set, inherit'`) on the connection for immediate inherited authority. `'set'` alone is insufficient. Configure the authenticated login/session: `SET ROLE` does not load target-role settings. pgroles reads the setting without enabling it. Later default revokes can instead use inherited authority established by the plan's membership additions; removals and inheritance downgrades must not leave them without authority. A planned grant requires a surviving usable administrator, not just membership or SET access to one. Preflight conservatively excludes administrator paths established by other additions; stage those bootstrap steps separately. v0.11.0 preflight rejects new owners even with this setting; this support requires v0.12.0. On v0.11.0 pre-create the owner and grant inherited membership, or bootstrap separately.
+When a non-superuser plan creates an owner and grants its defaults before membership additions, PostgreSQL 16+ needs `CREATEROLE` and `createrole_self_grant = 'inherit'` (or `'set, inherit'`) on the connection for immediate inherited authority. `'set'` alone is insufficient. Configure the authenticated login/session: `SET ROLE` does not load target-role settings. pgroles reads the setting without enabling it. Later default revokes can instead use inherited authority established by the plan's membership additions; removals and inheritance downgrades must not leave them without authority. A planned grant requires a surviving usable administrator, not just membership or SET access to one. Preflight conservatively excludes administrator paths established by other additions; stage those bootstrap steps separately.
 
 Schema defaults add to the global layer and cannot subtract from it. Removing
 PostgreSQL's built-in `PUBLIC EXECUTE` on functions therefore needs a global
@@ -189,14 +189,14 @@ Review effective and transitive privileges, not role names alone.
   than the new membership suggests.
 - Column-level grants are outside desired-state reconciliation. Read inspection
   warnings and review them separately.
-- v0.11.0 does not model `MAINTAIN` (introduced in PostgreSQL 17). Inspection
+- pgroles does not model `MAINTAIN` (introduced in PostgreSQL 17). Inspection
   omits it and manifests cannot declare it; verify maintenance access separately
   even when the diff is clean.
 - PUBLIC is reconciled only where a rule names it. A privilege PUBLIC holds that
   no rule mentions is left alone in every mode, so deleting a `present` PUBLIC
   rule does not revoke anything — switch it to `ensure: absent` instead.
 
-Since v0.11.0, wildcard revocations preserve concrete grantor attribution. Review per-object
+Wildcard revocations preserve concrete grantor attribution. Review per-object
 changes and ensure the executor can act as every recorded grantor. Do not
 replace those statements with a broad plain REVOKE. Versions through 0.10.1
 have a known wildcard grantor gap; use the matching release limitations.
