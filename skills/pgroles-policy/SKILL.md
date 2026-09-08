@@ -105,6 +105,13 @@ anyone else.
 The external role must already exist whenever retained SQL references it. Ensure
 the provider or IaC rollout completes before pgroles apply.
 
+## Membership SET Option
+
+In v0.11.0, pgroles manages membership `inherit` and `admin`, but not `SET`.
+Changing those options can revoke and recreate an edge with PostgreSQL's
+default `SET TRUE`. Do not use `SET FALSE` as a security boundary on a
+pgroles-managed membership; a clean diff does not verify its SET option.
+
 ## Predefined (pg_*) Roles
 
 PostgreSQL's predefined roles (`pg_read_all_data`, `pg_monitor`, ...) may be
@@ -138,11 +145,11 @@ transfer schema ownership away from the live owner unless apply passes
 Schema ownership is modeled specially: pgroles converges the declared owner and
 ensures that owner has effective `CREATE` and `USAGE` on the schema.
 
-Table, sequence, function, and type ownership is not modeled. Inspection tags
-owner-grantee ACL entries as inherent — PostgreSQL records the owner's
-privileges there once any grant materializes the ACL — so plans never revoke
-them, declared grants on an owner's own objects converge as no-ops, and
-`generate` never exports them.
+Table, sequence, function, and type ownership is not modeled. pgroles preserves
+existing owner-grantee ACL entries and omits them from `generate`. This is a
+pgroles reconciliation choice: PostgreSQL permits owners to revoke their own
+ordinary privileges. Declared owner grants produce no SQL when already held;
+missing declared privileges can still be granted.
 
 PostgreSQL materializes an object's ACL on the first grant or revoke, including
 a revoke of implicit PUBLIC access. Inspection protects owner entries, so
@@ -180,6 +187,9 @@ Review effective and transitive privileges, not role names alone.
   than the new membership suggests.
 - Column-level grants are outside desired-state reconciliation. Read inspection
   warnings and review them separately.
+- v0.11.0 does not model `MAINTAIN` (introduced in PostgreSQL 17). Inspection
+  omits it and manifests cannot declare it; verify maintenance access separately
+  even when the diff is clean.
 - PUBLIC is reconciled only where a rule names it. A privilege PUBLIC holds that
   no rule mentions is left alone in every mode, so deleting a `present` PUBLIC
   rule does not revoke anything — switch it to `ensure: absent` instead.
