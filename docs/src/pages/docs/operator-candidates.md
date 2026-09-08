@@ -46,14 +46,22 @@ others.
 
 ## Preview limitations
 
-In v0.11.0, candidate planning does not run every enforcing-policy check:
+Candidate planning applies the same `preserve_undeclared_grants` filter as the
+normal reconciler before generating SQL, the change summary, and the approval
+digest. The setting comes from the candidate's proposed roles. It preserves
+undeclared object grants; explicit object absence assertions, default privileges,
+and memberships retain their normal reconciliation semantics. If only preserved
+grants differ, the candidate reports `Ready=True` with reason `NoEffects` and
+creates no approval plan.
 
-- It omits the `preserve_undeclared_grants` filter, so it can preview object
-  revokes that the parent would suppress after promotion.
-- It omits executor-authority preflight, plan advisory warnings, and the adopt
-  mode schema-owner-transfer guard. `Ready=True` means a preview is available;
-  it does not prove the executor can apply it. Execution settings such as
-  `allow_schema_owner_transfers` remain on the parent, outside candidate content.
+In v0.11.0, candidate planning omitted this filter and could preview revokes that
+the parent would suppress after promotion. This is fixed in the next release.
+
+Candidate planning still omits executor-authority preflight, plan advisory
+warnings, and the adopt-mode schema-owner-transfer guard. `Ready=True` means a
+preview is available; it does not prove the executor can apply it. Execution
+settings such as `allow_schema_owner_transfers` remain on the parent, outside
+candidate content.
 
 Promotion recomputes effects and checks the approved digest before execution.
 Different effects require a replacement plan; matching effects can still be

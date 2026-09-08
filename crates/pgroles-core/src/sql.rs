@@ -152,6 +152,77 @@ pub fn render_statements(change: &Change) -> Vec<String> {
 /// Render a single [`Change`] into one or more SQL statements,
 /// using the given [`SqlContext`] for version-dependent syntax.
 pub fn render_statements_with_context(change: &Change, ctx: &SqlContext) -> Vec<String> {
+    render_batch_with_context(std::slice::from_ref(change), ctx)
+        .into_iter()
+        .map(|statement| statement.sql)
+        .collect()
+}
+
+/// One executable statement and its safe display counterpart.
+///
+/// Keep statements separate when executing: PostgreSQL's prepared query
+/// protocol does not accept a multi-statement script.
+pub struct RenderedStatement {
+    /// Executable SQL, potentially containing a password. Never log this field.
+    pub sql: String,
+    /// The same statement with password values replaced for display or logging.
+    pub redacted_sql: String,
+}
+
+/// Render an ordered plan, sharing role switches across consecutive revokes
+/// attributed to the same grantor. No changes are reordered. Every temporary
+/// role block restores the configured execution role (or the login role).
+/// Password redaction uses change metadata, never SQL text parsing.
+pub fn render_batch_with_context(changes: &[Change], ctx: &SqlContext) -> Vec<RenderedStatement> {
+    let mut result = Vec::new();
+    let mut active_grantor: Option<&str> = None;
+    let restore = || match &ctx.execution_role {
+        Some(role) => format!("SET ROLE {};", quote_ident(role)),
+        None => "RESET ROLE;".to_string(),
+    };
+    let plain = |sql: String| RenderedStatement {
+        redacted_sql: sql.clone(),
+        sql,
+    };
+    for change in changes {
+        // Object REVOKE acts on the current grantor's ACL entry (a superuser
+        // acts as owner); GRANTED BY cannot impersonate another object grantor.
+        // Membership revokes instead express attribution with GRANTED BY and
+        // must continue to execute under the configured connection role.
+        let grantor = match change {
+            Change::Revoke { grantor, .. } => grantor.as_deref(),
+            _ => None,
+        };
+        let statements = render_unscoped_statements(change, ctx);
+        if statements.is_empty() {
+            continue;
+        }
+        if grantor != active_grantor {
+            if active_grantor.is_some() {
+                result.push(plain(restore()));
+            }
+            if let Some(role) = grantor {
+                result.push(plain(format!("SET ROLE {};", quote_ident(role))));
+            }
+            active_grantor = grantor;
+        }
+        for sql in statements {
+            let redacted_sql = match change {
+                Change::SetPassword { name, .. } => {
+                    format!("ALTER ROLE {} PASSWORD '[REDACTED]';", quote_ident(name))
+                }
+                _ => sql.clone(),
+            };
+            result.push(RenderedStatement { sql, redacted_sql });
+        }
+    }
+    if active_grantor.is_some() {
+        result.push(plain(restore()));
+    }
+    result
+}
+
+fn render_unscoped_statements(change: &Change, ctx: &SqlContext) -> Vec<String> {
     match change {
         Change::CreateRole { name, state } => render_create_role(name, state),
         Change::CreateSchema { name, owner } => render_create_schema(name, owner.as_deref()),
@@ -190,14 +261,13 @@ pub fn render_statements_with_context(change: &Change, ctx: &SqlContext) -> Vec<
             object_type,
             schema,
             name,
-            grantor,
+            grantor: _,
         } => render_revoke(
             role,
             privileges,
             *object_type,
             schema.as_deref(),
             name.as_deref(),
-            grantor.as_deref(),
             ctx,
         ),
         Change::SetDefaultPrivilege {
@@ -240,9 +310,9 @@ pub fn render_all(changes: &[Change]) -> String {
 
 /// Render all changes into a single SQL script with version context.
 pub fn render_all_with_context(changes: &[Change], ctx: &SqlContext) -> String {
-    changes
-        .iter()
-        .flat_map(|c| render_statements_with_context(c, ctx))
+    render_batch_with_context(changes, ctx)
+        .into_iter()
+        .map(|statement| statement.sql)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -482,44 +552,17 @@ fn render_revoke(
     object_type: ObjectType,
     schema: Option<&str>,
     name: Option<&str>,
-    grantor: Option<&str>,
     ctx: &SqlContext,
 ) -> Vec<String> {
-    let privilege_list = format_privileges(privileges);
-    let statements = render_privilege_statements(
+    render_privilege_statements(
         "REVOKE",
         role,
-        &privilege_list,
+        &format_privileges(privileges),
         object_type,
         schema,
         name,
         ctx,
-    );
-    // PostgreSQL's plain REVOKE removes only the ACL entry of the grantor it
-    // selects for the executor (a superuser acts as the owner), and
-    // `GRANTED BY` for object privileges must name the current user — so a
-    // grantor-targeted revoke *becomes* the grantor for its statements. The
-    // whole plan runs in one transaction on one connection, so the SET ROLE
-    // pair brackets exactly these statements. The preflight verifies the
-    // executor can become the grantor before an apply runs. The closing
-    // statement restores the connection's configured execution role when one
-    // is set (e.g. the operator's `connection.params.setRole`, applied via
-    // `SET ROLE` after connect): `RESET ROLE` would reset to the *login*
-    // role instead, silently dropping that boundary for the rest of the plan
-    // and the pooled connection.
-    match grantor {
-        Some(grantor) => {
-            let restore = match &ctx.execution_role {
-                Some(role) => format!("SET ROLE {};", quote_ident(role)),
-                None => "RESET ROLE;".to_string(),
-            };
-            std::iter::once(format!("SET ROLE {};", quote_ident(grantor)))
-                .chain(statements)
-                .chain(std::iter::once(restore))
-                .collect()
-        }
-        None => statements,
-    }
+    )
 }
 
 fn render_privilege_statements(
@@ -1570,6 +1613,94 @@ mod tests {
             sql,
             "GRANT \"inventory-editor\" TO \"noinherit@example.com\" WITH INHERIT FALSE;"
         );
+    }
+
+    #[test]
+    fn batch_preserves_order_role_boundaries_and_redaction() {
+        let revoke = |schema: &str, grantor: &str| Change::Revoke {
+            role: Grantee::Role("reader".into()),
+            privileges: BTreeSet::from([Privilege::Usage]),
+            object_type: ObjectType::Schema,
+            schema: None,
+            name: Some(schema.into()),
+            grantor: Some(grantor.into()),
+        };
+        let changes = vec![
+            revoke("a", "owner"),
+            revoke("b", "owner"),
+            revoke("c", "other"),
+            revoke("d", "owner"),
+            Change::SetPassword {
+                name: "reader".into(),
+                password: "secret".into(),
+            },
+            revoke("e", "owner"),
+        ];
+        let ctx = SqlContext::default().with_execution_role(Some("executor".into()));
+        let batch = render_batch_with_context(&changes, &ctx);
+        let full = batch
+            .iter()
+            .map(|s| s.sql.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(full, render_all_with_context(&changes, &ctx));
+        assert_eq!(
+            full.lines().collect::<Vec<_>>(),
+            vec![
+                "SET ROLE \"owner\";",
+                "REVOKE USAGE ON SCHEMA \"a\" FROM \"reader\";",
+                "REVOKE USAGE ON SCHEMA \"b\" FROM \"reader\";",
+                "SET ROLE \"executor\";",
+                "SET ROLE \"other\";",
+                "REVOKE USAGE ON SCHEMA \"c\" FROM \"reader\";",
+                "SET ROLE \"executor\";",
+                "SET ROLE \"owner\";",
+                "REVOKE USAGE ON SCHEMA \"d\" FROM \"reader\";",
+                "SET ROLE \"executor\";",
+                "ALTER ROLE \"reader\" PASSWORD 'secret';",
+                "SET ROLE \"owner\";",
+                "REVOKE USAGE ON SCHEMA \"e\" FROM \"reader\";",
+                "SET ROLE \"executor\";",
+            ]
+        );
+        assert_eq!(full.matches("SET ROLE \"owner\";").count(), 3);
+        assert_eq!(full.matches("SET ROLE \"executor\";").count(), 4);
+        assert!(full.contains("FROM \"reader\";\nREVOKE USAGE ON SCHEMA \"b\""));
+        assert!(full.contains("SET ROLE \"executor\";\nALTER ROLE"));
+        let redacted = batch
+            .iter()
+            .map(|s| s.redacted_sql.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!redacted.contains("secret"));
+        assert!(redacted.contains("PASSWORD '[REDACTED]'"));
+        assert!(full.contains("secret"));
+        assert!(render_batch_with_context(&[], &ctx).is_empty());
+    }
+
+    #[test]
+    fn batch_keeps_wildcard_expansion_in_one_role_block() {
+        let change = Change::Revoke {
+            role: Grantee::Role("reader".into()),
+            privileges: BTreeSet::from([Privilege::Select]),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("*".into()),
+            grantor: Some("owner".into()),
+        };
+        let ctx = SqlContext::default().with_object_inventory(BTreeMap::from([(
+            (ObjectType::Table, "app".into()),
+            vec!["a".into(), "b".into()],
+        )]));
+        let sql = render_all_with_context(&[change.clone(), change], &ctx);
+        assert_eq!(
+            sql.lines()
+                .filter(|line| line.starts_with("SET ROLE"))
+                .count(),
+            1
+        );
+        assert_eq!(sql.matches("RESET ROLE").count(), 1);
+        assert_eq!(sql.matches("REVOKE SELECT").count(), 4);
     }
 
     #[test]

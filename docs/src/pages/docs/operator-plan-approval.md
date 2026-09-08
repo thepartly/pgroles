@@ -145,6 +145,18 @@ produces exactly one new plan, and re-planning an unchanged source produces
 the same digest every time. `status.sqlHash` still exists, but only as a
 diagnostic for the preview text; it is never the approval gate.
 
+Full SQL, redacted previews, and execution share the same batch renderer.
+Consecutive object revokes attributed to the same grantor share one `SET ROLE`
+block. A different grantor or an ordinary statement closes the block, restoring
+`connection.params.setRole` when configured, or using `RESET ROLE` otherwise.
+The renderer preserves change order; it does not gather non-adjacent operations
+by role. Passwords remain redacted in previews and execution logs.
+
+This formatting can change SQL hashes and statement counts without changing the
+semantic approval digest. The candidate preservation fix is different: removing
+an undeclared revoke changes the effects, so an old approval cannot authorize a
+different recomputed plan.
+
 Because identity is semantic, plans survive irrelevant change. A policy
 generation bump, an unrelated base edit, or unrelated ephemeral-access
 activity re-plans to an identical digest and the pending plan — including a

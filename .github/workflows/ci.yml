@@ -1542,6 +1542,9 @@ jobs:
       # cluster, operator and PostgreSQL, and a second kind cluster would cost
       # several minutes of CI for nothing.
       # ==================================================================
+      - name: Verify candidate grant preservation
+        run: scripts/e2e-candidate-preservation.sh
+
       - name: Run candidate and promotion scenarios
         run: |
           source scripts/e2e-helpers.sh

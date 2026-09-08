@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Candidate plans apply the same undeclared object-grant preservation filter as normal reconciliation before computing review SQL and approval effects.
+- SQL rendering and execution combine consecutive grantor-specific revocations into shared role blocks, preserving change order and restoring the configured execution role.
+
 - Release notes use only the matching changelog entry, without GitHub's duplicated change list. Missing or empty release notes stop draft creation.
 
 ## [0.11.0] - 2026-09-06
