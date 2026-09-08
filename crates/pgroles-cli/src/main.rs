@@ -1681,31 +1681,23 @@ async fn execute_changes(
         }
     };
 
-    for change in changes {
-        let is_sensitive = matches!(change, pgroles_core::diff::Change::SetPassword { .. });
-        for statement in pgroles_core::sql::render_statements_with_context(change, sql_ctx) {
-            let statement_for_error = if is_sensitive {
-                "ALTER ROLE ... PASSWORD [REDACTED]".to_string()
-            } else {
-                statement.clone()
-            };
-            if is_sensitive {
-                info!("executing: ALTER ROLE ... PASSWORD [REDACTED]");
-            } else {
-                info!(sql = %statement, "executing");
-            }
-            if let Err(error) = sqlx::query(&statement).execute(transaction.as_mut()).await {
-                anyhow::bail!(
-                    "{}",
-                    render_execution_failure(
-                        &statement_for_error,
-                        execution_backend.as_ref(),
-                        &error
-                    )
-                );
-            }
+    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_ctx) {
+        info!(sql = %statement.redacted_sql, "executing");
+        if let Err(error) = sqlx::query(&statement.sql)
+            .execute(transaction.as_mut())
+            .await
+        {
+            anyhow::bail!(
+                "{}",
+                render_execution_failure(
+                    &statement.redacted_sql,
+                    execution_backend.as_ref(),
+                    &error
+                )
+            );
         }
     }
+
     transaction
         .commit()
         .await

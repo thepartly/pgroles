@@ -1589,17 +1589,12 @@ pub(crate) async fn execute_changes_in_transaction(
     let mut transaction = pool.begin().await?;
     let mut statements_executed = 0usize;
 
-    for change in changes {
-        let is_sensitive = matches!(change, pgroles_core::diff::Change::SetPassword { .. });
-        for sql in pgroles_core::sql::render_statements_with_context(change, sql_context) {
-            if is_sensitive {
-                tracing::debug!("executing: ALTER ROLE ... PASSWORD [REDACTED]");
-            } else {
-                tracing::debug!(%sql, "executing");
-            }
-            sqlx::query(&sql).execute(transaction.as_mut()).await?;
-            statements_executed += 1;
-        }
+    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_context) {
+        tracing::debug!(sql = %statement.redacted_sql, "executing");
+        sqlx::query(&statement.sql)
+            .execute(transaction.as_mut())
+            .await?;
+        statements_executed += 1;
     }
 
     transaction.commit().await?;
@@ -1995,11 +1990,7 @@ pub(crate) fn render_full_sql(
     changes: &[pgroles_core::diff::Change],
     sql_context: &pgroles_core::sql::SqlContext,
 ) -> String {
-    changes
-        .iter()
-        .flat_map(|change| pgroles_core::sql::render_statements_with_context(change, sql_context))
-        .collect::<Vec<_>>()
-        .join("\n")
+    pgroles_core::sql::render_all_with_context(changes, sql_context)
 }
 
 /// Render redacted SQL for display (passwords replaced with [REDACTED]).
@@ -2007,18 +1998,9 @@ fn render_redacted_sql(
     changes: &[pgroles_core::diff::Change],
     sql_context: &pgroles_core::sql::SqlContext,
 ) -> String {
-    changes
-        .iter()
-        .flat_map(|change| {
-            if let pgroles_core::diff::Change::SetPassword { name, .. } = change {
-                vec![format!(
-                    "ALTER ROLE {} PASSWORD '[REDACTED]';",
-                    pgroles_core::sql::quote_ident(name)
-                )]
-            } else {
-                pgroles_core::sql::render_statements_with_context(change, sql_context)
-            }
-        })
+    pgroles_core::sql::render_batch_with_context(changes, sql_context)
+        .into_iter()
+        .map(|statement| statement.redacted_sql)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -4519,6 +4501,129 @@ mod tests {
             &BTreeSet::new(),
             ORPHAN_GRACE_SECS + 1
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live PostgreSQL"]
+    async fn batch_execution_restores_role_and_rolls_back_on_failure() {
+        use pgroles_core::{
+            diff::Change,
+            manifest::{ObjectType, Privilege},
+            model::Grantee,
+        };
+        use sqlx::{
+            Executor,
+            postgres::{PgConnectOptions, PgPoolOptions},
+        };
+        use std::str::FromStr;
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let login = format!("batch_login_{suffix}");
+        let executor = format!("batch_exec_{suffix}");
+        let owner = format!("batch_owner_{suffix}");
+        let reader = format!("batch_reader_{suffix}");
+        let schema = format!("batch_{suffix}");
+        admin
+            .execute(
+                format!(
+                    r#"
+            CREATE ROLE "{login}" LOGIN NOINHERIT PASSWORD 'batch_password';
+            CREATE ROLE "{executor}" NOINHERIT;
+            CREATE ROLE "{owner}";
+            CREATE ROLE "{reader}";
+            GRANT "{executor}", "{owner}" TO "{login}";
+            CREATE SCHEMA "{schema}" AUTHORIZATION "{owner}";
+            CREATE TABLE "{schema}".a (id int);
+            CREATE TABLE "{schema}".b (id int);
+            ALTER TABLE "{schema}".a OWNER TO "{owner}";
+            ALTER TABLE "{schema}".b OWNER TO "{owner}";
+            SET ROLE "{owner}";
+            GRANT SELECT ON "{schema}".a, "{schema}".b TO "{reader}";
+            RESET ROLE;
+        "#
+                )
+                .as_str(),
+            )
+            .await
+            .unwrap();
+        let hook_role = executor.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |conn, _| {
+                let stmt = format!("SET ROLE {};", pgroles_core::sql::quote_ident(&hook_role));
+                Box::pin(async move {
+                    conn.execute(stmt.as_str()).await?;
+                    Ok(())
+                })
+            })
+            .connect_with(
+                PgConnectOptions::from_str(&url)
+                    .unwrap()
+                    .username(&login)
+                    .password("batch_password"),
+            )
+            .await
+            .unwrap();
+        let revoke = |name: &str| Change::Revoke {
+            role: Grantee::Role(reader.clone()),
+            privileges: BTreeSet::from([Privilege::Select]),
+            object_type: ObjectType::Table,
+            schema: Some(schema.clone()),
+            name: Some(name.into()),
+            grantor: Some(owner.clone()),
+        };
+        let ctx =
+            pgroles_core::sql::SqlContext::default().with_execution_role(Some(executor.clone()));
+        let current = || sqlx::query_scalar::<_, String>("SELECT current_user::text");
+        // The second statement fails inside the shared owner block: transaction
+        // rollback must restore both the first ACL and the connection role.
+        assert!(
+            execute_changes_in_transaction(&pool, &[revoke("a"), revoke("missing")], &ctx)
+                .await
+                .is_err()
+        );
+        assert_eq!(current().fetch_one(&pool).await.unwrap(), executor);
+        let check = format!(
+            r#"SELECT has_table_privilege('{}', '"{}".a', 'SELECT')"#,
+            reader, schema
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(&check)
+                .fetch_one(&admin)
+                .await
+                .unwrap()
+        );
+        let changes = vec![revoke("a"), revoke("b")];
+        assert_eq!(
+            render_full_sql(&changes, &ctx),
+            render_redacted_sql(&changes, &ctx)
+        );
+        assert_eq!(
+            execute_changes_in_transaction(&pool, &changes, &ctx)
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(current().fetch_one(&pool).await.unwrap(), executor);
+        for table in ["a", "b"] {
+            let check = format!(
+                r#"SELECT has_table_privilege('{}', '"{}".{}', 'SELECT')"#,
+                reader, schema, table
+            );
+            assert!(
+                !sqlx::query_scalar::<_, bool>(&check)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap()
+            );
+        }
+        pool.close().await;
+        admin.execute(format!(r#"DROP SCHEMA "{schema}" CASCADE; DROP ROLE "{login}", "{executor}", "{owner}", "{reader}";"#).as_str()).await.unwrap();
+        admin.close().await;
     }
 
     #[test]

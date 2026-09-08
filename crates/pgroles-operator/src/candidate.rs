@@ -691,17 +691,12 @@ async fn plan_against_target(
              use adopt or authoritative mode to enforce absence"
         );
     }
-    let mut changes = pgroles_core::diff::filter_changes(
-        pgroles_core::diff::apply_role_retirements(
-            pgroles_core::diff::diff(&current, desired),
-            &manifest.retirements,
-        ),
+    let mut changes = crate::reconciler::policy_changes(
+        &current,
+        desired,
+        manifest,
+        expanded,
         reconciliation_mode,
-    );
-    changes = pgroles_core::diff::filter_external_role_changes(
-        changes,
-        &expanded.roles,
-        &expanded.memberships,
     );
 
     // Read-only password resolution. Generated Secrets are named for the
@@ -2071,6 +2066,175 @@ mod tests {
                  active policy's own reconcile"
             );
         }
+    }
+
+    /// Exercise the same effect pipeline used by both planners with candidate
+    /// content: undeclared ACLs are adoption state, not proposed revocations.
+    #[test]
+    fn candidate_preservation_filters_effects_before_sql_and_approval_digest() {
+        use pgroles_core::diff::Change;
+        use pgroles_core::manifest::{ObjectType, Privilege};
+        use pgroles_core::model::{GrantKey, GrantState};
+
+        for preserve in [false, true] {
+            let content: PolicyContent = serde_json::from_value(serde_json::json!({
+                "reconciliationMode": "authoritative",
+                "roles": [{ "name": "app_reader", "preserve_undeclared_grants": preserve }],
+                "grants": [{
+                    "role": "app_reader", "privileges": ["DELETE"], "ensure": "absent",
+                    "object": { "type": "table", "schema": "app", "name": "records" }
+                }]
+            }))
+            .expect("content");
+            let proposal = candidate("reader-change", content);
+            let inputs = candidate_inputs(&proposal, &[]).expect("inputs");
+            let mut current = inputs.desired.clone();
+            current.grant_absences.clear();
+            current.grants.insert(
+                GrantKey {
+                    role: "app_reader".into(),
+                    object_type: ObjectType::Table,
+                    schema: Some("app".into()),
+                    name: Some("records".into()),
+                },
+                GrantState {
+                    privileges: BTreeSet::from([Privilege::Select, Privilege::Delete]),
+                },
+            );
+            let changes = crate::reconciler::policy_changes(
+                &current,
+                &inputs.desired,
+                &inputs.manifest,
+                &inputs.expanded,
+                pgroles_core::diff::ReconciliationMode::Authoritative,
+            );
+            let expected = vec![Change::Revoke {
+                role: "app_reader".into(),
+                object_type: ObjectType::Table,
+                schema: Some("app".into()),
+                name: Some("records".into()),
+                grantor: None,
+                privileges: if preserve {
+                    BTreeSet::from([Privilege::Delete])
+                } else {
+                    BTreeSet::from([Privilege::Select, Privilege::Delete])
+                },
+            }];
+            assert_eq!(changes, expected, "preserve={preserve}");
+            let sql = pgroles_core::sql::render_batch_with_context(
+                &changes,
+                &pgroles_core::sql::SqlContext::default(),
+            )
+            .into_iter()
+            .map(|statement| statement.redacted_sql)
+            .collect::<Vec<_>>()
+            .join("\n");
+            assert!(sql.contains("DELETE"));
+            assert_eq!(sql.contains("SELECT"), !preserve);
+            let digest = |effects: &[Change]| {
+                crate::plan::compute_change_digest(
+                    effects,
+                    crate::crd::CrdReconciliationMode::Authoritative,
+                    "default/database:DATABASE_URL",
+                    &pgroles_core::approval::TargetIdentity {
+                        physical: Some("7412330000000000001".into()),
+                        logical: None,
+                    },
+                    &BTreeMap::new(),
+                    &[],
+                    &[],
+                )
+                .expect("digest")
+            };
+            assert_eq!(digest(&changes), digest(&expected));
+            if preserve {
+                assert_ne!(
+                    digest(&changes),
+                    digest(&pgroles_core::diff::diff(&current, &inputs.desired))
+                );
+                // Once the explicit absence is satisfied, the remaining
+                // undeclared grant produces NoEffects, hence no approval plan.
+                current
+                    .grants
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .privileges
+                    .remove(&Privilege::Delete);
+                assert!(
+                    crate::reconciler::policy_changes(
+                        &current,
+                        &inputs.desired,
+                        &inputs.manifest,
+                        &inputs.expanded,
+                        pgroles_core::diff::ReconciliationMode::Authoritative,
+                    )
+                    .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_preservation_keeps_default_and_membership_revocations() {
+        use pgroles_core::diff::{Change, ReconciliationMode};
+        use pgroles_core::manifest::{ObjectType, Privilege};
+        use pgroles_core::model::{DefaultPrivKey, DefaultPrivState, DefaultPrivilegeScope};
+
+        let content: PolicyContent = serde_json::from_value(serde_json::json!({
+            "roles": [{ "name": "reader", "preserve_undeclared_grants": true },
+                      { "name": "owner" }]
+        }))
+        .expect("content");
+        let inputs = candidate_inputs(&candidate("reader-change", content), &[]).expect("inputs");
+        let mut current = inputs.desired.clone();
+        current.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "reader".into(),
+            inherit: true,
+            admin: false,
+        });
+        current.default_privileges.insert(
+            DefaultPrivKey {
+                owner: "owner".into(),
+                grantee: "reader".into(),
+                scope: DefaultPrivilegeScope::Schema {
+                    schema: "app".into(),
+                },
+                on_type: ObjectType::Table,
+            },
+            DefaultPrivState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let changes = crate::reconciler::policy_changes(
+            &current,
+            &inputs.desired,
+            &inputs.manifest,
+            &inputs.expanded,
+            ReconciliationMode::Authoritative,
+        );
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change, Change::RevokeDefaultPrivilege { .. }))
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change, Change::RemoveMember { .. }))
+        );
+        assert!(
+            crate::reconciler::policy_changes(
+                &current,
+                &inputs.desired,
+                &inputs.manifest,
+                &inputs.expanded,
+                ReconciliationMode::Additive,
+            )
+            .is_empty()
+        );
     }
 
     /// The inspection scope of a candidate is the candidate's own — its

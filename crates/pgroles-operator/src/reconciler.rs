@@ -224,6 +224,30 @@ pub enum ReconcileError {
 /// work under the locks would abandon an in-flight DDL phase.
 const K8S_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Compute policy effects identically for live reconciliation and candidate previews.
+/// Apply preservation before password injection, summaries, SQL and approval digests.
+pub(crate) fn policy_changes(
+    current: &pgroles_core::model::RoleGraph,
+    desired: &pgroles_core::model::RoleGraph,
+    manifest: &pgroles_core::manifest::PolicyManifest,
+    expanded: &pgroles_core::manifest::ExpandedManifest,
+    reconciliation_mode: pgroles_core::diff::ReconciliationMode,
+) -> Vec<pgroles_core::diff::Change> {
+    let mut changes = pgroles_core::diff::filter_changes(
+        pgroles_core::diff::apply_role_retirements(
+            pgroles_core::diff::diff(current, desired),
+            &manifest.retirements,
+        ),
+        reconciliation_mode,
+    );
+    changes = pgroles_core::diff::filter_external_role_changes(
+        changes,
+        &expanded.roles,
+        &expanded.memberships,
+    );
+    pgroles_core::diff::filter_preserved_grant_revokes(changes, &expanded.roles, desired)
+}
+
 /// Run one pre-lock Kubernetes API call under [`K8S_CALL_TIMEOUT`].
 ///
 /// `call` names the request in the log and in the resulting status condition,
@@ -1435,22 +1459,12 @@ async fn apply_under_lock(
         );
     }
     let diff_started = std::time::Instant::now();
-    let mut changes = pgroles_core::diff::filter_changes(
-        pgroles_core::diff::apply_role_retirements(
-            pgroles_core::diff::diff(&current, &effective_desired),
-            &manifest.retirements,
-        ),
-        reconciliation_mode,
-    );
-    changes = pgroles_core::diff::filter_external_role_changes(
-        changes,
-        &expanded.roles,
-        &expanded.memberships,
-    );
-    changes = pgroles_core::diff::filter_preserved_grant_revokes(
-        changes,
-        &expanded.roles,
+    let mut changes = policy_changes(
+        &current,
         &effective_desired,
+        manifest,
+        expanded,
+        reconciliation_mode,
     );
 
     let plan_warnings = plan_advisory_warnings(
