@@ -11,8 +11,7 @@ Read the target release's upgrade notes. Save your current chart version, values
 and policy manifests in your deployment repository. Keep database recovery
 procedures separate: rolling back a controller does not reverse committed SQL.
 
-Set the exact release you reviewed, for example `VERSION=0.12.0`. Render and
-review its resources using your existing values:
+Set the exact release you reviewed, for example `VERSION=0.12.0`. Render and review its resources using your existing values:
 
 ```bash
 VERSION=0.12.0
@@ -49,22 +48,11 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 ## Moving from 0.11 to 0.12
 
 - CRD schemas are unchanged. Continue using the chart's version-matched CRDs.
-- Readiness now requires all watches to finish initial synchronization and clears
-  during relists or shutdown. A policy error does not by itself make the operator
-  unready. Allow time for watch initialization during rollout.
-- Candidate planning now preserves undeclared object grants when requested by
-  the proposed role definitions. Review replanned candidates; changed effects
-  remain subject to the usual approval checks, and preserved-only drift yields
-  `NoEffects` without an approval plan.
-- Consecutive revokes attributed to the same grantor share a role block without
-  reordering effects. Diagnostic SQL hashes and statement counts can change;
-  the semantic approval digest is independent of SQL formatting.
-- Metrics and logs share service-instance identity and standard SDK metadata.
-  Review resource-label mapping and per-replica counter aggregation using the
-  [monitoring guide](/docs/operator-monitoring). Duration units remain milliseconds.
-- Default-owner bootstrap preflight now recognizes PostgreSQL 16+
-  `createrole_self_grant=inherit`. This does not grant authority itself; configure
-  the executor as described in [Executor privileges](/docs/executor-privileges).
+- Readiness now requires all watches to finish initial synchronization and clears during relists or shutdown. A policy error does not by itself make the operator unready. Allow time for watch initialization during rollout.
+- Candidate planning now preserves undeclared object grants when requested by the proposed role definitions. Review replanned candidates; changed effects remain subject to the usual approval checks, and preserved-only drift yields `NoEffects` without an approval plan.
+- Consecutive revokes attributed to the same grantor share a role block without reordering effects. Diagnostic SQL hashes and statement counts can change; the semantic approval digest is independent of SQL formatting.
+- Metrics and logs share service-instance identity and standard SDK metadata. Review resource-label mapping and per-replica counter aggregation using the [monitoring guide](/docs/operator-monitoring). Duration units remain milliseconds.
+- Default-owner bootstrap preflight now recognizes PostgreSQL 16+ `createrole_self_grant=inherit`. This does not grant authority itself; configure the executor as described in [Executor privileges](/docs/executor-privileges).
 
 ## Moving from 0.10 to 0.11
 

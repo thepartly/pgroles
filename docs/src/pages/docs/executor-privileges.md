@@ -75,10 +75,7 @@ suffice. This check is conservative: it does not use newly added administrator
 paths to authorize other additions; split such bootstrap steps into separate
 applies if preflight rejects them.
 
-**Version note:** v0.11.0 preflight rejects new default-privilege owners for
-non-superusers even with this setting. The behavior above requires the fix in
-v0.12.0. On v0.11.0, pre-create the owner and grant the required
-access, bootstrap in two stages, or use a superuser for the atomic first apply.
+**Version note:** v0.11.0 preflight rejects new default-privilege owners for non-superusers even with this setting. The behavior above requires the fix in v0.12.0. On v0.11.0, pre-create the owner and grant the required access, bootstrap in two stages, or use a superuser for the atomic first apply.
 
 The friction also shows up in **brownfield** adoption. `CREATEROLE` does not retroactively grant `ADMIN OPTION` on roles that already existed before the executor was created. For every pre-existing role pgroles needs to alter, drop, or manage memberships on, a superuser or existing admin must explicitly grant the executor admin rights:
 
