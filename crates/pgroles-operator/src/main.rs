@@ -6,13 +6,16 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream};
 use k8s_openapi::api::core::v1::Secret;
 use kube::runtime::controller::Config as ControllerConfig;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{Controller, WatchStreamExt, predicates, reflector, watcher};
 use kube::{Api, Client, Resource, ResourceExt};
+use pgroles_operator::controller_health::{
+    ControllerHealth, ControllerKind, WatchKind, shutdown_signal, supervise,
+};
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
@@ -144,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let health = ControllerHealth::new(observability.clone());
+    let signal = shutdown_signal()?;
+    let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
+    let shutdown = shutdown_rx.map(|_| ()).shared();
+
     let event_recorder = Recorder::new(
         client.clone(),
         Reporter {
@@ -200,9 +208,13 @@ async fn main() -> anyhow::Result<()> {
         None => Api::all(client.clone()),
     };
     let (reader, writer) = reflector::store();
-    let policy_stream = watcher(policies.clone(), watcher::Config::default())
-        .default_backoff()
-        .reflect(writer)
+    let policy_stream = health
+        .watch(
+            WatchKind::Policies,
+            watcher(policies.clone(), watcher::Config::default())
+                .default_backoff()
+                .reflect(writer),
+        )
         .applied_objects()
         .predicate_filter(policy_trigger_hash, Default::default());
     let policy_store = reader.clone();
@@ -210,8 +222,11 @@ async fn main() -> anyhow::Result<()> {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let secret_triggers = watcher(secrets, watcher::Config::default())
-        .default_backoff()
+    let secret_triggers = health
+        .watch(
+            WatchKind::Secrets,
+            watcher(secrets, watcher::Config::default()).default_backoff(),
+        )
         .touched_objects()
         .predicate_filter(predicates::resource_version, Default::default())
         .filter_map(|secret| async move { secret.ok() })
@@ -243,8 +258,11 @@ async fn main() -> anyhow::Result<()> {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let plan_triggers = watcher(plans, watcher::Config::default())
-        .default_backoff()
+    let plan_triggers = health
+        .watch(
+            WatchKind::Plans,
+            watcher(plans, watcher::Config::default()).default_backoff(),
+        )
         .touched_objects()
         .predicate_filter(plan_decision_hash, Default::default())
         .filter_map(|plan| async move { plan.ok() })
@@ -302,8 +320,11 @@ async fn main() -> anyhow::Result<()> {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let candidate_triggers = watcher(candidates, watcher::Config::default())
-        .default_backoff()
+    let candidate_triggers = health
+        .watch(
+            WatchKind::Candidates,
+            watcher(candidates, watcher::Config::default()).default_backoff(),
+        )
         .touched_objects()
         .predicate_filter(candidate_trigger_hash, Default::default())
         .filter_map(|candidate| async move { candidate.ok() })
@@ -330,21 +351,24 @@ async fn main() -> anyhow::Result<()> {
         });
 
     info!("starting controllers");
-    observability.mark_ready();
 
     let policy_controller = configured_controller(policy_stream, reader, reconcile_concurrency)
         .reconcile_on(secret_triggers)
         .reconcile_on(plan_triggers)
         .reconcile_on(candidate_triggers)
+        .graceful_shutdown_on(shutdown.clone())
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx.clone())
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "reconcile completed");
-                }
-                Err(error) => {
-                    tracing::error!(%error, "reconcile failed");
+        .for_each(|result| {
+            observability.record_controller_progress(ControllerKind::Policy, result.is_ok());
+            async move {
+                match result {
+                    Ok(action) => {
+                        tracing::debug!(?action, "reconcile completed");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "reconcile failed");
+                    }
                 }
             }
         });
@@ -354,17 +378,24 @@ async fn main() -> anyhow::Result<()> {
         None => Api::all(client.clone()),
     };
     let (access_policy_reader, access_policy_writer) = reflector::store();
-    let access_policy_stream = watcher(access_policies, watcher::Config::default())
-        .default_backoff()
-        .reflect(access_policy_writer)
+    let access_policy_stream = health
+        .watch(
+            WatchKind::AccessPolicies,
+            watcher(access_policies, watcher::Config::default())
+                .default_backoff()
+                .reflect(access_policy_writer),
+        )
         .applied_objects();
     let target_access_policy_store = access_policy_reader.clone();
     let target_policies: Api<PostgresPolicy> = match &watch_namespace {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let target_access_policy_triggers = watcher(target_policies, watcher::Config::default())
-        .default_backoff()
+    let target_access_policy_triggers = health
+        .watch(
+            WatchKind::AccessPolicyTargets,
+            watcher(target_policies, watcher::Config::default()).default_backoff(),
+        )
         .touched_objects()
         .filter_map(|target| async move { target.ok() })
         .flat_map(move |target| {
@@ -388,15 +419,19 @@ async fn main() -> anyhow::Result<()> {
         reconcile_concurrency,
     )
     .reconcile_on(target_access_policy_triggers)
+    .graceful_shutdown_on(shutdown.clone())
     .shutdown_on_signal()
     .run(
         reconcile_access_policy,
         access_policy_error_policy,
         ctx.clone(),
     )
-    .for_each(|result| async move {
-        if let Err(error) = result {
-            tracing::error!(%error, "ephemeral access policy reconcile failed");
+    .for_each(|result| {
+        observability.record_controller_progress(ControllerKind::AccessPolicy, result.is_ok());
+        async move {
+            if let Err(error) = result {
+                tracing::error!(%error, "ephemeral access policy reconcile failed");
+            }
         }
     });
 
@@ -406,51 +441,57 @@ async fn main() -> anyhow::Result<()> {
     };
     let (access_request_reader, access_request_writer) = reflector::store();
     let request_index_writer = request_index.clone();
-    let access_request_stream = watcher(access_requests, watcher::Config::default())
-        .default_backoff()
-        .inspect_ok(move |event| request_index_writer.observe(event))
-        .reflect(access_request_writer)
+    let access_request_stream = health
+        .watch(
+            WatchKind::AccessRequests,
+            watcher(access_requests, watcher::Config::default())
+                .default_backoff()
+                .inspect_ok(move |event| request_index_writer.observe(event))
+                .reflect(access_request_writer),
+        )
         .applied_objects();
     let access_policy_request_index = request_index.clone();
     let request_access_policies: Api<EphemeralAccessPolicy> = match &watch_namespace {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let access_policy_request_triggers =
-        watcher(request_access_policies, watcher::Config::default())
-            .default_backoff()
-            .touched_objects()
-            .filter_map(|policy| async move { policy.ok() })
-            .flat_map(move |policy| {
-                let request_index = access_policy_request_index.clone();
-                let namespace = policy.namespace().unwrap_or_default();
-                let policy_name = policy.name_any();
-                stream::once(async move {
-                    // A trigger is an optimization: the request controller also
-                    // requeues on its own. Dropping this fan-out when the index
-                    // is not yet synced delays a reconcile, so it is logged and
-                    // skipped rather than propagated.
-                    match request_index
-                        .for_access_policy_name(&namespace, &policy_name)
-                        .await
-                    {
-                        Ok(requests) => requests
-                            .into_iter()
-                            .map(|request| ObjectRef::from_obj(request.as_ref()))
-                            .collect::<Vec<_>>(),
-                        Err(error) => {
-                            warn!(
-                                %error,
-                                %namespace,
-                                policy = %policy_name,
-                                "skipping access-policy request triggers",
-                            );
-                            Vec::new()
-                        }
+    let access_policy_request_triggers = health
+        .watch(
+            WatchKind::AccessRequestPolicies,
+            watcher(request_access_policies, watcher::Config::default()).default_backoff(),
+        )
+        .touched_objects()
+        .filter_map(|policy| async move { policy.ok() })
+        .flat_map(move |policy| {
+            let request_index = access_policy_request_index.clone();
+            let namespace = policy.namespace().unwrap_or_default();
+            let policy_name = policy.name_any();
+            stream::once(async move {
+                // A trigger is an optimization: the request controller also
+                // requeues on its own. Dropping this fan-out when the index
+                // is not yet synced delays a reconcile, so it is logged and
+                // skipped rather than propagated.
+                match request_index
+                    .for_access_policy_name(&namespace, &policy_name)
+                    .await
+                {
+                    Ok(requests) => requests
+                        .into_iter()
+                        .map(|request| ObjectRef::from_obj(request.as_ref()))
+                        .collect::<Vec<_>>(),
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            %namespace,
+                            policy = %policy_name,
+                            "skipping access-policy request triggers",
+                        );
+                        Vec::new()
                     }
-                })
-                .flat_map(stream::iter)
-            });
+                }
+            })
+            .flat_map(stream::iter)
+        });
 
     let access_request_controller = configured_controller(
         access_request_stream,
@@ -458,26 +499,33 @@ async fn main() -> anyhow::Result<()> {
         reconcile_concurrency,
     )
     .reconcile_on(access_policy_request_triggers)
+    .graceful_shutdown_on(shutdown.clone())
     .shutdown_on_signal()
     .run(reconcile_access_request, access_request_error_policy, ctx)
-    .for_each(|result| async move {
-        if let Err(error) = result {
-            tracing::error!(%error, "ephemeral access request reconcile failed");
+    .for_each(|result| {
+        observability.record_controller_progress(ControllerKind::AccessRequest, result.is_ok());
+        async move {
+            if let Err(error) = result {
+                tracing::error!(%error, "ephemeral access request reconcile failed");
+            }
         }
     });
 
-    futures::future::join3(
-        policy_controller,
-        access_policy_controller,
-        access_request_controller,
-    )
-    .await;
+    let controllers = futures::stream::FuturesUnordered::new();
+    controllers.push(policy_controller.boxed());
+    controllers.push(access_policy_controller.boxed());
+    controllers.push(access_request_controller.boxed());
+    let unexpected_exit = supervise(health, controllers, signal, shutdown_tx).await;
 
     observability.mark_not_ready();
     info!("controller shut down");
     if let Err(error) = observability.shutdown() {
         eprintln!("failed to shut down observability: {error}");
     }
+    anyhow::ensure!(
+        !unexpected_exit,
+        "required controller terminated unexpectedly"
+    );
     Ok(())
 }
 

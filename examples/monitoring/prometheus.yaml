@@ -1,0 +1,18 @@
+# Merge into an existing Prometheus-compatible evaluator and scraper.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 1m
+rule_files:
+  - /etc/pgroles/rules.yaml
+  - /etc/pgroles/expected.yaml
+scrape_configs:
+  - job_name: pgroles-policy-state
+    static_configs:
+      - targets: [pgroles-policy-state.pgroles-monitoring.svc:8080]
+        labels:
+          cluster: example
+  - job_name: pgroles-otlp
+    static_configs:
+      - targets: [pgroles-collector.pgroles-monitoring.svc:8889]
+        labels:
+          cluster: example

@@ -3,9 +3,10 @@
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::controller_health::{ControllerKind, WatchKind};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -14,7 +15,6 @@ use axum::{Router, serve};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter};
 use opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig};
-use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use tokio::net::TcpListener;
@@ -30,6 +30,9 @@ pub struct OperatorObservability {
 
 struct Metrics {
     provider: SdkMeterProvider,
+    watch_synced: Arc<AtomicU8>,
+    watch_events: Counter<u64>,
+    controller_progress: Counter<u64>,
     reconcile_total: Counter<u64>,
     reconcile_duration_ms: Histogram<u64>,
     reconcile_inflight: UpDownCounter<i64>,
@@ -75,6 +78,15 @@ pub struct EphemeralReconcileGuard {
 }
 
 impl OperatorObservability {
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
+        Self {
+            ready: Arc::new(AtomicBool::new(false)),
+            metrics: None,
+            logger_provider: None,
+        }
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
             ready: Arc::new(AtomicBool::new(false)),
@@ -88,12 +100,51 @@ impl OperatorObservability {
         self
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Relaxed);
     }
 
     pub fn mark_not_ready(&self) {
         self.ready.store(false, Ordering::Relaxed);
+    }
+
+    pub fn record_watch_sync(&self, watch: WatchKind, synced: bool) {
+        if let Some(metrics) = &self.metrics {
+            let bit = 1 << watch as u8;
+            if synced {
+                metrics.watch_synced.fetch_or(bit, Ordering::Relaxed);
+            } else {
+                metrics.watch_synced.fetch_and(!bit, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn record_watch_event(&self, watch: WatchKind, success: bool) {
+        if let Some(metrics) = &self.metrics {
+            metrics.watch_events.add(
+                1,
+                &[
+                    KeyValue::new("watch", watch.label()),
+                    KeyValue::new("result", if success { "event" } else { "error" }),
+                ],
+            );
+        }
+    }
+
+    pub fn record_controller_progress(&self, controller: ControllerKind, success: bool) {
+        if let Some(metrics) = &self.metrics {
+            metrics.controller_progress.add(
+                1,
+                &[
+                    KeyValue::new("controller", controller.label()),
+                    KeyValue::new("result", if success { "success" } else { "error" }),
+                ],
+            );
+        }
     }
 
     pub fn start_reconcile(&self) -> ReconcileGuard {
@@ -468,14 +519,7 @@ fn init_metrics_from_env() -> anyhow::Result<Option<Arc<Metrics>>> {
     let reader = PeriodicReader::builder(exporter).build();
     let provider = SdkMeterProvider::builder()
         .with_reader(reader)
-        .with_resource(
-            Resource::builder_empty()
-                .with_attributes([
-                    KeyValue::new("service.name", SERVICE_NAME),
-                    KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                ])
-                .build(),
-        )
+        .with_resource(crate::telemetry_resource::operator_resource())
         .build();
 
     let meter = provider.meter(SERVICE_NAME);
@@ -501,14 +545,7 @@ pub fn init_log_provider_from_env() -> anyhow::Result<Option<SdkLoggerProvider>>
         .with_protocol(Protocol::Grpc)
         .build()?;
     let provider = SdkLoggerProvider::builder()
-        .with_resource(
-            Resource::builder_empty()
-                .with_attributes([
-                    KeyValue::new("service.name", SERVICE_NAME),
-                    KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                ])
-                .build(),
-        )
+        .with_resource(crate::telemetry_resource::operator_resource())
         .with_batch_exporter(exporter)
         .build();
     Ok(Some(provider))
@@ -526,8 +563,32 @@ fn otel_metrics_enabled() -> bool {
 
 impl Metrics {
     fn new(provider: SdkMeterProvider, meter: Meter) -> Self {
+        let watch_synced = Arc::new(AtomicU8::new(0));
+        let observed_sync = watch_synced.clone();
+        meter
+            .u64_observable_gauge("pgroles.watch.synced")
+            .with_description("Whether a required watch has completed its latest initialization")
+            .with_callback(move |observer| {
+                let synced = observed_sync.load(Ordering::Relaxed);
+                for watch in WatchKind::ALL {
+                    observer.observe(
+                        u64::from(synced & (1 << watch as u8) != 0),
+                        &[KeyValue::new("watch", watch.label())],
+                    );
+                }
+            })
+            .build();
         Self {
             provider,
+            watch_synced,
+            watch_events: meter
+                .u64_counter("pgroles.watch.events")
+                .with_description("Watch events and errors; silence alone is not a failure")
+                .build(),
+            controller_progress: meter
+                .u64_counter("pgroles.controller.progress")
+                .with_description("Controller results including reconciler and watch errors")
+                .build(),
             reconcile_total: meter
                 .u64_counter("pgroles.reconcile.total")
                 .with_description("Total reconciliations by result and reason")
@@ -673,7 +734,7 @@ async fn livez() -> &'static str {
 }
 
 async fn readyz(State(observability): State<OperatorObservability>) -> impl IntoResponse {
-    if observability.ready.load(Ordering::Relaxed) {
+    if observability.is_ready() {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
@@ -763,6 +824,59 @@ mod tests {
                     .map(|data_point| data_point.value()),
                 _ => None,
             })
+    }
+
+    #[test]
+    fn controller_health_exports_bounded_watch_and_progress_series() {
+        use crate::controller_health::{ControllerKind, WatchKind};
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder::new()
+            .with_temporality(opentelemetry_sdk::metrics::Temporality::Delta)
+            .build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let observability = OperatorObservability {
+            ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            metrics: Some(Arc::new(Metrics::new(
+                provider.clone(),
+                provider.meter(SERVICE_NAME),
+            ))),
+            logger_provider: None,
+        };
+        for watch in WatchKind::ALL {
+            observability.record_watch_sync(watch, false);
+            observability.record_watch_sync(watch, true);
+            observability.record_watch_event(watch, true);
+            observability.record_watch_event(watch, false);
+        }
+        observability.record_controller_progress(ControllerKind::Policy, false);
+        provider.force_flush().unwrap();
+        let metrics = exporter.get_finished_metrics().unwrap();
+        assert_eq!(u64_sum_value(&metrics, "pgroles.watch.events"), Some(16));
+        assert_eq!(
+            u64_sum_value(&metrics, "pgroles.controller.progress"),
+            Some(1)
+        );
+        // No watch activity between delta collections: state must still export.
+        for _ in 0..2 {
+            exporter.reset();
+            provider.force_flush().unwrap();
+            let metrics = exporter.get_finished_metrics().unwrap();
+            let gauges: Vec<_> = metrics
+                .iter()
+                .flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics())
+                .filter(|metric| metric.name() == "pgroles.watch.synced")
+                .flat_map(|metric| match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge
+                        .data_points()
+                        .map(|point| point.value())
+                        .collect::<Vec<_>>(),
+                    _ => panic!("watch synced must be a gauge"),
+                })
+                .collect();
+            assert_eq!(gauges, vec![1; 8]);
+        }
     }
 
     #[test]

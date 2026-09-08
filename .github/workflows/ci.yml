@@ -150,6 +150,30 @@ jobs:
               agentskills validate "$(dirname "$skill_file")"
           done < /tmp/pgroles-agent-skills
 
+  monitoring:
+    name: Monitoring examples
+    needs: stack-gate
+    if: needs.stack-gate.outputs.run_heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build production telemetry smoke emitter
+        run: cargo build --locked -p pgroles-operator --example telemetry-smoke
+      - name: Test alert timing and missing telemetry
+        run: scripts/check-monitoring.sh
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  /tmp/kind" | sha256sum -c -
+          sudo install /tmp/kind /usr/local/bin/kind
+      - name: Verify resource-state extraction and Collector output
+        run: scripts/check-monitoring-e2e.sh
+
   # ---------------------------------------------------------------------------
   # Job 2: Unit tests
   # ---------------------------------------------------------------------------

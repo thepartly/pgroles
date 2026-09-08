@@ -1,0 +1,17 @@
+# Managed with monitoring configuration, independent of operator availability.
+# Remove this record when intentionally decommissioning the installation.
+groups:
+  - name: pgroles-installation-inventory
+    rules:
+      - record: pgroles_monitoring_expected
+        expr: vector(1)
+        labels:
+          cluster: example
+      # Optional: manage with the desired policy, not from KSM output. Remove
+      # alongside intentional policy deletion. UID is deliberately omitted.
+      # - record: pgroles_policy_expected
+      #   expr: vector(1)
+      #   labels:
+      #     cluster: example
+      #     namespace: default
+      #     policy: app

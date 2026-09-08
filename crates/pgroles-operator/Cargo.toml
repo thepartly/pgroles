@@ -62,3 +62,7 @@ proptest = "1.11.0"
 # start_paused lets the index readiness timeout be asserted without the test
 # actually sleeping for it. Not in tokio's "full" feature set.
 tokio = { workspace = true, features = ["test-util"] }
+# Local OTLP receiver verifies the real wire payload for both signal providers.
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "metrics", "logs"] }
+tonic = { version = "0.14", features = ["transport"] }
+tokio-stream = { version = "0.1", features = ["net"] }

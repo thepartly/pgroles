@@ -1,0 +1,72 @@
+groups:
+  - name: pgroles-policy
+    interval: 1m
+    rules:
+      # Include UID: deleting and recreating a name starts a new lifecycle.
+      - record: pgroles:policy_active
+        expr: |
+          max by (cluster, namespace, policy, uid) (pgroles_policy_info{mode!~"observe|plan"})
+          unless on (cluster, namespace, policy, uid)
+          (max by (cluster, namespace, policy, uid) (pgroles_policy_suspended) == 1)
+      - record: pgroles:policy_unready
+        expr: |
+          pgroles:policy_active unless on (cluster, namespace, policy, uid)
+          (max by (cluster, namespace, policy, uid) (pgroles_policy_condition{type="Ready"}) == 1)
+      - record: pgroles:policy_last_progress_seconds
+        expr: |
+          (max by (cluster, namespace, policy, uid) (pgroles_policy_last_success_seconds) > 0)
+          or on (cluster, namespace, policy, uid)
+          max by (cluster, namespace, policy, uid) (pgroles_policy_created_seconds)
+      - record: pgroles:policy_stale_after_seconds
+        expr: |
+          (max by (cluster, namespace, policy, uid) (pgroles_policy_stale_after_seconds) > 0)
+          or on (cluster, namespace, policy, uid) (pgroles:policy_active * 0 + 1800)
+      - alert: PgrolesPolicyNotReady
+        expr: pgroles:policy_unready == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Policy has not been ready for 10 minutes.
+      - alert: PgrolesPolicyReconcileStale
+        expr: |
+          ((time() - pgroles:policy_last_progress_seconds)
+          > on (cluster, namespace, policy, uid) pgroles:policy_stale_after_seconds)
+          and on (cluster, namespace, policy, uid) pgroles:policy_active
+          unless on (cluster, namespace, policy, uid) pgroles_policy_info{approval="manual"}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Policy has exceeded its reconciliation grace period.
+  - name: pgroles-collection
+    interval: 1m
+    rules:
+      # Provision expected=1 outside the operator/collector being monitored.
+      - alert: PgrolesTelemetryMissing
+        expr: |
+          pgroles_monitoring_expected == 1
+          unless on (cluster) count by (cluster) (pgroles_runtime_scheduling_lag_count)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Expected operator runtime telemetry is missing.
+      - alert: PgrolesPolicyCollectionDown
+        expr: |
+          pgroles_monitoring_expected == 1
+          unless on (cluster) (max by (cluster) (up{job="pgroles-policy-state"}) == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Expected policy state collector is unavailable.
+      - alert: PgrolesExpectedPolicyMissing
+        expr: |
+          pgroles_policy_expected == 1
+          unless on (cluster, namespace, policy) pgroles_policy_info
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An independently inventoried policy is absent from collected state.

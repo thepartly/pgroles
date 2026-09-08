@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pgroles-monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pgroles-policy-state
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pgroles-policy-state
+rules:
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [list, watch]
+  - apiGroups: [pgroles.io]
+    resources: [postgrespolicies]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pgroles-policy-state
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pgroles-policy-state
+subjects:
+  - kind: ServiceAccount
+    name: pgroles-policy-state
+    namespace: pgroles-monitoring
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgroles-policy-state
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: pgroles-policy-state}
+  template:
+    metadata:
+      labels: {app: pgroles-policy-state}
+    spec:
+      serviceAccountName: pgroles-policy-state
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.15.0
+          args:
+            - --custom-resource-state-only=true
+            - --custom-resource-state-config-file=/config/custom-resource-state.yaml
+          ports:
+            - {name: metrics, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: pgroles-policy-state}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgroles-policy-state
+spec:
+  selector: {app: pgroles-policy-state}
+  ports:
+    - {name: metrics, port: 8080, targetPort: metrics}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgroles-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: pgroles-collector}
+  template:
+    metadata:
+      labels: {app: pgroles-collector}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.142.0
+          args: [--config=/config/collector.yaml]
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+            - {name: metrics, containerPort: 8889}
+          readinessProbe:
+            tcpSocket: {port: metrics}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: pgroles-collector}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgroles-collector
+spec:
+  selector: {app: pgroles-collector}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}
+    - {name: metrics, port: 8889, targetPort: metrics}

@@ -1,0 +1,23 @@
+# Reference metrics path. Add your backend exporter to this pipeline.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch: {}
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 2m
+    translation_strategy: UnderscoreEscapingWithoutSuffixes
+    resource_to_telemetry_conversion:
+      enabled: true
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

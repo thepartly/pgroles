@@ -7,6 +7,7 @@ pub mod advisory;
 pub mod candidate;
 pub mod concurrency;
 pub mod context;
+pub mod controller_health;
 pub mod crd;
 pub mod ephemeral;
 pub mod events;
@@ -17,3 +18,5 @@ pub mod plan;
 pub mod promotion;
 pub mod reconciler;
 pub mod request_index;
+
+mod telemetry_resource;
