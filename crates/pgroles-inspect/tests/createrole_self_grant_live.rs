@@ -248,6 +248,66 @@ async fn default_owner_bootstrap_matches_postgres() {
             }
         }
     }
+    // A new bridge provides inherited access only if the preceding membership
+    // GRANT is executable. CREATEROLE does not confer ADMIN on existing owners.
+    for can_admin in [false, true] {
+        pool.execute("BEGIN; CREATE ROLE csg_executor CREATEROLE NOINHERIT; CREATE ROLE csg_owner")
+            .await
+            .unwrap();
+        if can_admin {
+            pool.execute("GRANT csg_owner TO csg_executor WITH ADMIN TRUE, INHERIT FALSE")
+                .await
+                .unwrap();
+        }
+        pool.execute("SET LOCAL ROLE csg_executor; SET LOCAL createrole_self_grant = 'inherit'")
+            .await
+            .unwrap();
+        let changes = vec![
+            Change::CreateRole {
+                name: "csg_bridge".into(),
+                state: RoleState::default(),
+            },
+            Change::AddMember {
+                role: "csg_owner".into(),
+                member: "csg_bridge".into(),
+                inherit: true,
+                admin: false,
+            },
+            Change::RevokeDefaultPrivilege {
+                owner: "csg_owner".into(),
+                scope: DefaultPrivilegeScope::Global,
+                on_type: ObjectType::Function,
+                grantee: Grantee::Public,
+                privileges: [Privilege::Execute].into(),
+            },
+        ];
+        let issues = preflight_authority_issues(&pool, &changes, &RoleGraph::default()).await;
+        let mut failure = None;
+        'plan: for change in &changes {
+            for statement in render_statements(change) {
+                if let Err(error) = pool.execute(statement.as_str()).await {
+                    failure = Some((statement, error));
+                    break 'plan;
+                }
+            }
+        }
+        pool.execute("ROLLBACK").await.unwrap();
+        assert_eq!(
+            issues.unwrap(),
+            if can_admin { vec![] } else { owner_issue() }
+        );
+        if can_admin {
+            assert!(failure.is_none(), "{failure:?}");
+        } else {
+            let (statement, error) = failure.expect("membership GRANT must fail");
+            assert!(statement.starts_with("GRANT "), "{statement}: {error}");
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("42501")
+            );
+        }
+    }
+
     // Superusers do not need self-grants, and a role always has authority over
     // its own defaults even when NOINHERIT and without CREATEROLE.
     for superuser in [false, true] {

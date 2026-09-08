@@ -988,6 +988,8 @@ struct GrantorAuthorityRow {
 /// executor never had. Planned roles and automatic creation grants are
 /// included before membership removals and additions. Removals and inheritance
 /// downgrades conservatively remove every grantor edge for the named pair.
+/// Additions count only with existing ADMIN authority, or the automatic ADMIN
+/// grant a CREATEROLE executor receives for a role it creates.
 /// Superusers are never passed here.
 async fn roles_unreachable_in_graph(
     pool: &PgPool,
@@ -1035,6 +1037,12 @@ async fn roles_unreachable_in_graph(
             SELECT a.rolname, a.memname FROM added a
             JOIN known g ON g.rolname = a.rolname
             JOIN known mem ON mem.rolname = a.memname
+            LEFT JOIN pg_roles live_role ON live_role.rolname = a.rolname
+            WHERE CASE WHEN live_role.oid IS NULL THEN
+                a.rolname = ANY($6)
+                AND (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user)
+            ELSE pg_has_role(current_user, live_role.oid, 'MEMBER WITH ADMIN OPTION')
+            END
         ),
         reach(rolname) AS (
             SELECT current_user::text
