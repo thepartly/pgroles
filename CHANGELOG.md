@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Authority preflight recognizes PostgreSQL 16+ `createrole_self_grant=inherit` when a non-superuser creates a default-privilege owner in the same plan. Later default revokes account for planned roles, automatic inherited memberships, and membership removals, additions, and inheritance downgrades.
 - Release notes use only the matching changelog entry, without GitHub's duplicated change list. Missing or empty release notes stop draft creation.
 
 ## [0.11.0] - 2026-09-06

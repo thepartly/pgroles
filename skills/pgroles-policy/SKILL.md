@@ -167,6 +167,21 @@ is one schema or the owner-wide global layer. A default owner declaration does
 not retroactively grant existing objects and does not cover objects created by
 another role.
 
+When a non-superuser plan creates an owner and grants its defaults before
+membership additions, PostgreSQL 16+ needs `CREATEROLE` and
+`createrole_self_grant = 'inherit'` (or `'set, inherit'`) on the connection
+for immediate inherited authority. `'set'` alone is insufficient. Configure
+the authenticated login/session: `SET ROLE` does not load target-role settings.
+pgroles reads the setting without enabling it. Later default revokes can
+instead use inherited authority established by the plan's membership additions;
+removals and inheritance downgrades must not leave them without authority.
+A planned grant requires a surviving usable administrator, not just membership
+or SET access to one. Preflight conservatively excludes administrator paths
+established by other additions; stage those bootstrap steps separately.
+v0.11.0 preflight rejects new owners even with this setting; this support
+requires the upcoming release. On v0.11.0 pre-create the owner and grant inherited
+membership, or bootstrap separately.
+
 Schema defaults add to the global layer and cannot subtract from it. Removing
 PostgreSQL's built-in `PUBLIC EXECUTE` on functions therefore needs a global
 rule with `ensure: absent`; a schema-scoped one only removes a schema-scoped
