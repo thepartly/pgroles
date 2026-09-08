@@ -225,6 +225,12 @@ Interpretation:
 - `Ready=False, reason=BlockedByActivePolicy` means the parent is failing or
   has its own plan awaiting a decision; the candidate is planned once the
   parent settles.
+- In v0.11.0, candidate planning omits the `preserve_undeclared_grants`
+  filter, executor-authority preflight, advisory warnings, and adopt-mode
+  schema-owner-transfer guard. It can preview revokes the parent suppresses;
+  `Ready=True` does not prove apply will succeed. Check executor authority and
+  parent execution settings separately. Changed effects require a replacement
+  plan at promotion; the approved digest does not bypass execution checks.
 - The spec is immutable. Revise by filing a successor that names this
   candidate in `spec.replaces`.
 - Approving the candidate's plan executes nothing by itself. Execution happens

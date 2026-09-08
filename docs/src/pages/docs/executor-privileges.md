@@ -9,7 +9,9 @@ pgroles does not require superuser. It needs `CREATEROLE` plus a handful of scop
 
 ## What pgroles actually needs
 
-This table was verified against a live PostgreSQL 16 server. `CREATEROLE` is the load-bearing attribute; everything else is either automatic (for roles the executor created itself) or a narrow, explicit grant.
+The table targets PostgreSQL 16–18. `CREATEROLE` permits ordinary role creation;
+existing-role administration and object operations need separate authority.
+Protected roles and managed-provider restrictions can impose additional limits.
 
 | pgroles operation | Requires |
 |---|---|
@@ -18,28 +20,41 @@ This table was verified against a live PostgreSQL 16 server. `CREATEROLE` is the
 | `GRANT`/`REVOKE` role memberships | `ADMIN OPTION` on the granted (group) role — automatic for roles the executor created. On PostgreSQL 16+ pgroles revokes each edge `GRANTED BY` its recorded grantor, which additionally requires the privileges of that grantor (membership with inheritance; superusers qualify everywhere) — the plan preflight reports any grantor the executor lacks |
 | `GRANT`/`REVOKE` predefined (`pg_*`) role memberships | `ADMIN OPTION` on the predefined role — never automatic: a superuser must run `GRANT pg_read_all_data TO executor WITH ADMIN OPTION` (or the executor must be superuser). The plan preflight warns and apply blocks when this is missing |
 | `DROP ROLE` | `CREATEROLE` + `ADMIN OPTION` on the role |
-| `CREATE SCHEMA` | `CREATE` privilege on the database |
-| `ALTER SCHEMA ... OWNER TO` | ownership of the schema plus membership in the new owner role |
-| `GRANT`/`REVOKE` on tables/sequences/functions | ownership of the objects, directly or via membership in the owning role. Revokes run as the recorded grantor of each ACL entry (`SET ROLE`), which requires membership in that grantor with the `SET` option (superusers qualify everywhere) — the plan preflight reports any grantor the executor cannot become |
-| `ALTER DEFAULT PRIVILEGES FOR ROLE x` | membership (privileges) of role `x` — `ADMIN OPTION` alone is **not** enough |
+| `CREATE SCHEMA` | `CREATE` on the database; assigning another owner also requires the ability to `SET ROLE` to that owner |
+| `ALTER SCHEMA ... OWNER TO` | ownership of the schema, ability to `SET ROLE` to the new owner, and `CREATE` on the database for the new owner |
+| `GRANT`/`REVOKE` on tables/sequences/functions | grant authority on every affected object: ownership or the relevant privilege with grant option. Grantor-attributed revokes run as the recorded grantor of each ACL entry (`SET ROLE`), which requires membership in that grantor with the `SET` option (superusers qualify everywhere) — the plan preflight reports any grantor the executor cannot become |
+| `ALTER DEFAULT PRIVILEGES FOR ROLE x` | effective privileges of role `x` (self or an inheriting membership path) — `ADMIN OPTION` or the ability to `SET ROLE` alone is **not** enough for pgroles' emitted statement |
 | `REASSIGN OWNED BY a TO b` (retirements) | membership (privileges) of **both** `a` and `b`. The executor has `ADMIN OPTION` on roles it created, so it can `GRANT a TO executor` itself first — pgroles does not do this automatically |
 | `DROP OWNED BY a` (retirements) | membership (privileges) of `a` |
 | `terminate_sessions` (retirements) | membership in `pg_signal_backend` (cannot terminate superuser sessions) |
 | inspection (`diff`/`plan`/`generate`) | none beyond `CONNECT` — `pg_roles`, `pg_shdescription`, and ACL columns are readable by any role |
 
-## Why greenfield is nearly free and brownfield has friction
+See PostgreSQL's [CREATE SCHEMA](https://www.postgresql.org/docs/18/sql-createschema.html),
+[ALTER SCHEMA](https://www.postgresql.org/docs/18/sql-alterschema.html), and
+[GRANT](https://www.postgresql.org/docs/18/sql-grant.html) references for these distinctions.
+
+## Greenfield and brownfield prerequisites
 
 PostgreSQL 16 changed `CREATEROLE` semantics: a role with `CREATEROLE` automatically receives `ADMIN OPTION` on any role it creates. That collapses most of the table above into a single attribute for a **greenfield** executor — one that creates every role it will later alter, grant, or drop. A fresh executor needs only:
 
 - `CREATEROLE`
 - `CREATE` on the target database (to create schemas)
-- membership in the schema-owner role(s) it manages default privileges for
+- ability to `SET ROLE` to any other role assigned as a schema owner
+- inherited privileges of each default-privilege creator role (which need not be the schema owner)
 
-There is one greenfield exception: `ADMIN OPTION` is not membership. A
-non-superuser cannot create a new owner role and run `ALTER DEFAULT PRIVILEGES
-FOR ROLE owner` in the same pgroles transaction. For owner-bound defaults,
-pre-create the owner and grant the executor membership, bootstrap in two stages,
-or use a superuser for the atomic first apply.
+Automatic `ADMIN OPTION` does not itself provide `INHERIT` or `SET` access.
+PostgreSQL's [createrole_self_grant](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT)
+can give a non-superuser immediate inheritance or SET access to roles it creates.
+However, pgroles v0.11.0 preflight does not account for that setting: it rejects
+plans that create a default-privilege owner and alter its defaults as a
+non-superuser. This is a pgroles limitation, not a PostgreSQL prohibition.
+
+For owner-bound defaults, pre-create the owner and grant the executor the
+required access, bootstrap in two stages, or use a superuser for the atomic
+first apply. Creating a schema owned by another role likewise needs a usable
+`SET ROLE` path before the schema statement. Declaring a membership in the same
+manifest cannot supply these earlier prerequisites: pgroles adds memberships
+after schema changes and default-privilege grants.
 
 The friction also shows up in **brownfield** adoption. `CREATEROLE` does not retroactively grant `ADMIN OPTION` on roles that already existed before the executor was created. For every pre-existing role pgroles needs to alter, drop, or manage memberships on, a superuser or existing admin must explicitly grant the executor admin rights:
 
@@ -62,19 +77,21 @@ CREATE ROLE pgroles_executor WITH LOGIN PASSWORD '...' CREATEROLE;
 -- 2. Let it create schemas in the target database.
 GRANT CREATE ON DATABASE mydb TO pgroles_executor;
 
--- 3. If pgroles will manage default privileges owned by an existing
---    schema-owner role, give the executor membership in that role.
-GRANT app_owner TO pgroles_executor;
+-- 3. For an existing role used as both schema owner and default-privilege
+--    creator, give the executor the required inheritance and SET paths.
+GRANT app_owner TO pgroles_executor WITH INHERIT TRUE, SET TRUE;
 
 -- 4. Brownfield only: for each pre-existing role pgroles must alter,
 --    drop, or manage memberships on, grant explicit admin rights.
 GRANT some_preexisting_role TO pgroles_executor WITH ADMIN TRUE;
 ```
 
-Steps 1–2 cover a greenfield executor only when the first plan does not alter
-defaults for an owner it also creates. Step 3 is required for every existing
-default-privilege owner. For an owner created by the policy, use the two-stage
-or superuser bootstrap described above. Step 4 is brownfield-only.
+Steps 1–2 suffice only when the plan needs no additional owner authority.
+Step 3 gives the executor an inheritance path to the owner for default
+privileges and a SET path for schema assignment; grant only the options
+the plan needs. Repeat for each relevant owner. For owners created by the policy,
+use the staged bootstrap above. Step 4 covers pre-existing roles requiring
+administration.
 
 ## Cloud providers
 

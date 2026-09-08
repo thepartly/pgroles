@@ -1,6 +1,6 @@
 ---
 title: Candidates and promotion
-description: Propose policy changes, review their exact PostgreSQL effects, and promote them — while the active policy keeps enforcing during review.
+description: Preview proposed policy effects and promote reviewed content while the active policy keeps enforcing.
 ---
 
 For field types, defaults, and admission constraints, see the [CRD API reference](/docs/operator-api-reference).
@@ -27,8 +27,8 @@ A `PostgresPolicyCandidate` is a one-shot, immutable proposal: policy content
 that an author wants reviewed against a live database without touching the
 `PostgresPolicy` that is enforcing it. The operator plans the candidate in the
 active policy's own execution context — same credentials, same advisory lock,
-same managed scope — and publishes a `PostgresPolicyPlan` describing exactly
-what would change. The active policy keeps enforcing throughout review. (After
+same managed scope — and publishes a `PostgresPolicyPlan` of proposed effects
+with the [preview limitations](#preview-limitations) below. The active policy keeps enforcing throughout review. (After
 promotion the picture changes if the promotion does not match its approval —
 see [Promotion](#promotion).)
 
@@ -43,6 +43,23 @@ The kinds divide authority. Anyone granted create on candidates can propose;
 only whoever can write `PostgresPolicy` (typically your GitOps controller) can
 promote; only plan approvers can approve. None of those grants implies the
 others.
+
+## Preview limitations
+
+In v0.11.0, candidate planning does not run every enforcing-policy check:
+
+- It omits the `preserve_undeclared_grants` filter, so it can preview object
+  revokes that the parent would suppress after promotion.
+- It omits executor-authority preflight, plan advisory warnings, and the adopt
+  mode schema-owner-transfer guard. `Ready=True` means a preview is available;
+  it does not prove the executor can apply it. Execution settings such as
+  `allow_schema_owner_transfers` remain on the parent, outside candidate content.
+
+Promotion recomputes effects and checks the approved digest before execution.
+Different effects require a replacement plan; matching effects can still be
+blocked by executor privileges or execution settings. Review those prerequisites
+separately using [Executor privileges](/docs/executor-privileges), and verify
+Applied and parent convergence after promotion.
 
 ## Who does what
 
@@ -87,8 +104,8 @@ spec:
 ```
 
 `spec.content` is the exact policy-content schema from `PostgresPolicySpec` —
-everything except connection, interval, mode, and approval. Interval, mode and
-approval always come from the parent policy; the connection does too, unless
+excluding execution settings: connection, interval, mode, suspend, approval,
+and allow_schema_owner_transfers. Those settings come from the parent policy; the connection does too, unless
 `spec.target` overrides it (see [Previewing a connection
 migration](#previewing-a-connection-migration)). The whole spec is immutable
 (`self == oldSelf`); to revise a proposal, create a successor:
@@ -202,8 +219,8 @@ that made it, whether it is still current or has been superseded, the applied
 base it is pinned to, and any promotion outcome. A candidate with no plan yet
 reports that, with the reason, rather than printing a blank plan section.
 
-`diff` prints the reviewed plan's SQL on stdout: what approving this candidate
-would execute. It reads `status.sqlInline`, falling back to the gzipped
+`diff` prints the proposed plan's SQL on stdout. Approval alone executes nothing;
+promotion requires a fresh matching digest and successful execution checks. It reads `status.sqlInline`, falling back to the gzipped
 ConfigMap in `status.sqlRef` when the plan is too large to inline. A plan
 whose SQL survives only as a truncated preview is an error, not a short diff,
 because a partial listing could be read as the full set of statements the
