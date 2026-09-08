@@ -5,8 +5,8 @@ description: >-
   Define roles, memberships, grants, and default privileges in YAML
   and let the operator converge your database to the desired state.
 type: application
-version: 0.11.0
-appVersion: "0.11.0"
+version: 0.12.0
+appVersion: "0.12.0"
 icon: https://raw.githubusercontent.com/thepartly/pgroles/main/docs/public/logo.svg
 sources:
   - https://github.com/thepartly/pgroles
@@ -16,8 +16,12 @@ maintainers:
     url: https://hardbyte.nz
 annotations:
   artifacthub.io/changes: |
+    - kind: added
+      description: 'Shared OTLP resource identity, watch-aware readiness, and tested monitoring examples.'
     - kind: fixed
-      description: 'Operator reconciliation is now bounded to one in-flight reconcile per controller by default, preventing startup and resynchronization bursts from exhausting memory, CPU, or database connection pools. Set RECONCILE_CONCURRENCY to opt into more parallelism when the operator has sufficient resources.'
+      description: 'Candidate plans honor undeclared-grant preservation; consecutive grantor revokes share role blocks.'
+    - kind: fixed
+      description: 'Default-owner preflight recognizes inherited authority created by PostgreSQL 16+ createrole_self_grant.'
   artifacthub.io/category: database
   artifacthub.io/operator: "true"
   artifacthub.io/prerelease: "false"
