@@ -198,8 +198,7 @@ Review effective and transitive privileges, not role names alone.
 
 Wildcard revocations preserve concrete grantor attribution. Review per-object
 changes and ensure the executor can act as every recorded grantor. Do not
-replace those statements with a broad plain REVOKE. Versions through 0.10.1
-have a known wildcard grantor gap; use the matching release limitations.
+replace those statements with a broad plain REVOKE.
 
 ## Safe Removal
 

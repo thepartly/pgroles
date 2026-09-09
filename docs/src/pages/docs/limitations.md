@@ -14,7 +14,7 @@ What pgroles does not cover, so you know where the edges of the declared-state m
 ## MAINTAIN privilege
 
 PostgreSQL 17 introduced the table-level `MAINTAIN` privilege; it is also
-available in PostgreSQL 18. pgroles v0.11.0 cannot declare or reconcile it, and
+available in PostgreSQL 18. pgroles cannot declare or reconcile it, and
 its ACL inspection omits it. A clean diff therefore does not verify maintenance
 access. Review it directly in PostgreSQL. See the
 [PostgreSQL 17 release notes](https://www.postgresql.org/docs/17/release-17.html).
@@ -52,9 +52,7 @@ revoke ordinary privileges from itself, while ownership rights and implicit
 grant options remain inherent. Missing declared owner privileges can still be
 granted. See [PostgreSQL privileges](https://www.postgresql.org/docs/18/ddl-priv.html).
 The plan can therefore contain more entries than the wildcard rules in the
-manifest; review its complete SQL. This behavior is available since
-v0.11.0. In 0.10.0–0.10.1, wildcard-collapsed revokes can fall back to a plain revoke
-and leave delegated entries behind; see [#215](https://github.com/thepartly/pgroles/issues/215).
+manifest; review its complete SQL.
 
 If identical effects remain after apply, the operator reports `NonConvergentPlan`
 and retries at the policy interval. Investigate the retained ACL and authority

@@ -47,7 +47,6 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 
 ## Moving from 0.11 to 0.12
 
-- CRD schemas are unchanged. Continue using the chart's version-matched CRDs.
 - Readiness now requires all watches to finish initial synchronization and clears during relists or shutdown. A policy error does not by itself make the operator unready. Allow time for watch initialization during rollout.
 - Candidate planning now preserves undeclared object grants when requested by the proposed role definitions. Review replanned candidates; changed effects remain subject to the usual approval checks, and preserved-only drift yields `NoEffects` without an approval plan.
 - Consecutive revokes attributed to the same grantor share a role block without reordering effects. Diagnostic SQL hashes and statement counts can change; the semantic approval digest is independent of SQL formatting.
