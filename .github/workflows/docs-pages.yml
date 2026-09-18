@@ -73,6 +73,10 @@ jobs:
         working-directory: docs
         run: npm run test:reference
 
+      - name: Verify documentation link routing
+        working-directory: docs
+        run: npm run test:routing
+
       - name: Build static export
         env:
           DOCS_BASE_PATH: >-

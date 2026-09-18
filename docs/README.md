@@ -25,6 +25,7 @@ from forks do not receive it, so the docs workflow skips them.
 ```bash
 npm run lint
 npm run test:labs
+npm run test:routing
 npm run build
 ```
 
