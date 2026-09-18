@@ -5,6 +5,7 @@ import { slugifyWithCounter } from '@sindresorhus/slugify'
 import { RouterProvider } from 'react-aria-components'
 
 import { Layout } from '@/components/Layout'
+import { withBasePath } from '@/lib/routing.mjs'
 
 import '@/styles/tailwind.css'
 
@@ -83,12 +84,13 @@ export default function App({ Component, pageProps }) {
 
   return (
     // React Aria renders an href verbatim, so `useHref` adds the basePath the
-    // static export is deployed under. Internal navigation still goes through
-    // next/link, which handles the basePath and trailing slash itself; this
-    // covers any Pitstop component given an `href` directly.
+    // static export is deployed under to root-relative links. External URLs,
+    // protocol-relative URLs, and fragments must remain unchanged. Internal
+    // navigation through next/link handles the basePath and trailing slash
+    // itself; this covers any Pitstop component given an `href` directly.
     <RouterProvider
       navigate={(href) => router.push(href)}
-      useHref={(href) => `${basePath}${href}`}
+      useHref={(href) => withBasePath(basePath, href)}
     >
       {/* `font-sans` is applied here, where the font variables are defined, so
           the whole tree inherits IBM Plex rather than the fallback stack that
