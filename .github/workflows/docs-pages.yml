@@ -5,12 +5,20 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "crates/pgroles-core/**"
+      - "crates/pgroles-wasm/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/docs-pages.yml"
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize, closed]
     paths:
       - "docs/**"
+      - "crates/pgroles-core/**"
+      - "crates/pgroles-wasm/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/docs-pages.yml"
   workflow_dispatch:
 
@@ -58,6 +66,22 @@ jobs:
           cache-dependency-path: docs/package-lock.json
           registry-url: https://registry.npmjs.org
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+        working-directory: ${{ github.workspace }}
+
+      - name: Build browser analyzer
+        run: >-
+          wasm-pack build crates/pgroles-wasm
+          --target web
+          --release
+          --out-dir ../../docs/public/wasm
+        working-directory: ${{ github.workspace }}
+
       # The docs depend on @partly/pitstop, a restricted package, so the
       # install needs a token with read access to the @partly scope. Pull
       # requests from forks do not get the secret and cannot build the docs.
@@ -68,6 +92,15 @@ jobs:
 
       - name: Run lab exercises against PGlite
         run: npm run test:labs
+
+      - name: Verify explorer bridge
+        run: npm run test:explorer
+
+      - name: Install browser for explorer tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run explorer browser tests
+        run: npm run test:browser
 
       - name: Verify generated reference rendering
         working-directory: docs

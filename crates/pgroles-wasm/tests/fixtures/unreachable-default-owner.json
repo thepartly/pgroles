@@ -1,0 +1,7 @@
+{
+  "schema_version": "pgroles.explorer.v1",
+  "current": { "roles": { "deployer": {}, "owner": {} } },
+  "desired_yaml": "roles:\n  - name: deployer\n  - name: owner\ndefault_privileges:\n  - owner: owner\n    schema: app\n    grant:\n      - role: deployer\n        privileges: [SELECT]\n        on_type: table\n",
+  "mode": "authoritative",
+  "executor": { "role": "deployer", "superuser": false }
+}

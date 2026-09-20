@@ -36,6 +36,7 @@ const navigation = [
             {title: '7. Membership mechanics', href: '/docs/postgresql-role-hierarchy'},
             {title: '8. The security review', href: '/docs/postgresql-security-review'},
             {title: 'The Acme playground', href: '/docs/postgresql-playground'},
+            {title: 'Plan explorer', href: '/docs/explorer'},
         ],
     },
     {

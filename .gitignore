@@ -1,6 +1,9 @@
 # Rust
 /target/
 **/*.rs.bk
+/docs/public/wasm/
+/docs/test-results/
+/docs/playwright-report/
 
 # IDE
 .idea/

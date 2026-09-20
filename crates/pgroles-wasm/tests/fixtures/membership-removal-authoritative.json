@@ -1,0 +1,14 @@
+{
+  "schema_version": "pgroles.explorer.v1",
+  "current": {
+    "roles": { "deployer": {}, "reader": {} },
+    "memberships": [{ "role": "reader", "member": "deployer", "inherit": true, "admin": false }]
+  },
+  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
+  "mode": "authoritative",
+  "executor": {
+    "role": "deployer",
+    "superuser": false,
+    "memberships": [{ "role": "reader", "member": "deployer", "set_role": "allowed", "admin_option": "unknown" }]
+  }
+}
