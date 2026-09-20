@@ -824,6 +824,7 @@ pub fn apply_role_retirements(changes: Vec<Change>, retirements: &[RoleRetiremen
 /// Returns a map of role name → resolved password for every managed role that
 /// declares a `password.from_env` source. External roles are reference-only and
 /// never participate in password management.
+#[cfg(feature = "passwords")]
 pub fn resolve_passwords(
     roles: &[crate::manifest::RoleDefinition],
 ) -> Result<std::collections::BTreeMap<String, String>, PasswordResolutionError> {
@@ -852,6 +853,7 @@ pub fn resolve_passwords(
 }
 
 /// Errors that can occur during password resolution.
+#[cfg(feature = "passwords")]
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordResolutionError {
     #[error("environment variable \"{env_var}\" for role \"{role}\" password is not set")]
@@ -873,6 +875,7 @@ pub enum PasswordResolutionError {
 /// directly.
 ///
 /// This function should be called after `diff()` and `apply_role_retirements()`.
+#[cfg(feature = "passwords")]
 pub fn inject_password_changes(
     changes: Vec<Change>,
     resolved_passwords: &std::collections::BTreeMap<String, String>,
@@ -3210,6 +3213,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn inject_password_for_new_role() {
         let changes = vec![Change::CreateRole {
             name: "app-svc".to_string(),
@@ -3228,6 +3232,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn inject_password_for_existing_role() {
         // No CreateRole — role already exists. Only grants change.
         let changes = vec![Change::Grant {
@@ -3250,6 +3255,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn inject_password_empty_passwords_is_noop() {
         let changes = vec![Change::CreateRole {
             name: "app-svc".to_string(),
@@ -3262,6 +3268,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn resolve_passwords_missing_env_var() {
         let roles = vec![crate::manifest::RoleDefinition {
             name: "app-svc".to_string(),
@@ -3298,6 +3305,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn resolve_passwords_empty_env_var() {
         let roles = vec![crate::manifest::RoleDefinition {
             name: "app-svc".to_string(),
@@ -3338,6 +3346,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn resolve_passwords_happy_path() {
         let roles = vec![crate::manifest::RoleDefinition {
             name: "app-svc".to_string(),
@@ -3372,6 +3381,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn resolve_passwords_skips_external_roles() {
         let roles = vec![crate::manifest::RoleDefinition {
             name: "external-svc".to_string(),
@@ -3401,6 +3411,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn resolve_passwords_skips_roles_without_password() {
         let roles = vec![crate::manifest::RoleDefinition {
             name: "no-password".to_string(),
@@ -3426,6 +3437,7 @@ memberships:
     }
 
     #[test]
+    #[cfg(feature = "passwords")]
     fn inject_password_multiple_roles() {
         let changes = vec![
             Change::CreateRole {

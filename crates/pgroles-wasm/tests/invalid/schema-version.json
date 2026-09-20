@@ -1,0 +1,1 @@
+{"schema_version":"pgroles.explorer.v0","current":{"roles":{}},"desired_yaml":"roles: []","mode":"authoritative","executor":{"role":"postgres"}}

@@ -7,6 +7,10 @@ Partly's component library.
 
 ```bash
 npm ci
+cd ..
+rustup target add wasm32-unknown-unknown
+wasm-pack build crates/pgroles-wasm --target web --release --out-dir ../../docs/public/wasm
+cd docs
 npm run dev
 ```
 
@@ -25,9 +29,13 @@ from forks do not receive it, so the docs workflow skips them.
 ```bash
 npm run lint
 npm run test:labs
+npm run test:explorer
+npm run test:browser
 npm run test:routing
 npm run build
 ```
 
 `test:labs` runs the interactive lab exercises in `src/components` against
-PGlite; `build` produces the static export in `out/`.
+PGlite. `test:browser` uses the generated WASM package in `public/wasm`, and
+`build` produces the static export in `out/`. The generated WASM package is
+ignored by Git and rebuilt by the docs workflow.

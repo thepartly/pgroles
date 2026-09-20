@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/pgroles-core",
+    "crates/pgroles-wasm",
     "crates/pgroles-inspect",
     "crates/pgroles-cli",
     "crates/pgroles-operator",

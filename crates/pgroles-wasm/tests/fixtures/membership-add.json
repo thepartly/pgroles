@@ -1,0 +1,7 @@
+{
+  "schema_version": "pgroles.explorer.v1",
+  "current": { "roles": { "deployer": {}, "reader": {} } },
+  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\nmemberships:\n  - role: reader\n    members:\n      - name: deployer\n",
+  "mode": "authoritative",
+  "executor": { "role": "deployer", "superuser": false }
+}

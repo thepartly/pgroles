@@ -3,6 +3,7 @@ pub mod bounds;
 pub mod candidate;
 pub mod composition;
 pub mod diff;
+pub mod explorer;
 pub mod export;
 pub mod guc;
 pub mod manifest;
@@ -11,6 +12,7 @@ pub mod overlap;
 pub mod ownership;
 pub mod report;
 pub mod review;
+#[cfg(feature = "passwords")]
 pub mod scram;
 pub mod sql;
 pub mod suggest;

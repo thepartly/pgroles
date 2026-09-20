@@ -192,6 +192,39 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  wasm-check:
+    name: WASM compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Test browser-safe core
+        run: cargo test -p pgroles-core --no-default-features
+
+      - name: Check browser-safe core
+        run: cargo check -p pgroles-core --no-default-features --target wasm32-unknown-unknown
+
+      - name: Check explorer adapter
+        run: cargo check -p pgroles-wasm --target wasm32-unknown-unknown
+
+      - name: Verify native and WASM fixture parity
+        env:
+          WASM_PACK_BIN: wasm-pack
+        run: scripts/check-wasm-parity.sh
+
   # ---------------------------------------------------------------------------
   # Job 3: Integration tests — with a live PostgreSQL
   # ---------------------------------------------------------------------------
