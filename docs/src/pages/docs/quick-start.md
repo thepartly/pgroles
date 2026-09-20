@@ -76,6 +76,8 @@ This shows the exact SQL statements needed to converge the database to match you
 
 {% callout title="No changes are made" %}
 The `diff` command (also available as `plan`) is read-only. It connects to your database to inspect the current state but does not execute any changes.
+
+{% explorer-scenario scenario="acme-adoption" /%}
 {% /callout %}
 
 ## Apply changes

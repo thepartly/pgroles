@@ -15,8 +15,15 @@ import { OperatorReconciliationDiagram } from '@/components/OperatorReconciliati
 import { QuickLink, QuickLinks } from '@/components/QuickLinks'
 import { RoleGraphDiagram } from '@/components/RoleGraphDiagram'
 import { WorkspaceDataFlowDiagram } from '@/components/WorkspaceDataFlowDiagram'
+import { ExplorerScenario } from '@/components/ExplorerScenario'
+import { explorerScenarios } from '@/lib/explorerScenarios.mjs'
 
 const tags = {
+  'explorer-scenario': {
+    selfClosing: true,
+    render: ExplorerScenario,
+    attributes: { scenario: { type: String, required: true, matches: explorerScenarios.map((scenario) => scenario.id), errorLevel: 'critical' } },
+  },
   callout: {
     attributes: {
       title: { type: String },

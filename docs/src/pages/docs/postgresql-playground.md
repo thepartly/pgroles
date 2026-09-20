@@ -16,3 +16,7 @@ The whole Acme database is yours: durable ownership, capability roles, defaults,
 5. Review the plan, apply it, and repeat the operation as a positive or negative test.
 
 The [grants](/docs/grants), [memberships](/docs/memberships), [default privileges](/docs/default-privileges), and [limitations](/docs/limitations) pages are the exhaustive reference. This course stays focused on the operational story that makes those mechanisms worth remembering.
+
+The playground runs real PostgreSQL interactions in your browser. The explorer complements it by simulating an ordered pgroles plan from a sanitized snapshot; it does not replace the live checks in this lab.
+
+{% explorer-scenario scenario="acme-membership-bridge" /%}

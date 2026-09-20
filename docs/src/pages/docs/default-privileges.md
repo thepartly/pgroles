@@ -183,6 +183,8 @@ another role. Pre-create the owner and grant the executor membership, use a
 two-stage bootstrap, or use a superuser for the atomic create-and-defaults
 bootstrap.
 
+{% explorer-scenario scenario="acme-default-privileges" /%}
+
 ## Default privileges in profiles
 
 When using profiles, default privileges are expanded automatically:
