@@ -357,10 +357,10 @@ function AcmeStoryLab({ chapter }) {
           <p className="m-0 text-sm text-stone-600 dark:text-stone-300">
             Step {index + 1} of {lesson.steps.length}
           </p>
-          <span className="hidden font-mono text-[10px] text-stone-500 sm:inline">
-            Every step seeds its own database — jump anywhere
-          </span>
         </div>
+        <p className="mb-0 mt-2 text-xs leading-5 text-stone-600 dark:text-stone-300">
+          Every Run starts from this step’s prepared database. Changes from previous runs are discarded.
+        </p>
         <ol className="mt-3 flex gap-1.5" aria-label="Lesson progress">
           {lesson.steps.map((item, itemIndex) => (
             <li className="flex-1" key={item.title}>
@@ -500,8 +500,8 @@ function AcmeStoryLab({ chapter }) {
         {output && !output.passed && canonical && (
           <p className="m-0 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">
             This result did not match the step’s canonical PostgreSQL outcome.
-            Restore the example to compare — or continue on; every step seeds
-            its own database.
+            Restore the example to compare — or continue on; every Run starts
+            from this step’s prepared database.
           </p>
         )}
         {output && !canonical && (

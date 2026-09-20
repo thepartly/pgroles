@@ -23,9 +23,9 @@ Each chapter has the same rhythm: something happens at Acme, you reproduce it ag
 
 **PostgreSQL must be able to reach the schema and authorize the object operation.**
 
-For a query that reads `app.orders`, schema `USAGE` makes the name reachable and table `SELECT` authorizes the read. `search_path` changes name lookup, not privileges. A table grant does not imply schema access, and schema access does not imply a table operation.
+For this query that reads `app.orders`, schema `USAGE` makes the name reachable and table `SELECT` authorizes the read. `search_path` changes name lookup, not privileges. A table grant does not imply schema access, and schema access does not imply a table operation.
 
-The gates are evaluated in order, and the error names the first gate that failed—not everything that is missing. That is why the same query produced two different errors in the lab as each gate opened.
+In this query, schema lookup fails before PostgreSQL checks the table privilege. The first error does not list everything that is missing, which is why the same query produced two different errors as each gate opened.
 
 Superusers bypass ordinary privilege checks. Object owners start with ordinary privileges on their objects, but can revoke their own `SELECT` privilege and then fail the same query. They retain ownership rights, including the ability to grant those privileges back. Owning `app.orders` also does not grant access to every schema or other object. Acme's superuser connection hid these missing grants; a scoped login exposes them.
 
@@ -41,10 +41,14 @@ The lab shows `session_user → current_user` before and after each run. `sessio
 
 The lab fixed today’s database, and its `GRANT` statements remain durable catalog state. They do not, however, record version-controlled intent about which roles, grants, and memberships should exist. This is where **pgroles** enters the story: you declare that intent in YAML, and `pgroles plan` compares it with the live database and proposes SQL to converge them. Every chapter records its repair this way, and by chapter 3 the difference between “what the database accumulated” and “what the policy declares” becomes the whole plot.
 
-This first policy is the small team’s literal state: Alice receives both grants directly.
+This first policy is the small team’s literal state: Alice receives both grants directly. Priya is declared `external` so pgroles may reference the founder-owned role without managing its attributes yet.
+
+Later lessons show **Policy fragments** to merge into this file. Update entries inside its existing `roles`, `grants`, and `memberships` lists; do not concatenate YAML blocks and create duplicate top-level keys. Each core chapter also links a complete cumulative policy you can use as a replacement.
 
 ```yaml {% schema="pgroles-manifest" %}
 roles:
+  - name: priya
+    external: true
   - name: alice
     login: true
 
@@ -58,6 +62,8 @@ grants:
 ```
 
 It works, but every new reader would duplicate those ACL entries. The next chapter gives the permission bundle a reusable name.
+
+[Download the complete policy after this chapter](/examples/acme-policy/chapter-1.yaml).
 
 {% quick-links %}
 {% quick-link title="Continue: capability roles" description="Give Alice and an application the same access without copying grants." icon="presets" href="/docs/postgresql-capability-roles" /%}

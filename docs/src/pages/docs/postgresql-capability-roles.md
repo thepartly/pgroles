@@ -3,7 +3,7 @@ title: 2. Capability roles
 description: Replace copied grants with an orders_reader capability role and expose Alice's duplicate access path.
 ---
 
-Acme launches an automated reporting service. It needs exactly the access Alice already has, but copying Alice’s grants onto another login will make every team change harder to audit. And this time nobody suggests reusing the admin credentials—`reporting_app` becomes the first login at Acme whose access is actually designed. {% .lead %}
+Acme launches an automated reporting service. It needs exactly the access Alice already has, but copying Alice’s grants onto another login will make every team change harder to audit. The service uses `reporting_app`, a dedicated, scoped application login. {% .lead %}
 
 {% postgres-capability-roles-lab /%}
 
@@ -13,10 +13,10 @@ Acme launches an automated reporting service. It needs exactly the access Alice 
 
 PostgreSQL also supplies predefined capabilities, but they serve different jobs. `pg_read_all_data` and `pg_write_all_data` provide broad data access across schemas, without bypassing row-level security; they are much broader than this application's need to read only `app.orders`. A monitoring agent may appropriately use `pg_monitor` or one of its narrower monitoring roles to inspect database activity without gaining blanket access to business tables. Choose a capability by the job it must do. The [security review](/docs/postgresql-security-review#review-predefined-roles-by-capability) compares these categories with the special database-owner role and higher-risk server capabilities.
 
-```yaml {% schema="pgroles-manifest" %}
+Merge these role and membership entries into chapter 1's policy, retaining Alice and the external Priya definition. Replace Alice's direct grants with the capability grants below. The complete desired policy makes that replacement; the SQL lab deliberately leaves the old grants behind for the next investigation.
+
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
 roles:
-  - name: alice
-    login: true
   - name: reporting_app
     login: true
   - name: orders_reader
@@ -39,6 +39,8 @@ memberships:
 The lesson deliberately left Alice’s original direct grants in the database. The desired policy no longer declares them. That difference becomes the bug in the next chapter—and the reason a declarative plan is more useful than a pile of successful `GRANT` statements.
 
 **A membership adds a path; it does not erase any path that already exists.**
+
+[Download the complete policy after this chapter](/examples/acme-policy/chapter-2.yaml).
 
 {% quick-links %}
 {% quick-link title="Continue: drift" description="Change the team and watch an old direct grant defeat the intended offboarding." icon="lightbulb" href="/docs/postgresql-access-drift" /%}

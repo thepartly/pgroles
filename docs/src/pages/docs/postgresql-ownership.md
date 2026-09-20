@@ -17,11 +17,11 @@ Bob / reporting_app ──member of──> orders_reader ──USAGE + SELECT─
 deploy ──member of──> app_owner ──owns──> app schema and its objects
 ```
 
-Because the membership inherits, deploy already carries the owner’s authority for owner-only DDL. The migration recipe still uses `SET ROLE app_owner` before creating objects—not to pass the ownership check, but so that everything the migration **creates** belongs to the durable owner rather than to the deployment login.
+Because the membership inherits, deploy already carries the owner’s authority for owner-only DDL. The next chapter tests the separate question of which role owns an object created by a migration.
 
-Add the durable owner and make schema ownership explicit:
+Merge these entries into the policy from chapter 3; retain its existing grants and memberships. Add the durable owner and make schema ownership explicit:
 
-```yaml {% schema="pgroles-manifest" %}
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
 roles:
   - name: deploy
     login: true
@@ -40,9 +40,13 @@ memberships:
 
 pgroles converges the `app` schema owner. It does not change the owner of every table inside the schema; existing objects need a migration or retirement workflow. Future migrations should create objects as `app_owner`.
 
+Transferring an existing table to `app_owner` does not apply that role's default privileges. The next chapter demonstrates the separate repairs for existing objects and future objects.
+
 **Ownership is authority over the object, not another ACL entry. Give it to a durable role, not a person or deployment login.**
 
-The lesson used `SET ROLE app_owner` as a migration recipe so new objects land on the durable owner. The membership-mechanics chapter later takes the edge itself apart: `INHERIT`, `SET`, and `ADMIN` are three separate facts.
+The membership-mechanics chapter later takes the edge itself apart: inherited privilege use, `SET ROLE`, and delegated administration are separate facts.
+
+[Download the complete policy after this chapter](/examples/acme-policy/chapter-4.yaml). It retains the reader grants and Bob/reporting memberships from the earlier chapters.
 
 {% quick-links %}
 {% quick-link title="Continue: future objects" description="Create a new table and see why old wildcard grants do not follow it." icon="installation" href="/docs/postgresql-default-privileges" /%}

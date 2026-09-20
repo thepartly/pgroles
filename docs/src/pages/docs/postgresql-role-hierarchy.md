@@ -23,7 +23,9 @@ Read `GRANT orders_reader TO analyst` as **analyst becomes a member of orders_re
 
 ## Declare the edges
 
-```yaml {% schema="pgroles-manifest" %}
+Merge the new roles into chapter 6's policy, keeping its grants, defaults, and owner membership. Replace Bob's direct `orders_reader` membership with the `analyst` path below while retaining the reporting application's access.
+
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
 roles:
   - name: bob
     login: true
@@ -38,6 +40,7 @@ memberships:
   - role: orders_reader
     members:
       - name: analyst
+      - name: reporting_app
   - role: analyst
     members:
       - name: bob
@@ -48,10 +51,12 @@ memberships:
         admin: true
 ```
 
-`INHERIT` answers whether ordinary privileges flow automatically. `SET` answers whether the member may become the granted role. `ADMIN` answers whether the member may grant or revoke that membership for others. These are three separate facts.
+`INHERIT` answers whether the granted role's ordinary privileges flow automatically across this edge. `SET` answers whether the member may become the granted role. `ADMIN` answers whether the member may grant that role to or revoke it from other roles.
+
+In the lab's initial administrative grant, the team lead does not currently inherit analyst privileges or have permission to `SET ROLE` through that grant. However, `ADMIN` allows them to grant themselves those options. Treat membership administrators as trusted to obtain the role's privileges.
 
 {% callout type="warning" title="SET is outside the pgroles model" %}
-PostgreSQL 16 and later stores `INHERIT`, `SET`, and `ADMIN` per membership. pgroles manages `inherit` and `admin`, but does not inspect or converge `SET`. A managed edge receives PostgreSQL’s default `SET TRUE`; do not rely on `SET FALSE` remaining a security boundary on that edge.
+PostgreSQL 16 and later stores `INHERIT`, `SET`, and `ADMIN` per membership. pgroles manages `inherit` and `admin`, but does not inspect or converge `SET`. YAML with `inherit: false` controls automatic privilege flow; it cannot express the lab's `SET FALSE`. A newly managed edge receives PostgreSQL’s default `SET TRUE`, so the YAML above cannot reproduce an immediately created `INHERIT FALSE, SET FALSE` edge. Do not rely on `SET FALSE` remaining a boundary on an edge managed by pgroles.
 {% /callout %}
 
 Delegated administration and desired-state reconciliation also answer different questions. When the team lead grants `analyst` to Dana in PostgreSQL, the access is real immediately—but if that edge is absent from policy, the next authoritative pgroles plan treats it as drift. Durable delegation needs a workflow that writes the approved membership back to policy.
