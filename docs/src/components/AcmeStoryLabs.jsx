@@ -3,7 +3,7 @@ import Link from "next/link";
 import Highlight, { defaultProps } from "prism-react-renderer";
 
 import { chapters } from "./AcmeStoryData.mjs";
-import { runSql } from "./sqlStatements.mjs";
+import { runLabStep } from "./labExecution.mjs";
 
 const statusStyles = {
   pass: "border-emerald-400 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-950/25",
@@ -192,6 +192,33 @@ function AccessPath({ cards }) {
   );
 }
 
+function ExecutionContext({ output }) {
+  if (!output?.identity) return null;
+  const before = output.identity.before;
+  const after = output.identity.after;
+  const actorInspection = output.actorInspection ?? {};
+  return (
+    <section aria-label="Execution identity" className="rounded-2xl border border-stone-200 bg-stone-50/60 p-4 dark:border-stone-700 dark:bg-stone-950/30">
+      <h4 className="m-0 font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 dark:text-stone-400">Execution identity</h4>
+      <p className="mb-0 mt-2 text-xs leading-5 text-stone-500 dark:text-stone-400">Before and after show the caller context. A SECURITY DEFINER function can use its owner as <code>current_user</code> while the function is running.</p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {[["Before SQL", before], ["After SQL", after]].map(([label, identity]) => (
+          <div key={label} className="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-stone-900">
+            <p className="m-0 text-xs font-semibold">{label}</p>
+            <p className="mb-0 mt-2 font-mono text-xs"><span className="text-stone-500">session_user</span> {identity?.session_user ?? "unknown"} <span aria-hidden="true">→</span> <span className="text-stone-500">current_user</span> {identity?.current_user ?? "unknown"}</p>
+          </div>
+        ))}
+      </div>
+      {Object.hasOwn(actorInspection, "table_select") && (
+        <dl className="mb-0 mt-3 grid gap-2 text-xs sm:grid-cols-2">
+          <div className="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-stone-900"><dt className="font-semibold">Table SELECT</dt><dd className="mb-0 mt-1 font-mono">{actorInspection.table_select ? "allowed" : "denied"}</dd></div>
+          <div className="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-stone-900"><dt className="font-semibold">Row security active</dt><dd className="mb-0 mt-1 font-mono">{actorInspection.row_security_active ? "yes" : "no"}</dd></div>
+        </dl>
+      )}
+    </section>
+  );
+}
+
 function AcmeStoryLab({ chapter }) {
   const lesson = chapters[chapter];
   const [index, setIndex] = useState(0);
@@ -229,26 +256,16 @@ function AcmeStoryLab({ chapter }) {
     if (runningRef.current || !draft.trim()) return;
     runningRef.current = true;
     setRunning(true);
-    let database;
     try {
       const { PGlite } = await import("@electric-sql/pglite");
-      database = await PGlite.create();
-      await database.exec(step.setup);
-      await database.exec(
-        `SET SESSION AUTHORIZATION "${role.replaceAll('"', '""')}";`
-      );
-      const next = {
-        passed: false,
-        inspection: null,
-        ...(await runSql(database, draft)),
-      };
-      try {
-        await database.exec("SET SESSION AUTHORIZATION postgres;");
-        const inspection = await database.query(step.inspect);
-        next.inspection = inspection.rows[0] || {};
-      } catch (error) {
-        next.inspectionError = error.message;
-      }
+      const next = await runLabStep({
+        createDatabase: () => PGlite.create(),
+        setup: step.setup,
+        role,
+        sql: draft,
+        inspect: step.inspect,
+        inspectAsActor: step.inspectAsActor,
+      });
       next.passed = canonical && Boolean(step.expect(next, next.inspection));
       if (liveRef.current)
         setOutputs((current) => ({ ...current, [index]: next }));
@@ -265,7 +282,6 @@ function AcmeStoryLab({ chapter }) {
           },
         }));
     } finally {
-      if (database) await database.close().catch(() => {});
       runningRef.current = false;
       if (liveRef.current) setRunning(false);
     }
@@ -472,6 +488,7 @@ function AcmeStoryLab({ chapter }) {
         {output?.inspection && (
           <AccessPath cards={step.cards(output.inspection, output)} />
         )}
+        <ExecutionContext output={output} />
         {output?.passed && (
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5 text-sm leading-6 text-stone-800 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-stone-200">
             <strong className="block font-mono text-[10px] uppercase tracking-[0.16em] text-emerald-700 dark:text-emerald-300">
@@ -574,4 +591,7 @@ export function PostgresSecurityReviewLab() {
 }
 export function PostgresAcmePlayground() {
   return <AcmeStoryLab chapter="playground" />;
+}
+export function PostgresRowSecurityLab() {
+  return <AcmeStoryLab chapter="rls" />;
 }

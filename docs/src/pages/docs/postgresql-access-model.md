@@ -27,7 +27,15 @@ For a query that reads `app.orders`, schema `USAGE` makes the name reachable and
 
 The gates are evaluated in order, and the error names the first gate that failed—not everything that is missing. That is why the same query produced two different errors in the lab as each gate opened.
 
-Superusers and object owners skip these checks entirely. That is why the admin-connected application never noticed a single one of them—and why the first identity without those shortcuts is the first to see `permission denied`.
+Superusers bypass ordinary privilege checks. Object owners start with ordinary privileges on their objects, but can revoke their own `SELECT` privilege and then fail the same query. They retain ownership rights, including the ability to grant those privileges back. Owning `app.orders` also does not grant access to every schema or other object. Acme's superuser connection hid these missing grants; a scoped login exposes them.
+
+{% callout title="Three similar names, three different mechanisms" %}
+
+`PUBLIC` means every current and future database role when it appears as a grantee. The `public` schema is simply a schema with that name. Predefined roles such as `pg_read_all_data` are named capability roles that users receive through membership.
+
+{% /callout %}
+
+The lab shows `session_user → current_user` before and after each run. `session_user` identifies the session; `current_user` is the identity used for permission checks. `SET ROLE` changes `current_user`, and a `SECURITY DEFINER` function temporarily uses its owner's identity while it runs.
 
 ## The policy so far
 

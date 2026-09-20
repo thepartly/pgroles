@@ -8,6 +8,7 @@ import {
   PostgresMembershipMechanicsLab,
   PostgresOffboardingLab,
   PostgresOwnershipLab,
+  PostgresRowSecurityLab,
   PostgresSecurityReviewLab,
 } from '@/components/AcmeStoryLabs'
 import { OperatorArchitectureDiagram } from '@/components/OperatorArchitectureDiagram'
@@ -99,6 +100,10 @@ const tags = {
   'postgres-security-review-lab': {
     selfClosing: true,
     render: PostgresSecurityReviewLab,
+  },
+  'postgres-row-security-lab': {
+    selfClosing: true,
+    render: PostgresRowSecurityLab,
   },
   'postgres-acme-playground': {
     selfClosing: true,

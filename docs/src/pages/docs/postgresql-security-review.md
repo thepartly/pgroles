@@ -1,9 +1,11 @@
 ---
-title: 8. The security review
-description: "Audit four effective-access surprises: PUBLIC function execution, SECURITY DEFINER, grant-option delegation, and the predefined master-key roles."
+title: 9. The security review
+description: "Audit effective access through PUBLIC, SECURITY DEFINER, delegation, and predefined roles."
 ---
 
 An auditor asks a harder question than “what grants are in our YAML?”: **can this role actually perform the operation?** Acme’s role graph is tidy, but PostgreSQL has access paths outside ordinary named ACLs. {% .lead %}
+
+Before changing anything, use the lab to identify the unexpected path, name the role or object that makes it possible, repair that path, and repeat the affected login's query as a negative test.
 
 {% postgres-security-review-lab /%}
 
@@ -30,31 +32,25 @@ default_privileges:
 
 The global default matters because PostgreSQL’s built-in function default is global. A schema-scoped revoke cannot subtract a global grant.
 
-## The predefined master keys
+## Review predefined roles by capability
 
-`pg_read_all_data`, `pg_write_all_data`, `pg_monitor`, and the other [predefined roles](https://www.postgresql.org/docs/current/predefined-roles.html) pass PostgreSQL’s permission checks for every matching object—current and future—without an ACL entry anywhere, so no table-level review will surface them. Auditing effective access therefore always includes one more query: who is a member of a `pg_*` role?
+[Predefined roles](https://www.postgresql.org/docs/18/predefined-roles.html) are memberships with privileged behavior outside ordinary object ACLs. Audit who holds them and what category of capability each one supplies:
 
-pgroles can make the answer policy. A membership stanza may name a predefined role directly; declared members converge, and `exclusive: true` asserts that the member list is complete, revoking anyone else:
+- `pg_read_all_data` and `pg_write_all_data` are broad data-access roles for matching objects, but they do not bypass row-level security.
+- `pg_monitor` groups `pg_read_all_settings`, `pg_read_all_stats`, and `pg_stat_scan_tables` for configuration, statistics, and observation; it is not a business-data ACL.
+- `pg_signal_backend` can signal ordinary backends, but cannot signal superuser backends.
+- `pg_database_owner` has exactly one implicit member, the current database owner, and membership in it cannot be granted.
+- `pg_read_server_files`, `pg_write_server_files`, and `pg_execute_server_program` are high-risk server-file or program-execution capabilities.
 
-```yaml {% schema="pgroles-manifest" %}
-roles:
-  - name: auditor
-    login: true
+No table-level ACL review will show these paths. Auditing effective access therefore includes one more question: who is a member of a `pg_*` role?
 
-memberships:
-  - role: pg_read_all_data
-    exclusive: true
-    members:
-      - name: auditor
-```
+pgroles can declare memberships in a predefined role, including an explicit complete-member assertion. See [predefined and external granted roles](/docs/memberships#predefined-and-external-granted-roles) for the managed declaration and its adoption behavior.
 
-Without `exclusive`, undeclared members are left untouched—cloud platforms grant `pg_*` memberships to their own management roles, and adopting pgroles must not strip them. Even with `exclusive`, members that are themselves predefined roles are never revoked, so PostgreSQL’s built-in `pg_*` hierarchy stays intact. `pgroles inspect` reports every `pg_*` membership informationally either way, so the master keys are visible before anyone opts into managing them.
+## Capstone: prove the repair
 
-## Keep the other two boundaries visible
+The lab presents a path that is easy to miss: an ordinary login reaches a function through `PUBLIC`, a `SECURITY DEFINER` function runs with its owner's authority, or a delegated grant survives a cleanup by the wrong grantor. Explain that path before changing the YAML. Then remove the unexpected route, apply the plan, and repeat the same query as the affected login. The negative test must now fail.
 
-A `SECURITY DEFINER` function is an intentional privilege boundary. Review its owner, body, fixed `search_path`, callable surface, and `PUBLIC` exposure. pgroles manages who may execute the function; it does not prove the function body is safe.
-
-`WITH GRANT OPTION` lets an application grantee delegate an object privilege. pgroles checks whether its executor can grant wildcard privileges safely, but it does not model or converge grant options held by application roles. Audit and manage that boundary separately. Delegation also constrains cleanup: PostgreSQL's [`REVOKE`](https://www.postgresql.org/docs/current/sql-revoke.html) only removes "privileges that were granted directly by that user" (a superuser's revoke acts as the owner), so a delegated grant survives anyone else's plain revoke — silently for object privileges, with only a `WARNING` for role memberships, superusers included. pgroles targets each grant's recorded grantor when it revokes (`SET ROLE` for object privileges, `GRANTED BY` for memberships), so declared policy converges these too — the executor just needs to be able to become the grantor, which the plan preflight verifies.
+A `SECURITY DEFINER` function needs review of its owner, body, fixed `search_path`, callable surface, and `PUBLIC` exposure. `WITH GRANT OPTION` needs separate review of who can delegate. See [memberships](/docs/memberships) and [grants](/docs/grants) for the managed declarations and their limits.
 
 One more finding costs nothing to write down: Acme’s application still connects with the founder-era admin credentials, and a superuser bypasses every check in this chapter. No grant, policy, or RLS rule constrains that connection—pgroles cannot manage it away. Moving the application onto a scoped login, the way `reporting_app` was built in chapter 2, is the remediation an auditor will ask for first.
 
