@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::manifest::{
-    Membership, ObjectType, Privilege, RoleDefinition, RoleRetirement, is_predefined_role,
+    ExpandedManifest, Membership, ObjectType, PolicyManifest, Privilege, RoleDefinition,
+    RoleRetirement, is_predefined_role,
 };
 use crate::model::{
     DefaultPrivKey, DefaultPrivilegeScope, GrantKey, Grantee, MembershipEdge, RoleAttribute,
@@ -449,6 +450,22 @@ pub fn filter_preserved_grant_revokes(
             enforced
         })
         .collect()
+}
+
+/// Build the canonical structural plan shared by every execution and preview surface.
+///
+/// Password resolution/injection and runtime preflight remain caller concerns.
+pub fn plan_changes(
+    current: &RoleGraph,
+    desired: &RoleGraph,
+    manifest: &PolicyManifest,
+    expanded: &ExpandedManifest,
+    mode: ReconciliationMode,
+) -> Vec<Change> {
+    let changes = apply_role_retirements(diff(current, desired), &manifest.retirements);
+    let changes = filter_changes(changes, mode);
+    let changes = filter_external_role_changes(changes, &expanded.roles, &expanded.memberships);
+    filter_preserved_grant_revokes(changes, &expanded.roles, desired)
 }
 
 /// Messages for `ensure: absent` assertions that can never converge because
@@ -2446,6 +2463,67 @@ memberships:
         );
 
         assert!(diff(&current, &desired).is_empty());
+    }
+
+    #[test]
+    fn canonical_planner_preserves_brownfield_grants_and_owner_inherent_acl() {
+        let manifest = crate::manifest::parse_manifest(
+            r#"
+roles:
+  - name: brownfield
+    preserve_undeclared_grants: true
+  - name: app_owner
+grants:
+  - role: app_owner
+    privileges: [SELECT]
+    object: { type: table, schema: app, name: widgets }
+"#,
+        )
+        .unwrap();
+        let expanded = crate::manifest::expand_manifest(&manifest).unwrap();
+        let desired = RoleGraph::from_expanded(&expanded, None).unwrap();
+        let mut current = desired.clone();
+        let brownfield_key = GrantKey {
+            role: "brownfield".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("legacy".into()),
+        };
+        current.grants.insert(
+            brownfield_key,
+            GrantState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let owner_key = GrantKey {
+            role: "app_owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("widgets".into()),
+        };
+        current.grants.insert(
+            owner_key.clone(),
+            GrantState {
+                privileges: BTreeSet::from([Privilege::Select, Privilege::Insert]),
+            },
+        );
+        current.inherent_grants.insert(owner_key);
+
+        assert!(diff(&current, &desired).iter().any(|change| matches!(
+            change,
+            Change::Revoke { role, name, .. }
+                if role.as_str() == "brownfield" && name.as_deref() == Some("legacy")
+        )));
+        assert!(
+            plan_changes(
+                &current,
+                &desired,
+                &manifest,
+                &expanded,
+                ReconciliationMode::Authoritative,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

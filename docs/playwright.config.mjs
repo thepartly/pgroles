@@ -4,13 +4,13 @@ export default defineConfig({
   testDir: './tests/browser',
   timeout: 30_000,
   use: {
-    baseURL: 'http://127.0.0.1:3210/pgroles',
+    baseURL: `http://127.0.0.1:3210${process.env.DOCS_TEST_BASE_PATH || '/pgroles/pr-preview/pr-236'}/`,
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'DOCS_BASE_PATH=/pgroles npm run dev -- --hostname 127.0.0.1 --port 3210',
-    url: 'http://127.0.0.1:3210/pgroles/docs/explorer/',
-    reuseExistingServer: !process.env.CI,
+    command: 'node tests/browser/static-server.mjs',
+    url: `http://127.0.0.1:3210${process.env.DOCS_TEST_BASE_PATH || '/pgroles/pr-preview/pr-236'}/docs/explorer/`,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 })

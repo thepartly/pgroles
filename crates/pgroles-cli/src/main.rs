@@ -14,16 +14,13 @@ use sqlx::{PgPool, Row};
 use tracing::{info, warn};
 
 use pgroles_cli::{
-    PlanSummary, apply_role_retirements, candidate, compute_plan, format_bundle_plan_json,
-    format_bundle_validation_result, format_managed_scope_summary, format_plan_json,
-    format_plan_sql_with_context, format_rendered_bundle, format_role_graph_summary,
-    format_validation_result, inject_password_changes, planned_role_drops, read_manifest_file,
-    resolve_passwords, validate_bundle_file, validate_manifest,
+    PlanSummary, candidate, format_bundle_plan_json, format_bundle_validation_result,
+    format_managed_scope_summary, format_plan_json, format_plan_sql_with_context,
+    format_rendered_bundle, format_role_graph_summary, format_validation_result,
+    inject_password_changes, planned_role_drops, read_manifest_file, resolve_passwords,
+    validate_bundle_file, validate_manifest,
 };
-use pgroles_core::diff::{
-    ReconciliationMode, additive_ignores_absence_assertions, filter_changes,
-    filter_external_role_changes, filter_preserved_grant_revokes,
-};
+use pgroles_core::diff::{ReconciliationMode, additive_ignores_absence_assertions, plan_changes};
 use pgroles_core::ownership::validate_changes_against_managed_surface;
 use pgroles_core::visual::{self, VisualManagedScope, VisualSource};
 use pgroles_inspect::{InspectConfig, inspect_drop_role_safety};
@@ -884,20 +881,12 @@ async fn cmd_diff(
         info!(%mode, "reconciliation mode");
         warn_additive_absence_assertions(&validated.composed.desired, mode);
         warn_unenforceable_absence_assertions(&current, &validated.composed.desired);
-        let changes = filter_preserved_grant_revokes(
-            filter_external_role_changes(
-                filter_changes(
-                    apply_role_retirements(
-                        compute_plan(&current, &validated.composed.desired),
-                        &validated.composed.manifest.retirements,
-                    ),
-                    mode,
-                ),
-                &validated.composed.expanded.roles,
-                &validated.composed.expanded.memberships,
-            ),
-            &validated.composed.expanded.roles,
+        let changes = plan_changes(
+            &current,
             &validated.composed.desired,
+            &validated.composed.manifest,
+            &validated.composed.expanded,
+            mode,
         );
         warn_adopt_schema_owner_transfers(mode, &changes);
         warn_undeclared_default_owner(
@@ -972,20 +961,12 @@ async fn cmd_diff(
     info!(%mode, "reconciliation mode");
     warn_additive_absence_assertions(&validated.desired, mode);
     warn_unenforceable_absence_assertions(&current, &validated.desired);
-    let changes = filter_preserved_grant_revokes(
-        filter_external_role_changes(
-            filter_changes(
-                apply_role_retirements(
-                    compute_plan(&current, &validated.desired),
-                    &validated.manifest.retirements,
-                ),
-                mode,
-            ),
-            &validated.expanded.roles,
-            &validated.expanded.memberships,
-        ),
-        &validated.expanded.roles,
+    let changes = plan_changes(
+        &current,
         &validated.desired,
+        &validated.manifest,
+        &validated.expanded,
+        mode,
     );
     warn_adopt_schema_owner_transfers(mode, &changes);
     warn_undeclared_default_owner(
@@ -1069,20 +1050,12 @@ async fn cmd_apply(
         info!(%mode, "reconciliation mode");
         warn_additive_absence_assertions(&validated.composed.desired, mode);
         warn_unenforceable_absence_assertions(&current, &validated.composed.desired);
-        let changes = filter_preserved_grant_revokes(
-            filter_external_role_changes(
-                filter_changes(
-                    apply_role_retirements(
-                        compute_plan(&current, &validated.composed.desired),
-                        &validated.composed.manifest.retirements,
-                    ),
-                    mode,
-                ),
-                &validated.composed.expanded.roles,
-                &validated.composed.expanded.memberships,
-            ),
-            &validated.composed.expanded.roles,
+        let changes = plan_changes(
+            &current,
             &validated.composed.desired,
+            &validated.composed.manifest,
+            &validated.composed.expanded,
+            mode,
         );
         enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
         warn_adopt_schema_owner_transfers(mode, &changes);
@@ -1171,20 +1144,12 @@ async fn cmd_apply(
     info!(%mode, "reconciliation mode");
     warn_additive_absence_assertions(&validated.desired, mode);
     warn_unenforceable_absence_assertions(&current, &validated.desired);
-    let changes = filter_preserved_grant_revokes(
-        filter_external_role_changes(
-            filter_changes(
-                apply_role_retirements(
-                    compute_plan(&current, &validated.desired),
-                    &validated.manifest.retirements,
-                ),
-                mode,
-            ),
-            &validated.expanded.roles,
-            &validated.expanded.memberships,
-        ),
-        &validated.expanded.roles,
+    let changes = plan_changes(
+        &current,
         &validated.desired,
+        &validated.manifest,
+        &validated.expanded,
+        mode,
     );
     enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
     warn_adopt_schema_owner_transfers(mode, &changes);

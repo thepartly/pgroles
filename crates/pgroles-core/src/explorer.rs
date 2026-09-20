@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::diff::{
-    Change, ReconciliationMode, apply_role_retirements, diff, filter_changes,
-    filter_external_role_changes,
+use crate::bounds::{
+    MAX_CONFIG_ENTRIES, MAX_DEFAULT_PRIVILEGES, MAX_GRANTS, MAX_MEMBERSHIPS, MAX_PRIVILEGES,
+    MAX_ROLES, MAX_SCHEMAS,
 };
+use crate::diff::{Change, ReconciliationMode, plan_changes};
 use crate::manifest::{ObjectType, Privilege, expand_manifest, parse_manifest};
 use crate::model::{
     DefaultPrivKey, DefaultPrivState, DefaultPrivilegeScope, GrantKey, GrantState, Grantee,
@@ -22,6 +23,7 @@ use crate::model::{
 use crate::visual::{VisualGraph, VisualSource, build_visual_graph};
 
 pub const EXPLORER_SCHEMA_VERSION: &str = "pgroles.explorer.v1";
+pub const MAX_EXPLORER_YAML_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,7 +51,7 @@ pub struct AnalyzeResponse {
     pub fingerprint_kind: FingerprintKind,
 }
 
-/// A secret-free representation of the inspected state.
+/// A password-free snapshot. Callers must sanitize arbitrary role config values.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplorerSnapshot {
@@ -63,6 +65,9 @@ pub struct ExplorerSnapshot {
     pub default_privileges: Vec<SnapshotDefaultPrivilege>,
     #[serde(default)]
     pub memberships: Vec<SnapshotMembership>,
+    /// Grant targets known to be intrinsic owner privileges.
+    #[serde(default)]
+    pub inherent_grants: Vec<SnapshotGrantTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +138,17 @@ pub struct SnapshotGrant {
     /// Live ACL privileges grouped by grantor, when inspection provides them.
     #[serde(default)]
     pub grantors: BTreeMap<String, BTreeSet<Privilege>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotGrantTarget {
+    pub role: String,
+    pub object_type: ObjectType,
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +302,14 @@ pub enum AnalysisError {
     Manifest(#[from] crate::manifest::ManifestError),
     #[error("password sources are not accepted by the browser explorer")]
     PasswordSourceNotAllowed,
+    #[error("explorer {collection} has {actual} entries, which exceeds the limit of {limit}")]
+    TooManyEntries {
+        collection: &'static str,
+        actual: usize,
+        limit: u32,
+    },
+    #[error("desired YAML has {actual} bytes, which exceeds the explorer limit of {limit}")]
+    DesiredYamlTooLarge { actual: usize, limit: usize },
     #[error("could not serialize illustrative plan: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -296,6 +320,7 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
             request.schema_version,
         ));
     }
+    request.validate_bounds()?;
     let manifest = parse_manifest(&request.desired_yaml)?;
     if manifest.roles.iter().any(|role| role.password.is_some()) {
         return Err(AnalysisError::PasswordSourceNotAllowed);
@@ -333,16 +358,24 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     for fact in &request.executor.memberships {
         usage.insert((fact.role.clone(), fact.member.clone()), fact.inherit);
     }
-    let mut admin_options: BTreeMap<_, _> = request
-        .executor
+    let mut admin_options: BTreeMap<_, _> = graph
         .memberships
         .iter()
-        .map(|fact| ((fact.role.clone(), fact.member.clone()), fact.admin_option))
+        .map(|edge| {
+            (
+                (edge.role.clone(), edge.member.clone()),
+                if edge.admin {
+                    SetRoleCapability::Allowed
+                } else {
+                    SetRoleCapability::Denied
+                },
+            )
+        })
         .collect();
-    let mut changes = diff(&graph, &desired);
-    changes = filter_external_role_changes(changes, &expanded.roles, &expanded.memberships);
-    changes = apply_role_retirements(changes, &manifest.retirements);
-    changes = filter_changes(changes, request.mode);
+    for fact in &request.executor.memberships {
+        admin_options.insert((fact.role.clone(), fact.member.clone()), fact.admin_option);
+    }
+    let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
 
     let mut phases = Vec::new();
     let mut findings = Vec::new();
@@ -424,6 +457,103 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
         plan_fingerprint,
         fingerprint_kind: FingerprintKind::Illustrative,
     })
+}
+
+impl AnalyzeRequest {
+    fn validate_bounds(&self) -> Result<(), AnalysisError> {
+        fn entries(
+            collection: &'static str,
+            actual: usize,
+            limit: u32,
+        ) -> Result<(), AnalysisError> {
+            if actual > limit as usize {
+                return Err(AnalysisError::TooManyEntries {
+                    collection,
+                    actual,
+                    limit,
+                });
+            }
+            Ok(())
+        }
+
+        if self.desired_yaml.len() > MAX_EXPLORER_YAML_BYTES {
+            return Err(AnalysisError::DesiredYamlTooLarge {
+                actual: self.desired_yaml.len(),
+                limit: MAX_EXPLORER_YAML_BYTES,
+            });
+        }
+        entries("current.roles", self.current.roles.len(), MAX_ROLES)?;
+        entries("current.schemas", self.current.schemas.len(), MAX_SCHEMAS)?;
+        entries("current.grants", self.current.grants.len(), MAX_GRANTS)?;
+        entries(
+            "current.default_privileges",
+            self.current.default_privileges.len(),
+            MAX_DEFAULT_PRIVILEGES,
+        )?;
+        entries(
+            "current.memberships",
+            self.current.memberships.len(),
+            MAX_MEMBERSHIPS,
+        )?;
+        entries(
+            "current.inherent_grants",
+            self.current.inherent_grants.len(),
+            MAX_GRANTS,
+        )?;
+        entries(
+            "executor.memberships",
+            self.executor.memberships.len(),
+            MAX_MEMBERSHIPS,
+        )?;
+        for role in self.current.roles.values() {
+            entries(
+                "current.roles[].config",
+                role.config.len(),
+                MAX_CONFIG_ENTRIES,
+            )?;
+        }
+        for grant in &self.current.grants {
+            entries(
+                "current.grants[].privileges",
+                grant.privileges.len(),
+                MAX_PRIVILEGES,
+            )?;
+            entries("current.grants[].grantors", grant.grantors.len(), MAX_ROLES)?;
+            for privileges in grant.grantors.values() {
+                entries(
+                    "current.grants[].grantors[].privileges",
+                    privileges.len(),
+                    MAX_PRIVILEGES,
+                )?;
+            }
+        }
+        entries(
+            "current.grants[].grantors (total)",
+            self.current
+                .grants
+                .iter()
+                .map(|grant| grant.grantors.len())
+                .sum(),
+            MAX_GRANTS,
+        )?;
+        for default_privilege in &self.current.default_privileges {
+            entries(
+                "current.default_privileges[].privileges",
+                default_privilege.privileges.len(),
+                MAX_PRIVILEGES,
+            )?;
+        }
+        entries(
+            "current.memberships[].grantors (total)",
+            self.current
+                .memberships
+                .iter()
+                .map(|membership| membership.grantors.len())
+                .sum(),
+            MAX_MEMBERSHIPS,
+        )?;
+        Ok(())
+    }
 }
 
 impl ExplorerSnapshot {
@@ -518,12 +648,23 @@ impl ExplorerSnapshot {
                 admin: item.admin,
             });
         }
+        let inherent_grants = self
+            .inherent_grants
+            .into_iter()
+            .map(|grant| GrantKey {
+                role: Grantee::parse(&grant.role),
+                object_type: grant.object_type,
+                schema: grant.schema,
+                name: grant.name,
+            })
+            .collect();
         RoleGraph {
             roles,
             schemas,
             grants,
             default_privileges,
             memberships,
+            inherent_grants,
             membership_edge_grantors,
             grant_entry_grantors,
             ..RoleGraph::default()
@@ -810,6 +951,10 @@ fn analyze_required_authority(
         change,
         Change::Grant { .. }
             | Change::Revoke { .. }
+            | Change::CreateRole { .. }
+            | Change::CreateSchema { .. }
+            | Change::AlterRole { .. }
+            | Change::SetComment { .. }
             | Change::AlterSchemaOwner { .. }
             | Change::EnsureSchemaOwnerPrivileges { .. }
             | Change::ReassignOwned { .. }
@@ -1694,5 +1839,135 @@ mod tests {
             },
         );
         assert!(!graph.schemas.contains_key("app"));
+    }
+
+    #[test]
+    fn snapshot_inherent_grant_does_not_plan_owner_acl_revoke() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("owner".into(), role());
+        input.current.grants.push(SnapshotGrant {
+            role: "owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("widgets".into()),
+            privileges: BTreeSet::from([Privilege::Select, Privilege::Insert]),
+            grantors: BTreeMap::new(),
+        });
+        input.current.inherent_grants.push(SnapshotGrantTarget {
+            role: "owner".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("widgets".into()),
+        });
+        input.current =
+            serde_json::from_value(serde_json::to_value(&input.current).unwrap()).unwrap();
+        input.desired_yaml = "roles:\n  - name: owner\ngrants:\n  - role: owner\n    privileges: [SELECT]\n    object: { type: table, schema: app, name: widgets }\n".into();
+
+        let response = analyze(input).unwrap();
+        assert!(
+            !response
+                .changes
+                .iter()
+                .any(|change| matches!(change, Change::Revoke { .. }))
+        );
+    }
+
+    #[test]
+    fn snapshot_admin_option_authorizes_membership_addition() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        for name in ["deployer", "target", "new_member"] {
+            input.current.roles.insert(name.into(), role());
+        }
+        input.current.memberships.push(SnapshotMembership {
+            role: "target".into(),
+            member: "deployer".into(),
+            inherit: false,
+            admin: true,
+            grantors: BTreeSet::new(),
+        });
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: deployer\n        inherit: false\n        admin: true\n      - name: new_member\n".into();
+
+        let response = analyze(input).unwrap();
+        assert!(
+            !response
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("ADMIN OPTION for role target"))
+        );
+    }
+
+    #[test]
+    fn lifecycle_changes_emit_database_preflight_findings() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("existing".into(), role());
+        input.desired_yaml = "roles:\n  - name: existing\n    login: true\n    comment: managed\n  - name: new_role\nschemas:\n  - name: app\n".into();
+        let response = analyze(input).unwrap();
+        for expected in ["CreateRole", "CreateSchema", "AlterRole", "SetComment"] {
+            assert!(
+                response.changes.iter().any(|change| {
+                    serde_json::to_value(change)
+                        .unwrap()
+                        .get(expected)
+                        .is_some()
+                }),
+                "missing {expected}: {:?}",
+                response.changes
+            );
+        }
+        let preflight_count = response
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == FindingKind::DatabasePreflightRequired)
+            .count();
+        assert_eq!(
+            preflight_count, 4,
+            "CreateRole, CreateSchema, AlterRole, and SetComment"
+        );
+    }
+
+    #[test]
+    fn oversized_snapshot_is_rejected_before_analysis() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        for index in 0..=MAX_ROLES {
+            input.current.roles.insert(format!("role_{index}"), role());
+        }
+        assert!(matches!(
+            analyze(input),
+            Err(AnalysisError::TooManyEntries {
+                collection: "current.roles",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn explicit_admin_fact_overrides_snapshot_admin_option() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        for name in ["deployer", "target", "new_member"] {
+            input.current.roles.insert(name.into(), role());
+        }
+        input.current.memberships.push(SnapshotMembership {
+            role: "target".into(),
+            member: "deployer".into(),
+            inherit: false,
+            admin: true,
+            grantors: BTreeSet::new(),
+        });
+        input.executor.memberships.push(ExecutorMembershipFact {
+            role: "target".into(),
+            member: "deployer".into(),
+            set_role: SetRoleCapability::Denied,
+            inherit: SetRoleCapability::Denied,
+            admin_option: SetRoleCapability::Denied,
+        });
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: deployer\n        inherit: false\n        admin: true\n      - name: new_member\n".into();
+
+        let response = analyze(input).unwrap();
+        assert!(
+            response
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("ADMIN OPTION for role target"))
+        );
     }
 }

@@ -5,6 +5,13 @@ Core manifest, diff, SQL rendering, and export primitives for `pgroles`.
 This crate contains the pure data-model and planning logic behind the `pgroles`
 CLI and operator. It does not connect to PostgreSQL itself.
 
+The default `passwords` feature enables password operations. Consumers using
+`default-features = false` cannot use the public `scram` module,
+`diff::resolve_passwords`, or `diff::inject_password_changes` APIs. Parsing,
+planning, SQL rendering, visualization, and illustrative plan fingerprints
+remain available without password generation, entropy, or environment-based
+password resolution.
+
 ## What It Includes
 
 - YAML manifest parsing and expansion

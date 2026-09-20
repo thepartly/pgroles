@@ -1,4 +1,5 @@
 const SCHEMA_VERSION = 'pgroles.explorer.v1'
+export const MAX_SNAPSHOT_FILE_BYTES = 4_194_304
 
 let analyzerPromise
 
@@ -63,4 +64,10 @@ export function explorerImport(value) {
     throw new Error(`unsupported explorer schema version: ${value.schema_version}`)
   }
   return { current: value?.current ?? value, executor: value?.executor }
+}
+
+export function validateSnapshotFileSize(size) {
+  if (size > MAX_SNAPSHOT_FILE_BYTES) {
+    throw new Error(`snapshot file is ${size} bytes; limit is ${MAX_SNAPSHOT_FILE_BYTES} bytes`)
+  }
 }

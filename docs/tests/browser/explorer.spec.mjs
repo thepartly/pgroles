@@ -1,16 +1,20 @@
 import { expect, test } from '@playwright/test'
 
 test('initializes the real WASM analyzer and rejects malformed YAML', async ({ page }) => {
-  const wasmRequests = []
+  const wasmResponses = []
   page.on('request', (request) => {
-    if (request.url().includes('/wasm/')) wasmRequests.push(request.url())
+    if (request.url().includes('/wasm/')) wasmResponses.push({ url: request.url(), status: null })
   })
-  await page.goto('/pgroles/docs/explorer/')
-  expect(wasmRequests).toEqual([])
+  page.on('response', (response) => {
+    const item = wasmResponses.find((request) => request.url === response.url())
+    if (item) item.status = response.status()
+  })
+  await page.goto('docs/explorer/')
+  expect(wasmResponses).toEqual([])
   await page.getByRole('button', { name: 'Analyze plan' }).click()
   await expect(page.getByText('Execution phases')).toBeVisible()
-  expect(wasmRequests.some((url) => url.endsWith('/pgroles_wasm.js'))).toBe(true)
-  expect(wasmRequests.some((url) => url.endsWith('/pgroles_wasm_bg.wasm'))).toBe(true)
+  expect(wasmResponses.some(({ url, status }) => url.endsWith('/pgroles_wasm.js') && status === 200)).toBe(true)
+  expect(wasmResponses.some(({ url, status }) => url.endsWith('/pgroles_wasm_bg.wasm') && status === 200)).toBe(true)
   await expect(page.getByText('Illustrative plan fingerprint')).toBeVisible()
   await expect(page.getByText(/not an approval token/i)).toBeVisible()
 
@@ -20,7 +24,7 @@ test('initializes the real WASM analyzer and rejects malformed YAML', async ({ p
 })
 
 test('rejects secret-bearing snapshots at the WASM boundary', async ({ page }) => {
-  await page.goto('/pgroles/docs/explorer/')
+  await page.goto('docs/explorer/')
   await page.locator('input[type="file"]').setInputFiles({
     name: 'unsafe.json',
     mimeType: 'application/json',
@@ -31,7 +35,7 @@ test('rejects secret-bearing snapshots at the WASM boundary', async ({ page }) =
 })
 
 test('graph controls, role sheet, Escape, and stale-result clearing work', async ({ page }) => {
-  await page.goto('/pgroles/docs/explorer/')
+  await page.goto('docs/explorer/')
   await page.getByRole('button', { name: 'Analyze plan' }).click()
   await expect(page.getByText('Execution phases')).toBeVisible()
   await page.getByRole('button', { name: 'Resulting role graph' }).click()
@@ -50,7 +54,7 @@ test('graph controls, role sheet, Escape, and stale-result clearing work', async
 
 test('captures desktop and mobile explorer layouts for visual review', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.goto('/pgroles/docs/explorer/')
+  await page.goto('docs/explorer/')
   await page.getByRole('button', { name: 'Analyze plan' }).click()
   await page.getByRole('button', { name: 'Resulting role graph' }).click()
   await page.evaluate(() => window.scrollTo(0, 0))
@@ -63,7 +67,7 @@ test('captures desktop and mobile explorer layouts for visual review', async ({ 
 for (const width of [360, 390, 768]) {
   test(`keeps the phase timeline usable at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 820 })
-    await page.goto('/pgroles/docs/explorer/')
+    await page.goto('docs/explorer/')
     await page.getByRole('button', { name: 'Analyze plan' }).click()
     await expect(page.getByText('Execution phases')).toBeVisible()
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)

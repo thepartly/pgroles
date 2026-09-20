@@ -7,6 +7,7 @@ import {
   loadAnalyzer,
   readableWasmError,
   resetAnalyzerForTests,
+  validateSnapshotFileSize,
   wasmModuleUrl,
 } from '../src/lib/pgrolesExplorer.mjs'
 
@@ -51,6 +52,11 @@ test('validates an imported envelope version and preserves its executor facts', 
     current: { roles: {} }, executor,
   })
   assert.throws(() => explorerImport({ schema_version: 'pgroles.explorer.v2', current: {} }), /unsupported explorer schema version/)
+})
+
+test('rejects oversized snapshot files before reading them', () => {
+  assert.doesNotThrow(() => validateSnapshotFileSize(4_194_304))
+  assert.throws(() => validateSnapshotFileSize(4_194_305), /4194305 bytes; limit is 4194304 bytes/)
 })
 
 test('preserves malformed-input errors from wasm-bindgen', () => {
