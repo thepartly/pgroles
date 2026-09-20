@@ -1,0 +1,5 @@
+{
+  "schema_version": "pgroles.policy.v1",
+  "desired_yaml": "roles: []\n",
+  "context": { "pg_major_version": 16 }
+}

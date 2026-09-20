@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod authoring;
 pub mod bounds;
 pub mod candidate;
 pub mod composition;

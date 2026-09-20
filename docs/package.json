@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint src markdoc tests --ext .js,.jsx,.mjs",
-    "test:reference": "node --test tests/crd-reference.test.mjs tests/policy-highlight.test.mjs",
+    "test:reference": "node --test tests/crd-reference.test.mjs tests/policy-highlight.test.mjs tests/manifest-types.test.mjs",
     "test:routing": "node --test tests/routing.test.mjs",
     "test:labs": "node tests/labs.test.mjs && node --test tests/explorer-database.test.mjs tests/access-boundaries.test.mjs tests/lab-evidence.test.mjs",
     "test:explorer": "node --test tests/explorer.test.mjs tests/explorer-scenarios.test.mjs",
@@ -43,6 +43,7 @@
     "eslint": "8.26.0",
     "eslint-config-next": "13.0.2",
     "prettier": "^2.7.1",
-    "prettier-plugin-tailwindcss": "^0.1.13"
+    "prettier-plugin-tailwindcss": "^0.1.13",
+    "typescript": "7.0.2"
   }
 }

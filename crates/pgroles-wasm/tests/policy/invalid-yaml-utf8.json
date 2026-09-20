@@ -1,0 +1,4 @@
+{
+  "schema_version": "pgroles.policy.v1",
+  "desired_yaml": "roles:\n  - name: café_😀\n    login: [\n"
+}

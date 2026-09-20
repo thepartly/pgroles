@@ -11,7 +11,7 @@ export default function ExplorerPage() {
       </Head>
       <header className="mb-8">
         <h1 className="font-display text-4xl tracking-[-0.03em] text-stone-950 dark:text-stone-100">Plan explorer</h1>
-        <p className="mt-4 max-w-3xl text-lg leading-8 text-muted-foreground">Compare desired policy with a sanitized database snapshot. The same Rust planner used by pgroles produces the ordered changes, phase analysis, findings, and graph.</p>
+        <p className="mt-4 max-w-3xl text-lg leading-8 text-muted-foreground">Validate a policy and inspect its expansion without a database snapshot. Then compare it with a sanitized snapshot: the same Rust planner used by pgroles produces ordered changes, phase analysis, findings, and a graph.</p>
       </header>
       <PgrolesExplorer />
     </>

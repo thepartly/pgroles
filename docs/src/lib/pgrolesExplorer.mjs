@@ -1,27 +1,35 @@
 const SCHEMA_VERSION = 'pgroles.explorer.v1'
 export const MAX_SNAPSHOT_FILE_BYTES = 4_194_304
 
-let analyzerPromise
+let enginePromise
 
 export function wasmModuleUrl(basePath = '') {
   return `${basePath}/wasm/pgroles_wasm.js`
 }
 
-export function loadAnalyzer(basePath = '', importer = (url) => import(/* webpackIgnore: true */ url)) {
-  analyzerPromise ??= importer(wasmModuleUrl(basePath))
+export function loadPolicyEngine(basePath = '', importer = (url) => import(/* webpackIgnore: true */ url)) {
+  enginePromise ??= importer(wasmModuleUrl(basePath))
     .then(async (module) => {
       await module.default()
-      return module.analyze
+      return module
     })
     .catch((error) => {
-      analyzerPromise = undefined
+      enginePromise = undefined
       throw error
     })
-  return analyzerPromise
+  return enginePromise
+}
+
+export async function loadAnalyzer(basePath = '', importer) {
+  return (await loadPolicyEngine(basePath, importer)).analyze
+}
+
+export function policyRequest(desiredYaml) {
+  return { schema_version: 'pgroles.policy.v1', desired_yaml: desiredYaml }
 }
 
 export function resetAnalyzerForTests() {
-  analyzerPromise = undefined
+  enginePromise = undefined
 }
 
 export function analyzeRequest({

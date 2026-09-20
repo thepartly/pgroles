@@ -15,6 +15,7 @@ password resolution.
 ## What It Includes
 
 - YAML manifest parsing and expansion
+- Snapshot-free validation and compilation with structured diagnostics
 - Normalized role graph types
 - Convergent diff planning
 - Version-aware SQL rendering via `SqlContext`
@@ -29,7 +30,7 @@ password resolution.
 ## Typical Use
 
 ```rust
-use pgroles_core::{diff, manifest, model::RoleGraph, sql};
+use pgroles_core::{authoring::prepare_policy, diff, model::RoleGraph, sql};
 
 let yaml = r#"
 roles:
@@ -37,12 +38,16 @@ roles:
     login: true
 "#;
 
-let policy = manifest::parse_manifest(yaml)?;
-let expanded = manifest::expand_manifest(&policy)?;
-let desired = RoleGraph::from_expanded(&expanded, policy.default_owner.as_deref())?;
+let prepared = prepare_policy(yaml)?;
 let current = RoleGraph::default();
 
-let changes = diff::diff(&current, &desired);
+let changes = diff::plan_changes(
+    &current,
+    &prepared.desired,
+    &prepared.manifest,
+    &prepared.expanded,
+    diff::ReconciliationMode::Authoritative,
+);
 let sql = sql::render_all_with_context(
     &changes,
     &sql::SqlContext {
@@ -53,6 +58,18 @@ let sql = sql::render_all_with_context(
 assert!(sql.contains("CREATE ROLE"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+`authoring::prepare_policy` shares parsing, expansion, and graph construction
+between the CLI and browser tools. `authoring::validate_policy` and
+`authoring::compile_policy` accept a versioned `PolicyRequest` containing only
+YAML and return diagnostics for invalid input. Compilation exposes expanded
+policy data and a normalized desired graph through serializable DTOs. Neither
+operation resolves password-source declarations or checks live database authority.
+
+Manifest metadata and authoring TypeScript contracts are generated from Rust
+schemas by `scripts/generate-manifest-metadata.sh`; CI checks them with
+`scripts/check-manifest-metadata.sh`. The docs use this metadata for static field
+highlighting and load WASM only for interactive authoring or plan analysis.
 
 ## Related Crates
 

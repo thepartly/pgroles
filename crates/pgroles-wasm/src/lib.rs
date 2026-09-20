@@ -1,11 +1,27 @@
-//! JavaScript boundary for browser-local pgroles explorer analysis.
+//! JavaScript boundary for browser-local policy authoring and plan analysis.
 //!
-//! This crate accepts only the versioned, sanitized explorer request defined
-//! by `pgroles-core`. Database inspection, credentials, and password handling
-//! intentionally remain outside the WebAssembly build.
+//! Database inspection, credential resolution, and approval remain outside
+//! the WebAssembly build. Authoring accepts unresolved password declarations;
+//! explorer analysis requires password-free inputs.
 
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub fn validate(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let value = serde_wasm_bindgen::from_value(input).map_err(js_error)?;
+    let request = serde_json::from_value(value).map_err(js_error)?;
+    serialize_response(&pgroles_core::authoring::validate_policy(request))
+}
+
+#[wasm_bindgen]
+pub fn compile(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let value = serde_wasm_bindgen::from_value(input).map_err(js_error)?;
+    let request = serde_json::from_value(value).map_err(js_error)?;
+    serialize_response(&pgroles_core::authoring::compile_policy(request))
+}
 
 /// Analyze a desired manifest against a sanitized current-state snapshot.
 ///
@@ -19,7 +35,10 @@ pub fn analyze(input: JsValue) -> Result<JsValue, JsValue> {
     let value = serde_wasm_bindgen::from_value(input).map_err(js_error)?;
     let request = serde_json::from_value(value).map_err(js_error)?;
     let response = pgroles_core::explorer::analyze(request).map_err(js_error)?;
+    serialize_response(&response)
+}
 
+fn serialize_response(response: &impl Serialize) -> Result<JsValue, JsValue> {
     response
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(js_error)
