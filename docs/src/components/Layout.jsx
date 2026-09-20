@@ -24,7 +24,7 @@ const navigation = [
         ],
     },
     {
-        title: 'Learn PostgreSQL Roles',
+        title: 'Learn PostgreSQL Roles: core',
         collapsible: true,
         links: [
             {title: '1. The permission chain', href: '/docs/postgresql-access-model'},
@@ -33,8 +33,21 @@ const navigation = [
             {title: '4. Ownership', href: '/docs/postgresql-ownership'},
             {title: '5. Future objects', href: '/docs/postgresql-default-privileges'},
             {title: '6. Offboarding an owner', href: '/docs/postgresql-offboarding'},
+        ],
+    },
+    {
+        title: 'Learn PostgreSQL Roles: advanced',
+        collapsible: true,
+        links: [
             {title: '7. Membership mechanics', href: '/docs/postgresql-role-hierarchy'},
-            {title: '8. The security review', href: '/docs/postgresql-security-review'},
+            {title: '8. Same table, different rows', href: '/docs/postgresql-row-security'},
+            {title: '9. The security review', href: '/docs/postgresql-security-review'},
+        ],
+    },
+    {
+        title: 'Learn PostgreSQL Roles: tools',
+        collapsible: true,
+        links: [
             {title: 'The Acme playground', href: '/docs/postgresql-playground'},
             {title: 'Plan explorer', href: '/docs/explorer'},
         ],

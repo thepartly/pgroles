@@ -11,7 +11,7 @@ import {
   chapters,
   acmeChapterSeeds,
 } from "../src/components/AcmeStoryData.mjs";
-import { runSql } from "../src/components/sqlStatements.mjs";
+import { runLabStep } from "../src/components/labExecution.mjs";
 
 let failures = 0;
 
@@ -39,33 +39,28 @@ for (const [chapterKey, lesson] of Object.entries(chapters)) {
   for (const [stepIndex, step] of lesson.steps.entries()) {
     const label = `${chapterKey} step ${stepIndex + 1}: ${step.title}`;
     try {
-      await withDatabase(async (database) => {
-        await database.exec(step.setup);
-        await database.exec(
-          `SET SESSION AUTHORIZATION "${step.role.replaceAll('"', '""')}";`
-        );
-        const output = {
-          inspection: null,
-          ...(await runSql(database, step.sql)),
-        };
-        await database.exec("SET SESSION AUTHORIZATION postgres;");
-        const inspection = await database.query(step.inspect);
-        output.inspection = inspection.rows[0] || {};
-
-        if (!step.expect(output, output.inspection)) {
-          fail(
-            `${label}\n      error: ${JSON.stringify(output.error)}\n      inspection: ${JSON.stringify(output.inspection)}`
-          );
-          return;
-        }
-        // The diagram must render for the canonical outcome.
-        const cards = step.cards(output.inspection, output);
-        if (!Array.isArray(cards) || cards.length === 0) {
-          fail(`${label}: cards did not render`);
-          return;
-        }
-        pass(label);
+      const output = await runLabStep({
+        createDatabase: () => PGlite.create(),
+        setup: step.setup,
+        role: step.role,
+        sql: step.sql,
+        inspect: step.inspect,
+        inspectAsActor: step.inspectAsActor,
       });
+      if (!step.expect(output, output.inspection)) {
+        fail(`${label}\n      error: ${JSON.stringify(output.error)}\n      inspection: ${JSON.stringify(output.inspection)}\n      actor: ${JSON.stringify(output.actorInspection)}\n      results: ${JSON.stringify(output.results)}`);
+        continue;
+      }
+      if (output.identity.before.session_user !== step.role || output.identity.before.current_user !== step.role) {
+        fail(`${label}: initial execution identity does not match the selected role`);
+        continue;
+      }
+      const cards = step.cards(output.inspection, output);
+      if (!Array.isArray(cards) || cards.length === 0) {
+        fail(`${label}: cards did not render`);
+        continue;
+      }
+      pass(label);
     } catch (error) {
       fail(`${label}: setup failed: ${error.message}`);
     }

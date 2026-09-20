@@ -11,7 +11,7 @@ Acme launches an automated reporting service. It needs exactly the access Alice 
 
 `orders_reader` cannot log in. It names one capability: reach `app`, then read `app.orders`. Alice and `reporting_app` receive that capability through membership.
 
-PostgreSQL ships predefined capability roles built on the same mechanism—`pg_read_all_data`, `pg_write_all_data`, `pg_monitor`, and friends—whose reach covers every matching object in the database, current and future. They are the maximum-blast-radius version of `orders_reader`: one membership instead of designed access. The [security review](/docs/postgresql-security-review) meets them again.
+PostgreSQL also supplies predefined capabilities, but they serve different jobs. `pg_read_all_data` and `pg_write_all_data` provide broad data access across schemas, without bypassing row-level security; they are much broader than this application's need to read only `app.orders`. A monitoring agent may appropriately use `pg_monitor` or one of its narrower monitoring roles to inspect database activity without gaining blanket access to business tables. Choose a capability by the job it must do. The [security review](/docs/postgresql-security-review#review-predefined-roles-by-capability) compares these categories with the special database-owner role and higher-risk server capabilities.
 
 ```yaml {% schema="pgroles-manifest" %}
 roles:

@@ -1,3 +1,5 @@
+import { createRlsChapter } from "./AcmeRlsData.mjs";
+
 // Canonical data for the Acme story labs: database seeds, per-step SQL,
 // inspection queries, and pass conditions. This module is plain JavaScript on
 // purpose — the React component renders it and `docs/tests/labs.test.mjs`
@@ -822,8 +824,8 @@ DROP ROLE priya;`,
     description:
       "Nest Bob behind an analyst job role, then take one membership edge apart: automatic inheritance, deliberate SET ROLE, and delegated administration.",
     next: {
-      href: "/docs/postgresql-security-review",
-      title: "Audit PUBLIC, SECURITY DEFINER, and delegation",
+      href: "/docs/postgresql-row-security",
+      title: "Add row-level tenant boundaries",
     },
     actors: [
       ["postgres", "Database admin"],
@@ -1068,15 +1070,16 @@ WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
       },
     ],
   },
+  rls: createRlsChapter(nestedSeed),
   security: {
     debrief: {
       href: "#close-the-public-path-explicitly",
       title: "Close the PUBLIC path in policy",
     },
-    eyebrow: "Chapter 8 · Security review",
+    eyebrow: "Chapter 9 · Security review",
     title: "The auditor asks: “Who can really do this?”",
     description:
-      "Effective access hides outside ordinary direct ACLs. Investigate four surprises: PUBLIC, SECURITY DEFINER, delegated grant options, and the predefined master keys.",
+      "Effective access hides outside ordinary direct ACLs. Investigate four surprises: PUBLIC, SECURITY DEFINER, delegated grant options, and broad predefined roles.",
     next: {
       href: "/docs/postgresql-playground",
       title: "Audit the complete Acme database",
@@ -1188,8 +1191,8 @@ SET SESSION AUTHORIZATION postgres;`,
           "Contractor can now read through a grant made by team_lead. pgroles does not model application grant options, so this boundary needs a separate review.",
       },
       {
-        title: "Surprise 4: the predefined master keys",
-        why: "PostgreSQL ships predefined capability roles—pg_read_all_data, pg_write_all_data, pg_monitor, and friends. They look like ordinary memberships, but they pass permission checks for every matching object in the database, current and future, without an ACL entry anywhere.",
+        title: "Surprise 4: a predefined read-everything role",
+        why: "PostgreSQL ships broad predefined roles. pg_read_all_data passes read checks for every schema and matching object in the database, current and future, without an ACL entry anywhere. pg_monitor is different: it exposes monitoring information rather than application-table data.",
         prompt:
           "Hand contractor the read-everything key, then run the report as contractor.",
         setup: completeSeed,
@@ -1308,7 +1311,7 @@ ${reportSql}`,
             "postgres",
           ],
           [
-            "Does anyone hold a predefined master key?",
+            "Does anyone hold a broad predefined role?",
             `SELECT member.rolname, granted.rolname AS predefined_role FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE granted.rolname LIKE 'pg\\_%';`,
             "postgres",
           ],

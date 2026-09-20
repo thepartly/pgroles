@@ -61,7 +61,7 @@ Since PostgreSQL 16 each membership edge also records **who granted it**, and [`
 The lab exercises a live PostgreSQL role graph. The explorer starts from a sanitized snapshot and shows the ordered planned changes; use it to compare what the policy would change, then return to the lab to prove the resulting database behavior.
 
 {% quick-links %}
-{% quick-link title="Continue: security review" description="Audit PUBLIC, SECURITY DEFINER, and delegated grant options." icon="lightbulb" href="/docs/postgresql-security-review" /%}
+{% quick-link title="Continue: same table, different rows" description="Add PostgreSQL row-level policies after the role path is clear." icon="lightbulb" href="/docs/postgresql-row-security" /%}
 {% quick-link title="Memberships reference" description="See the complete policy and version behavior." icon="presets" href="/docs/memberships" /%}
 {% /quick-links %}
 
