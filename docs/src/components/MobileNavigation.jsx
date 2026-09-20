@@ -12,15 +12,20 @@ import {
 
 import { Logomark } from '@/components/Logo'
 import { Navigation } from '@/components/Navigation'
+import { DESTINATIONS } from '@/lib/navigation.mjs'
 
-export function MobileNavigation({ navigation }) {
-  let router = useRouter()
-  let [isOpen, setIsOpen] = useState(false)
-  let shownPath = useRef(router.asPath)
+export function MobileNavigation({
+  navigation,
+  destination,
+  pathname,
+  readerChoices,
+  restoredNavigation,
+  onExpandedChange,
+}) {
+  const router = useRouter()
+  const [isOpen, setIsOpen] = useState(false)
+  const shownPath = useRef(router.asPath)
 
-  // Following a link inside the sheet dismisses it. The ref guard keeps this
-  // to an actual navigation: a bare `setIsOpen(false)` here would also fire on
-  // the re-render that opens the sheet.
   useEffect(() => {
     if (shownPath.current === router.asPath) return
     shownPath.current = router.asPath
@@ -32,14 +37,44 @@ export function MobileNavigation({ navigation }) {
       <Button variant="ghost" size="icon" aria-label="Open navigation">
         <IconMenu2 className="size-6" />
       </Button>
-      <SheetContent side="left" className="px-4 pb-12 sm:px-6 lg:hidden">
+      <SheetContent
+        side="left"
+        className="overflow-y-auto px-4 pb-12 sm:px-6 lg:hidden"
+      >
         <SheetHeader className="px-0 pt-1">
-          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <SheetTitle className="font-display text-sm font-semibold">
+            {destination.label}
+          </SheetTitle>
           <Link href="/" aria-label="Home page">
             <Logomark className="h-9 w-9" />
           </Link>
         </SheetHeader>
-        <Navigation navigation={navigation} className="px-1" />
+        <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2 border-y py-3 text-sm">
+          {DESTINATIONS.filter((item) => item.id !== destination.id).map(
+            (item) => (
+              <Link
+                key={item.id}
+                href={item.href}
+                className="text-muted-foreground hover:text-foreground font-medium"
+              >
+                {item.label}
+              </Link>
+            )
+          )}
+        </div>
+        <div
+          data-navigation-scroll
+          className="mt-6 max-h-[calc(100vh-12rem)] overflow-y-auto px-1"
+        >
+          <Navigation
+            navigation={navigation}
+            destination={destination}
+            pathname={pathname}
+            readerChoices={readerChoices}
+            restoredNavigation={restoredNavigation}
+            onExpandedChange={onExpandedChange}
+          />
+        </div>
       </SheetContent>
     </Sheet>
   )

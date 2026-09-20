@@ -61,7 +61,7 @@ The `sql` format prints the full SQL script. The `summary` format shows counts o
 Use `--review-out review.pgroles.json` with any output format to save the same
 planning run for the [explorer](/docs/explorer). Recorded reviews include
 provenance and structured preflight evidence; importing them does not replan.
-See [recorded reviews in CI](/docs/ci-cd#recorded-reviews) for sanitization and
+See [recorded reviews](/docs/recorded-reviews) for sanitization and
 identity boundaries. Export failures fail the command, including with
 `--no-exit-code`.
 

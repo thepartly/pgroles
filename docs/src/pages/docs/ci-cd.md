@@ -228,44 +228,4 @@ Keep stderr with the report: executor-authority warnings and role-drop preflight
 
 ## Recorded reviews
 
-Export a review alongside the normal output:
-
-```bash
-pgroles diff -f pgroles.yaml --mode adopt --format markdown \
-  --review-out review.pgroles.json --target-label staging \
-  --no-exit-code > review.md
-```
-
-Import `review.pgroles.json` in the [plan explorer](/docs/explorer). It displays
-the CLI's recorded changes, SQL preview, phase analysis, findings, managed scope,
-provenance, and preflight evidence. Opening the file neither connects to a
-database nor recalculates the plan with the browser's current WASM version.
-Markdown and the artifact come from the same planning run.
-The viewer displays recorded provenance and fingerprints without authenticating
-the file; obtain review artifacts from a trusted source, such as your CI run.
-
-The first exporter creates recorded reviews without exploration inputs. It
-omits password values, role configuration values, and comments, and records
-the omissions. Redacted values do not mean absent values. These files cannot
-be replanned exactly; use a separately sanitized snapshot to explore a new,
-hypothetical variation. If any change contains sensitive values, this first
-exporter omits the entire SQL preview rather than inserting executable
-placeholder values.
-
-Artifacts retain role and object names, managed scope, and supplied labels.
-Review this metadata before sharing. Use `--policy-commit` to record a source
-revision and `--executor-role` to identify the intended applying identity.
-The policy content digest covers the original YAML bytes for a single manifest,
-or the serialized composed manifest for a bundle.
-The latter is a label, not impersonation: live preflight evidence collected as
-the inspecting connection identity does not verify a different executor.
-Authority evidence identifies the targeted checks' coverage and unchecked
-changes. Finding no issue in those checks does not establish authority for the
-whole plan. Native phase analysis marks its scoped authority graph as incomplete:
-a missing path is unknown, rather than proof that the executor cannot reach a
-role. Live preflight failures remain separate from that modelled uncertainty.
-
-Neither review fingerprints nor explorer fingerprints are approval tokens.
-At deployment, inspect current database state again, run live preflight, and
-use the supported approval/execution contract. A local `pgroles explore`
-launcher is not part of this implementation.
+Follow [Recorded reviews](/docs/recorded-reviews) to export and open a native plan in the explorer, including its sanitization, provenance, and authority-evidence limitations. The [PR-comment recipe](#diff-as-a-pr-comment) above produces the Markdown summary and review artifact from the same planning run. CI checks decide whether the job passes; the explorer displays the recorded review.
