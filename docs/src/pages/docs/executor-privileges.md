@@ -33,6 +33,8 @@ See PostgreSQL's [CREATE SCHEMA](https://www.postgresql.org/docs/18/sql-createsc
 [ALTER SCHEMA](https://www.postgresql.org/docs/18/sql-alterschema.html), and
 [GRANT](https://www.postgresql.org/docs/18/sql-grant.html) references for these distinctions.
 
+{% explorer-scenario scenario="acme-executor-authority" /%}
+
 ## Greenfield and brownfield prerequisites
 
 PostgreSQL 16 changed `CREATEROLE` semantics: a role with `CREATEROLE` automatically receives `ADMIN OPTION` on any role it creates. That collapses most of the table above into a single attribute for a **greenfield** executor — one that creates every role it will later alter, grant, or drop. A fresh executor needs only:

@@ -48,3 +48,5 @@ The lesson used `SET ROLE app_owner` as a migration recipe so new objects land o
 {% quick-link title="Continue: future objects" description="Create a new table and see why old wildcard grants do not follow it." icon="installation" href="/docs/postgresql-default-privileges" /%}
 {% quick-link title="Executor privileges" description="Check what the pgroles executor needs to transfer ownership." icon="plugins" href="/docs/executor-privileges" /%}
 {% /quick-links %}
+
+{% explorer-scenario scenario="acme-default-privileges" /%}

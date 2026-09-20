@@ -11,6 +11,8 @@ Guide to rolling out pgroles against existing databases without disruption. {% .
 
 If your database already has roles, grants, and schemas, you are in a **brownfield** scenario. pgroles is designed for this — use `additive` mode to layer managed roles on top of existing state without revoking anything or rewriting pre-existing role attributes during the first rollout.
 
+{% explorer-scenario scenario="acme-adoption" /%}
+
 For new databases where pgroles owns everything from the start, `authoritative` mode is appropriate.
 
 ## Recommended rollout

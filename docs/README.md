@@ -41,3 +41,14 @@ export under the configured deployment path and checks the generated JavaScript
 and WASM assets. Use the same base path for both commands. The docs workflow
 rebuilds WASM, removes its generated `.gitignore` from the export, and verifies
 the assets can be staged for Git-based Pages deployment.
+
+Bundled explorer scenarios live in `src/lib/explorerScenarios.mjs`. Each scenario
+defines its inputs, default mode, teaching notes, related guides, and expected
+changes/findings/phase authority. Guide pages use the `explorer-scenario` Markdoc
+tag with a scenario ID; links never include imported inputs.
+
+`scripts/check-wasm-parity.sh` runs every scenario and variant against both the
+native analyzer and release WASM, checking semantic expectations as well as
+runtime parity. `test:labs` also exercises the Acme authority examples against
+PostgreSQL through PGlite. Browser tests verify the static guide links and
+scenario interactions under the deployment base path.

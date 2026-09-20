@@ -14,7 +14,7 @@ test('uses snapshot superuser status for existing executors and manual status on
   await expect(checkbox).toBeEnabled()
   await checkbox.check()
 
-  await page.getByLabel('Executor role').fill('app_reader')
+  await page.getByLabel('Executor role').fill('alice')
   await expect(checkbox).toBeDisabled()
   await expect(checkbox).not.toBeChecked()
   await expect(page.getByText('From snapshot', { exact: true })).toBeVisible()
@@ -51,6 +51,7 @@ test('shows imported snapshot superuser status despite a conflicting executor fa
 
 test('renders unavailable-grantor errors with severity and a visible error count', async ({ page }) => {
   await page.goto(explorerUrl)
+  await page.getByLabel('Reconciliation mode').selectOption('authoritative')
   await page.getByLabel('Desired YAML').fill('roles:\n  - name: deployer\n  - name: reader\n')
   await page.locator('input[type="file"]').setInputFiles({
     name: 'grantor-loss.json',
@@ -102,6 +103,7 @@ test('uses compact mobile adjacency and bounds the optional graph for a larger p
   await page.goto(explorerUrl)
   const roles = Array.from({ length: 80 }, (_, index) => `  - name: role_${index}`).join('\n')
   await page.getByLabel('Desired YAML').fill(`roles:\n${roles}\n`)
+  await page.getByLabel('Reconciliation mode').selectOption('authoritative')
   await analyze(page)
   await expect(page.getByRole('heading', { name: 'Role index' })).toBeVisible()
   await expect(page.getByRole('img', { name: 'Resulting role and privilege graph' })).toBeHidden()

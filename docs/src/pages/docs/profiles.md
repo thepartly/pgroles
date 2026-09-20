@@ -91,6 +91,8 @@ Each `schema x profile` combination produces:
 
 The example above generates three roles: `inventory-editor`, `inventory-viewer`, `catalog-viewer`, plus all their associated grants and default privileges.
 
+{% explorer-scenario scenario="acme-profile-binding" /%}
+
 ## Custom role naming
 
 Override the default `{schema}-{profile}` pattern per-schema:

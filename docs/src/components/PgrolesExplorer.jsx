@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/router'
 import { Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import {
@@ -20,68 +21,9 @@ import {
   readableWasmError,
   validateSnapshotFileSize,
 } from '@/lib/pgrolesExplorer.mjs'
+import { explorerScenarios, getExplorerScenario } from '@/lib/explorerScenarios.mjs'
 
-const examples = {
-  onboarding: {
-    label: 'Brownfield onboarding',
-    executor: 'platform_admin',
-    superuser: false,
-    snapshot: {
-      roles: {
-        app_reader: {},
-        analyst: { login: true },
-      },
-      schemas: { app: { owner: 'platform_admin' } },
-      grants: [
-        { role: 'app_reader', object_type: 'table', schema: 'app', name: '*', privileges: ['SELECT'] },
-      ],
-      memberships: [
-        { role: 'app_reader', member: 'analyst', inherit: true, admin: false },
-      ],
-    },
-    yaml: `default_owner: platform_admin
-
-roles:
-  - name: platform_admin
-    external: true
-
-profiles:
-  reader:
-    grants:
-      - object: { type: schema }
-        privileges: [USAGE]
-      - object: { type: table, name: "*" }
-        privileges: [SELECT]
-
-schemas:
-  - name: app
-    profiles: [reader]
-
-memberships:
-  - role: app-reader
-    members:
-      - name: reporting_service
-`,
-  },
-  empty: {
-    label: 'New database',
-    executor: 'postgres',
-    superuser: true,
-    snapshot: {},
-    yaml: `default_owner: postgres
-
-roles:
-  - name: application
-    login: true
-  - name: application_reader
-
-memberships:
-  - role: application_reader
-    members:
-      - name: application
-`,
-  },
-}
+const DEFAULT_SCENARIO = explorerScenarios[0]
 
 function humanize(value = '') {
   return value
@@ -96,7 +38,7 @@ function changeLabel(change) {
   return subject ? `${humanize(kind)} · ${subject}` : humanize(kind)
 }
 
-function PhaseTimeline({ phases }) {
+function PhaseTimeline({ phases, focusPhase }) {
   if (!phases?.length) {
     return <p className="text-sm text-muted-foreground">No changes remain in this reconciliation mode.</p>
   }
@@ -116,7 +58,7 @@ function PhaseTimeline({ phases }) {
               </li>
             ))}
           </ul>
-          <details className="mt-2 rounded-md bg-stone-200/60 px-3 py-2 text-xs dark:bg-stone-800/60">
+          <details open={phase.phase === focusPhase} className="mt-2 rounded-md bg-stone-200/60 px-3 py-2 text-xs dark:bg-stone-800/60">
             <summary className="cursor-pointer font-medium">Executor access after this phase</summary>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
               <ReachabilityList label="Inherited usage" values={phase.executor_usage} />
@@ -250,18 +192,23 @@ export function PgrolesExplorer() {
   const router = useRouter()
   const fileInput = useRef(null)
   const analysisRun = useRef(0)
-  const initial = examples.onboarding
-  const [desiredYaml, setDesiredYaml] = useState(initial.yaml)
-  const [snapshot, setSnapshot] = useState(initial.snapshot)
-  const [snapshotName, setSnapshotName] = useState('Bundled example')
-  const [executorRole, setExecutorRole] = useState(initial.executor)
-  const [executorSuperuser, setExecutorSuperuser] = useState(initial.superuser)
-  const [executorMemberships, setExecutorMemberships] = useState([])
-  const [newMembershipSetRole, setNewMembershipSetRole] = useState('allowed')
-  const [newRoleSetRole, setNewRoleSetRole] = useState('unknown')
-  const [newRoleInherit, setNewRoleInherit] = useState('unknown')
-  const [newRoleAdminOption, setNewRoleAdminOption] = useState('unknown')
-  const [mode, setMode] = useState('authoritative')
+  const loadedScenario = useRef(null)
+  const initial = DEFAULT_SCENARIO
+  const initialExecutor = initial.request.executor
+  const [activeScenarioId, setActiveScenarioId] = useState(initial.id)
+  const [activeCaseId, setActiveCaseId] = useState('')
+  const [scenarioNotice, setScenarioNotice] = useState('')
+  const [desiredYaml, setDesiredYaml] = useState(initial.request.desired_yaml)
+  const [snapshot, setSnapshot] = useState(initial.request.current)
+  const [snapshotName, setSnapshotName] = useState(initial.title)
+  const [executorRole, setExecutorRole] = useState(initialExecutor.role)
+  const [executorSuperuser, setExecutorSuperuser] = useState(initialExecutor.superuser)
+  const [executorMemberships, setExecutorMemberships] = useState(initialExecutor.memberships)
+  const [newMembershipSetRole, setNewMembershipSetRole] = useState(initialExecutor.new_membership_set_role)
+  const [newRoleSetRole, setNewRoleSetRole] = useState(initialExecutor.new_role_set_role)
+  const [newRoleInherit, setNewRoleInherit] = useState(initialExecutor.new_role_inherit)
+  const [newRoleAdminOption, setNewRoleAdminOption] = useState(initialExecutor.new_role_admin_option)
+  const [mode, setMode] = useState(initial.request.mode)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -273,6 +220,7 @@ export function PgrolesExplorer() {
   const effectiveExecutorSuperuser = executorInSnapshot ? snapshotRoles[executorRole]?.superuser === true : executorSuperuser
   const findingsBySeverity = useMemo(() => result?.findings ?? [], [result])
   const errorCount = useMemo(() => findingsBySeverity.filter((finding) => finding.severity === 'error').length, [findingsBySeverity])
+  const activeScenario = getExplorerScenario(activeScenarioId) ?? initial
 
   function clearAnalysis() {
     analysisRun.current += 1
@@ -281,18 +229,52 @@ export function PgrolesExplorer() {
     setLoading(false)
   }
 
-  function selectExample(key) {
-    const example = examples[key]
-    setDesiredYaml(example.yaml)
-    setSnapshot(example.snapshot)
-    setSnapshotName(example.label)
-    setExecutorRole(example.executor)
-    setExecutorSuperuser(example.superuser)
-    setExecutorMemberships([])
-    setNewMembershipSetRole('allowed')
-    setNewRoleSetRole('unknown')
-    setNewRoleInherit('unknown')
-    setNewRoleAdminOption('unknown')
+  useEffect(() => {
+    if (!router.isReady) return
+    const queryValue = Array.isArray(router.query.scenario) ? router.query.scenario[0] : router.query.scenario
+    const queryKey = queryValue ?? DEFAULT_SCENARIO.id
+    if (loadedScenario.current === queryKey) return
+    loadedScenario.current = queryKey
+    const scenario = getExplorerScenario(queryValue) ?? DEFAULT_SCENARIO
+    const requestExecutor = scenario.request.executor
+    setScenarioNotice(queryValue && !getExplorerScenario(queryValue) ? `Unknown scenario “${queryValue}”. Showing ${DEFAULT_SCENARIO.title}.` : '')
+    setActiveScenarioId(scenario.id)
+    setActiveCaseId('')
+    setDesiredYaml(scenario.request.desired_yaml)
+    setSnapshot(scenario.request.current)
+    setSnapshotName(scenario.title)
+    setExecutorRole(requestExecutor.role)
+    setExecutorSuperuser(requestExecutor.superuser)
+    setExecutorMemberships(requestExecutor.memberships ?? [])
+    setNewMembershipSetRole(requestExecutor.new_membership_set_role ?? 'unknown')
+    setNewRoleSetRole(requestExecutor.new_role_set_role ?? 'unknown')
+    setNewRoleInherit(requestExecutor.new_role_inherit ?? 'unknown')
+    setNewRoleAdminOption(requestExecutor.new_role_admin_option ?? 'unknown')
+    setMode(scenario.request.mode)
+    analysisRun.current += 1
+    setResult(null)
+    setSelectedNode(null)
+    setLoading(false)
+    setError('')
+  }, [router.isReady, router.query.scenario])
+
+  function selectScenario(id) {
+    router.push({ pathname: router.pathname, query: { scenario: id } }, undefined, { shallow: true })
+  }
+
+  function selectScenarioCase(caseId) {
+    setActiveCaseId(caseId)
+    const scenarioCase = activeScenario.cases?.find((candidate) => candidate.id === caseId)
+    const overrides = scenarioCase?.requestOverrides ?? {}
+    const caseExecutor = overrides.executor ?? activeScenario.request.executor
+    setMode(overrides.mode ?? activeScenario.request.mode)
+    setExecutorRole(caseExecutor.role)
+    setExecutorSuperuser(caseExecutor.superuser)
+    setExecutorMemberships(caseExecutor.memberships ?? [])
+    setNewMembershipSetRole(caseExecutor.new_membership_set_role ?? 'unknown')
+    setNewRoleSetRole(caseExecutor.new_role_set_role ?? 'unknown')
+    setNewRoleInherit(caseExecutor.new_role_inherit ?? 'unknown')
+    setNewRoleAdminOption(caseExecutor.new_role_admin_option ?? 'unknown')
     clearAnalysis()
     setError('')
   }
@@ -309,6 +291,7 @@ export function PgrolesExplorer() {
       if (analysisRun.current !== run) return
       setSnapshot(parsed.current)
       setSnapshotName(file.name)
+      setActiveCaseId('custom')
       if (parsed.executor?.role) setExecutorRole(parsed.executor.role)
       setExecutorSuperuser(Boolean(parsed.executor?.superuser))
       setExecutorMemberships(parsed.executor?.memberships ?? [])
@@ -350,11 +333,23 @@ export function PgrolesExplorer() {
         Analysis runs in this browser. Snapshot and policy data are not uploaded, persisted, added to URLs, or included in telemetry.
       </div>
 
+      {scenarioNotice && <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">{scenarioNotice}</div>}
+
+      <section className="rounded-2xl border bg-white p-5 dark:bg-stone-900">
+        <p className="text-xs font-semibold tracking-wider text-amber-700 uppercase dark:text-amber-300">Acme scenario</p>
+        <h2 className="mt-1 font-display text-xl font-semibold">{activeScenario.title}</h2>
+        <p className="mt-2 text-sm text-muted-foreground">{activeScenario.description}</p>
+        <p className="mt-3 text-sm leading-6">{activeScenario.explanation}</p>
+        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm font-semibold">
+          {activeScenario.relatedDocs.map((related) => <Link key={related.href} href={related.href} className="text-amber-700 underline-offset-4 hover:underline dark:text-amber-300">{related.label} <span aria-hidden="true">→</span></Link>)}
+        </div>
+      </section>
+
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(18rem,.8fr)]">
         <div className="overflow-hidden rounded-2xl border bg-white dark:bg-stone-900">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
             <div><h2 className="font-display text-base font-semibold">Desired YAML</h2><p className="text-xs text-muted-foreground">Edit locally, then analyze the plan.</p></div>
-            <select aria-label="Load bundled example" defaultValue="onboarding" onChange={(event) => selectExample(event.target.value)} className="rounded-md border bg-transparent px-3 py-2 text-sm"><option value="onboarding">Brownfield example</option><option value="empty">New database example</option></select>
+            <select aria-label="Load bundled scenario" value={activeScenarioId} onChange={(event) => selectScenario(event.target.value)} className="rounded-md border bg-transparent px-3 py-2 text-sm">{explorerScenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}</select>
           </div>
           <textarea aria-label="Desired YAML" spellCheck="false" value={desiredYaml} onChange={(event) => { setDesiredYaml(event.target.value); clearAnalysis() }} className="min-h-[28rem] w-full resize-y bg-stone-950 p-4 font-mono text-[13px] leading-6 text-stone-100 outline-none" />
         </div>
@@ -367,9 +362,22 @@ export function PgrolesExplorer() {
             <button type="button" onClick={() => fileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Import sanitized JSON</button>
           </section>
           <section className="space-y-4 rounded-2xl border bg-white p-5 dark:bg-stone-900">
-            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={executorInSnapshot} onChange={(event) => { setExecutorSuperuser(event.target.checked); clearAnalysis() }} /> Executor is a superuser {executorInSnapshot && <span className="text-xs text-muted-foreground">From snapshot</span>}</label>
-            <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
+            {activeScenario.cases?.some((scenarioCase) => scenarioCase.requestOverrides.executor) && (
+              <div>
+                <label className="block text-sm font-medium">
+                  Executor facts
+                  <select aria-label="Executor facts variant" value={activeCaseId} onChange={(event) => selectScenarioCase(event.target.value)} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm">
+                    <option value="">Scenario default: INHERIT unknown</option>
+                    <option value="custom" disabled>Custom / imported facts</option>
+                    {activeScenario.cases.filter((scenarioCase) => scenarioCase.requestOverrides.executor).map((scenarioCase) => <option key={scenarioCase.id} value={scenarioCase.id}>{scenarioCase.title ?? humanize(scenarioCase.id)}</option>)}
+                  </select>
+                </label>
+                {activeCaseId && activeCaseId !== 'custom' && <p className="mt-2 text-xs leading-5 text-muted-foreground">{activeScenario.cases.find((scenarioCase) => scenarioCase.id === activeCaseId)?.description}</p>}
+              </div>
+            )}
+            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={executorInSnapshot} onChange={(event) => { setExecutorSuperuser(event.target.checked); setActiveCaseId('custom'); clearAnalysis() }} /> Executor is a superuser {executorInSnapshot && <span className="text-xs text-muted-foreground">From snapshot</span>}</label>
+            <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
             <label className="block text-sm font-medium">Reconciliation mode<select value={mode} onChange={(event) => { setMode(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="authoritative">Authoritative</option><option value="additive">Additive</option><option value="adopt">Adopt</option></select></label>
             <button type="button" onClick={runAnalysis} disabled={loading || !executorRole.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-3 font-semibold text-stone-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">
               {loading ? <IconLoader2 className="size-5 animate-spin" /> : <IconPlayerPlay className="size-5" />} {loading ? 'Loading analyzer…' : 'Analyze plan'}
@@ -391,7 +399,7 @@ export function PgrolesExplorer() {
 
         {findingsBySeverity.length > 0 && <div><h2 className="font-display text-xl font-semibold">Authority findings</h2><ul className="mt-3 space-y-2">{findingsBySeverity.map((finding, index) => <FindingItem key={index} finding={finding} changes={result.changes} />)}</ul></div>}
 
-        <div><h2 className="font-display text-xl font-semibold">Execution phases</h2><p className="mt-1 mb-5 text-sm text-muted-foreground">Each boundary is simulated by pgroles-core before the next phase is evaluated.</p><PhaseTimeline phases={result.phases} /></div>
+        <div><h2 className="font-display text-xl font-semibold">Execution phases</h2><p className="mt-1 mb-5 text-sm text-muted-foreground">Each boundary is simulated by pgroles-core before the next phase is evaluated.</p><PhaseTimeline phases={result.phases} focusPhase={activeScenario.focusPhase} /></div>
 
         <RoleAdjacency visual={result.visual} onSelect={setSelectedNode} />
         <div>

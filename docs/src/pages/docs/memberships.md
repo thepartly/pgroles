@@ -18,6 +18,8 @@ memberships:
         admin: true
 ```
 
+{% explorer-scenario scenario="acme-membership-bridge" /%}
+
 ## Member options
 
 | Field | Default | Description |
