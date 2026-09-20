@@ -148,8 +148,8 @@ const basicCards = (role, resultLabel) => (row, output) =>
   [
     ["Role", role, "neutral"],
     [
-      "Membership",
-      row?.inherits_reader ? "orders_reader" : "none",
+      "Inherited reader access",
+      row?.inherits_reader ? "via orders_reader" : "none",
       row?.inherits_reader ? "pass" : "neutral",
     ],
     [
@@ -252,7 +252,7 @@ const chapters = {
       },
       {
         title: "Open the schema gate — and watch the error move",
-        why: "Schema USAGE makes names inside app reachable, and nothing more. This lab executes each statement separately, so a single run can grant the gate, become Alice with SET ROLE — the same switch the role selector uses — and immediately retest the report through her eyes.",
+        why: "Schema USAGE makes names inside app reachable, and nothing more. This lab executes each statement separately, so one run can grant the gate, change current_user to Alice with SET ROLE, and immediately retest through her eyes. The role selector starts a fresh run under the selected session identity with SET SESSION AUTHORIZATION; it does not preserve edits from a previous run.",
         prompt: "Grant USAGE, become Alice, and run the report again.",
         setup: founderSeed,
         role: "postgres",
@@ -285,7 +285,7 @@ ${reportSql}`,
           row?.schema_usage &&
           row?.object_select,
         observation:
-          "Two rows of revenue through Alice's own privileges this time, not the superuser's. Switch the role selector to Alice and run just the report to prove it without SET ROLE — and remember these convenient direct grants: nothing removes them until someone does so explicitly.",
+          "The same run applied the table grant, changed current_user to Alice, and returned two rows through Alice's own privileges rather than the superuser's. Keeping mutation and verification together matters because changing the role selector starts again from the step's original seed. These convenient direct grants remain until someone removes them explicitly.",
       },
     ],
   },
@@ -356,7 +356,15 @@ GRANT orders_reader TO alice, reporting_app;`,
     WHERE grantee = 'alice' AND table_schema = 'app'
       AND table_name = 'orders' AND privilege_type = 'SELECT'
   ) AS direct_table_grant;`,
-        inspect: privilegeInspection("alice"),
+        inspect: `SELECT
+  has_schema_privilege('alice', 'app', 'USAGE') AS schema_usage,
+  has_table_privilege('alice', 'app.orders', 'SELECT') AS object_select,
+  pg_has_role('alice', 'orders_reader', 'USAGE') AS inherits_reader,
+  EXISTS (
+    SELECT 1 FROM information_schema.table_privileges
+    WHERE grantee = 'alice' AND table_schema = 'app'
+      AND table_name = 'orders' AND privilege_type = 'SELECT'
+  ) AS direct_table_grant;`,
         cards: (row) => [
           [
             "Alice path 1",
@@ -365,10 +373,14 @@ GRANT orders_reader TO alice, reporting_app;`,
           ],
           [
             "Alice path 2",
-            row?.object_select ? "direct ACL remains" : "missing",
-            row?.object_select ? "focus" : "blocked",
+            row?.direct_table_grant ? "direct ACL remains" : "missing",
+            row?.direct_table_grant ? "focus" : "blocked",
           ],
-          ["Lesson", "two paths", "focus"],
+          [
+            "Known access paths",
+            `${Number(Boolean(row?.inherits_reader)) + Number(Boolean(row?.direct_table_grant))}`,
+            row?.inherits_reader && row?.direct_table_grant ? "focus" : "neutral",
+          ],
         ],
         expect: (output) =>
           output.results[0]?.rows[0]?.through_membership === true &&
@@ -694,13 +706,15 @@ ALTER TABLE app.refunds OWNER TO app_owner;`,
       },
       {
         title: "Make tomorrow automatic",
-        why: "A default privilege changes what app_owner grants at the moment it creates a future object. It only fires when app_owner really is the creator, which is why the SET ROLE migration recipe matters.",
+        why: "A default privilege changes what app_owner grants when app_owner is current_user at object creation. This comparison uses the same configured default for two tables: one created as deploy, then one created after SET ROLE app_owner.",
         prompt:
-          "Configure the owner’s defaults, then create the next table through app_owner and watch the grant appear on its own.",
+          "Configure app_owner’s default, create one table as deploy, then create another after SET ROLE app_owner.",
         setup: repairedSeed,
         role: "postgres",
         sql: `ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app
   GRANT SELECT ON TABLES TO orders_reader;
+SET SESSION AUTHORIZATION deploy;
+CREATE TABLE app.deploy_created (id bigint PRIMARY KEY);
 SET ROLE app_owner;
 CREATE TABLE app.shipments (
   id bigint PRIMARY KEY,
@@ -708,31 +722,33 @@ CREATE TABLE app.shipments (
   status text NOT NULL
 );
 INSERT INTO app.shipments VALUES (1, 1, 'sent');
-RESET ROLE;`,
-        inspect: privilegeInspection("reporting_app", "app.shipments"),
+RESET ROLE;
+SET SESSION AUTHORIZATION postgres;`,
+        inspect: `SELECT
+  (SELECT tableowner FROM pg_tables WHERE schemaname = 'app' AND tablename = 'deploy_created') AS deploy_created_owner,
+  has_table_privilege('reporting_app', 'app.deploy_created', 'SELECT') AS deploy_created_select,
+  (SELECT tableowner FROM pg_tables WHERE schemaname = 'app' AND tablename = 'shipments') AS shipments_owner,
+  has_table_privilege('reporting_app', 'app.shipments', 'SELECT') AS shipments_select;`,
         cards: (row) => [
           [
-            "Creating role",
-            row?.object_owner,
-            row?.object_owner === "app_owner" ? "pass" : "blocked",
+            "Created as deploy",
+            row?.deploy_created_owner === "deploy" && !row?.deploy_created_select ? "owner deploy · no reader grant" : "unexpected",
+            row?.deploy_created_owner === "deploy" && !row?.deploy_created_select ? "focus" : "blocked",
           ],
           [
-            "Default applied",
-            row?.object_select ? "SELECT" : "missing",
-            row?.object_select ? "pass" : "blocked",
-          ],
-          [
-            "Reporting app",
-            row?.object_select ? "ready" : "denied",
-            row?.object_select ? "pass" : "blocked",
+            "Created as app_owner",
+            row?.shipments_owner === "app_owner" && row?.shipments_select ? "owner app_owner · reader SELECT" : "unexpected",
+            row?.shipments_owner === "app_owner" && row?.shipments_select ? "pass" : "blocked",
           ],
         ],
         expect: (output, row) =>
           !output.error &&
-          row?.object_owner === "app_owner" &&
-          row?.object_select,
+          row?.deploy_created_owner === "deploy" &&
+          !row?.deploy_created_select &&
+          row?.shipments_owner === "app_owner" &&
+          row?.shipments_select,
         observation:
-          "Nobody granted SELECT on shipments—the default fired because app_owner created the table. Wildcards repair the present; default privileges prepare the future.",
+          "The configured default was identical, but deploy_created belonged to deploy and received no reader grant. After SET ROLE changed current_user to app_owner, shipments belonged to app_owner and automatically granted SELECT to orders_reader. Wildcards repair the present; defaults follow the creating role into the future.",
       },
     ],
   },
@@ -850,13 +866,13 @@ REVOKE orders_reader FROM bob;`,
   has_table_privilege('bob', 'app.orders', 'SELECT') AS object_select;`,
         cards: (row) => [
           [
-            "Edge 1",
-            row?.via_analyst ? "bob → analyst" : "missing",
+            "Bob inherits analyst",
+            row?.via_analyst ? "available" : "unavailable",
             row?.via_analyst ? "pass" : "blocked",
           ],
           [
-            "Edge 2",
-            row?.via_reader ? "analyst → orders_reader" : "missing",
+            "Bob inherits orders_reader",
+            row?.via_reader ? "available" : "unavailable",
             row?.via_reader ? "pass" : "blocked",
           ],
           [
@@ -895,20 +911,22 @@ REVOKE orders_reader FROM bob;`,
         setup: nestedSeed,
         role: "postgres",
         sql: `REVOKE orders_reader FROM analyst;
-GRANT analyst TO orders_reader;`,
+GRANT analyst TO orders_reader;
+SET SESSION AUTHORIZATION bob;
+${reportSql}`,
         inspect: `SELECT
   pg_has_role('bob', 'analyst', 'USAGE') AS via_analyst,
   pg_has_role('bob', 'orders_reader', 'USAGE') AS via_reader,
   has_table_privilege('bob', 'app.orders', 'SELECT') AS object_select;`,
         cards: (row) => [
           [
-            "Edge 1",
-            row?.via_analyst ? "bob → analyst" : "missing",
+            "Bob inherits analyst",
+            row?.via_analyst ? "available" : "unavailable",
             row?.via_analyst ? "pass" : "blocked",
           ],
           [
-            "Edge 2",
-            row?.via_reader ? "restored" : "reversed",
+            "Bob inherits orders_reader",
+            row?.via_reader ? "available" : "unavailable",
             row?.via_reader ? "pass" : "blocked",
           ],
           [
@@ -918,16 +936,16 @@ GRANT analyst TO orders_reader;`,
           ],
         ],
         expect: (output, row) =>
-          !output.error &&
+          output.error?.includes("permission denied for schema app") &&
           row?.via_analyst &&
           !row?.via_reader &&
           !row?.object_select,
         observation:
-          "GRANT analyst TO orders_reader made orders_reader a member of analyst—the opposite relationship—so nothing flows toward Bob anymore. Read every edge as “member of”, from the granted role toward the member. Switch to Bob and run the report to feel the breakage.",
+          "GRANT analyst TO orders_reader made orders_reader a member of analyst—the opposite relationship—so nothing flows from orders_reader toward Bob, and Bob’s report fails in the same run. Read the relationship from member to granted role: Bob → analyst is useful, while orders_reader → analyst points away from Bob. Changing the role selector would start again from the original seed rather than preserve this reversed edge.",
       },
       {
         title: "Turn off automatic inheritance",
-        why: "PostgreSQL 16 and later stores three independent facts on each membership edge: MEMBER, INHERIT, and SET. Rebuild Bob’s edge so membership survives but privileges stop flowing automatically.",
+        why: "PostgreSQL 16 and later stores three independent options on a membership relationship: ADMIN, INHERIT, and SET. Rebuild Bob’s edge so the relationship survives but automatic inheritance stops.",
         prompt: "Recreate Bob’s analyst membership with INHERIT FALSE.",
         setup: nestedSeed,
         role: "postgres",
@@ -939,17 +957,17 @@ GRANT analyst TO bob WITH INHERIT FALSE, SET TRUE;`,
   pg_has_role('bob', 'analyst', 'SET') AS can_set;`,
         cards: (row) => [
           [
-            "Member",
-            row?.member ? "yes" : "no",
+            "Membership relationship",
+            row?.member ? "exists" : "missing",
             row?.member ? "pass" : "blocked",
           ],
           [
-            "Inherits",
-            row?.inherits ? "on" : "off",
+            "Inherited analyst access",
+            row?.inherits ? "available" : "unavailable",
             row?.inherits ? "pass" : "focus",
           ],
           [
-            "May SET ROLE",
+            "Can SET ROLE analyst",
             row?.can_set ? "yes" : "no",
             row?.can_set ? "pass" : "blocked",
           ],
@@ -957,7 +975,7 @@ GRANT analyst TO bob WITH INHERIT FALSE, SET TRUE;`,
         expect: (output, row) =>
           !output.error && row?.member && !row?.inherits && row?.can_set,
         observation:
-          "The edge still exists, but its ordinary privileges are dormant. Membership, automatic inheritance, and permission to SET ROLE are three separate switches.",
+          "The membership relationship still exists, while INHERIT OPTION is off and SET OPTION remains on. ADMIN, INHERIT, and SET are separate options on that relationship.",
       },
       {
         title: "Feel the dormant edge",
@@ -1004,33 +1022,33 @@ ${reportSql}`,
       },
       {
         title: "Delegate membership administration",
-        why: "ADMIN is the third per-edge option: it authorizes managing who belongs to the role. It grants no data access and no permission to become the role.",
+        why: "ADMIN OPTION authorizes managing who belongs to the granted role. This grant gives team_lead no inherited analyst access and no SET ROLE permission initially, but ADMIN OPTION is powerful enough for the trusted delegate to grant stronger INHERIT and SET options—including to itself.",
         prompt:
           "Give the team lead an administrative edge with inheritance and SET both off.",
         setup: nestedSeed,
         role: "postgres",
         sql: `GRANT analyst TO team_lead WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;`,
         inspect: `SELECT
-  membership.admin_option AS admin,
-  membership.inherit_option AS inherits,
-  membership.set_option AS can_set
+  bool_or(membership.admin_option) AS admin,
+  bool_or(membership.inherit_option) AS inherits,
+  bool_or(membership.set_option) AS can_set
 FROM pg_auth_members AS membership
 JOIN pg_roles AS granted ON granted.oid = membership.roleid
 JOIN pg_roles AS member ON member.oid = membership.member
 WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
         cards: (row) => [
           [
-            "Admin",
+            "ADMIN OPTION",
             row?.admin ? "on" : "off",
             row?.admin ? "focus" : "blocked",
           ],
           [
-            "Inherits",
+            "INHERIT OPTION",
             row?.inherits ? "on" : "off",
             row?.inherits ? "blocked" : "pass",
           ],
           [
-            "May SET ROLE",
+            "SET OPTION",
             row?.can_set ? "yes" : "no",
             row?.can_set ? "blocked" : "pass",
           ],
@@ -1038,7 +1056,39 @@ WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
         expect: (output, row) =>
           !output.error && row?.admin && !row?.inherits && !row?.can_set,
         observation:
-          "team_lead can now manage analyst’s membership while holding none of its privileges. pgroles manages inherit and admin per edge; it does not converge PostgreSQL’s SET option.",
+          "team_lead currently holds ADMIN OPTION while INHERIT OPTION and SET OPTION are off, so it has no analyst data access yet. ADMIN OPTION is a delegation boundary, not a safe way to prevent a trusted administrator from activating stronger options. pgroles manages inherit and admin per edge; it does not converge PostgreSQL’s SET option.",
+      },
+      {
+        title: "Exercise the ADMIN caveat",
+        why: "A role trusted with ADMIN OPTION can issue another grant to itself with stronger options. PostgreSQL retains grantor-attributed membership rows, and their effective INHERIT and SET capabilities combine. Test that authority instead of treating one grantor’s INHERIT FALSE or SET FALSE row as a permanent boundary against the administrator.",
+        prompt: "As team_lead, grant itself analyst with INHERIT and SET, become analyst, and read orders.",
+        setup: delegatedSeed,
+        role: "team_lead",
+        sql: `GRANT analyst TO team_lead WITH INHERIT TRUE, SET TRUE;
+SET ROLE analyst;
+${reportSql}`,
+        inspect: `SELECT
+  bool_or(membership.admin_option) AS admin,
+  bool_or(membership.inherit_option) AS inherits,
+  bool_or(membership.set_option) AS can_set
+FROM pg_auth_members AS membership
+JOIN pg_roles AS granted ON granted.oid = membership.roleid
+JOIN pg_roles AS member ON member.oid = membership.member
+WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
+        cards: (row, output) => [
+          ["ADMIN OPTION", row?.admin ? "on" : "off", row?.admin ? "focus" : "blocked"],
+          ["INHERIT OPTION", row?.inherits ? "on" : "off", row?.inherits ? "focus" : "blocked"],
+          ["SET OPTION", row?.can_set ? "on" : "off", row?.can_set ? "focus" : "blocked"],
+          ["Report as analyst", output.error ? "denied" : "2 rows", output.error ? "blocked" : "pass"],
+        ],
+        expect: (output, row) =>
+          !output.error &&
+          row?.admin &&
+          row?.inherits &&
+          row?.can_set &&
+          output.results[0]?.rows.length === 2,
+        observation:
+          "team_lead used ADMIN OPTION to create its own grantor-attributed row with INHERIT and SET, then became analyst and read both rows. Grant ADMIN OPTION only to a role trusted to control membership options, not merely the member list.",
       },
       {
         title: "Let the team lead onboard Dana",
@@ -1058,7 +1108,7 @@ WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
           ],
           [
             "Team lead",
-            row?.lead_reads ? "reads orders" : "no data access",
+            row?.lead_reads ? "orders SELECT now" : "no orders SELECT now",
             row?.lead_reads ? "blocked" : "pass",
           ],
           ["Policy", "edge undeclared", "focus"],
@@ -1066,7 +1116,7 @@ WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
         expect: (output, row) =>
           !output.error && row?.dana_reads && !row?.lead_reads,
         observation:
-          "Dana reads orders through the hierarchy, granted by someone who cannot read it themselves. Until policy declares Dana, an authoritative pgroles plan treats this edge as drift—delegation and desired state answer different questions.",
+          "Dana reads orders through the hierarchy. The team lead does not currently have SELECT on orders, but its ADMIN authority lets it grant itself access. Until policy declares Dana, an authoritative pgroles plan treats this edge as drift—delegation and desired state answer different questions.",
       },
     ],
   },

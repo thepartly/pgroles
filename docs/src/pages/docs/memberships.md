@@ -68,10 +68,14 @@ A membership stanza may name one of PostgreSQL's predefined roles (`pg_read_all_
 - **`exclusive: true`** on the stanza asserts the member list is complete: any live member not listed is planned for `REVOKE` — including cloud-provider management roles such as `rds_superuser`, so only assert exclusivity once you have accounted for every member the platform needs. It is rejected on ordinary managed roles, whose memberships are already reconciled exhaustively, and a bundle rejects an exclusive member list split across policy documents.
 - **Exception: members that are themselves predefined roles are never revoked**, even under `exclusive: true`. PostgreSQL ships built-in `pg_*` → `pg_*` edges (for example `pg_monitor` is a member of `pg_read_all_stats`), and revoking those would break the built-in hierarchy cluster-wide. An exclusive stanza therefore asserts the complete list of *ordinary* members; the built-in hierarchy stays intact and is not planned for revocation.
 
-```yaml
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
+roles:
+  - name: auditor
+    login: true
+
 memberships:
   - role: pg_read_all_data
-    exclusive: true          # nobody else may hold the read-everything key
+    exclusive: true
     members:
       - name: auditor
 ```

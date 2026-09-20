@@ -1,6 +1,6 @@
 ---
 title: 3. Access drift
-description: Add Bob, remove Alice, and discover why revoking one membership does not prove effective access is gone.
+description: Add Bob, remove Alice, and discover why revoking one membership does not prove her report is forbidden.
 ---
 
 Bob joins reporting and Alice moves to another team. The role hierarchy makes the intended change obvious: add Bob to `orders_reader`, remove Alice. The database has a longer memory. {% .lead %}
@@ -9,25 +9,12 @@ Bob joins reporting and Alice moves to another team. The role hierarchy makes th
 
 ## Desired state turns the surprise into a plan
 
-The policy already says Alice is no longer a member and contains no direct Alice grants:
+Merge Bob's role into chapter 2's policy and replace its `orders_reader` member list with the one below. Retain its other roles and grants. Alice remains a login role, but is no longer a member and has no direct grants in the complete policy:
 
-```yaml {% schema="pgroles-manifest" %}
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
 roles:
-  - name: alice
-    login: true
   - name: bob
     login: true
-  - name: reporting_app
-    login: true
-  - name: orders_reader
-
-grants:
-  - role: orders_reader
-    privileges: [USAGE]
-    object: { type: schema, name: app }
-  - role: orders_reader
-    privileges: [SELECT]
-    object: { type: table, schema: app, name: orders }
 
 memberships:
   - role: orders_reader
@@ -38,7 +25,9 @@ memberships:
 
 An authoritative `pgroles plan` compares that graph with PostgreSQL. Alice’s old `USAGE` and `SELECT` appear as revocations instead of remaining invisible history. Review the exact SQL, then apply it as one transaction.
 
-**Revoking one edge proves only that the edge is gone. Test the operation to prove effective access is gone.**
+**Revoking one edge proves only that the edge is gone. Verify that this role can no longer perform the forbidden operation—in this story, Alice selecting from `app.orders`.** A failed report does not prove Alice lacks every other database capability.
+
+[Download the complete policy after this chapter](/examples/acme-policy/chapter-3.yaml).
 
 {% callout type="note" title="Negative tests belong in offboarding" %}
 PGlite can prove the authorization result, but it does not model passwords, `pg_hba.conf`, concurrent sessions, or session termination. In production, revoke durable authorization, terminate sessions when required, and verify both. [Netchecks](https://netchecks.io/docs/postgres) can run exactly these positive and negative access assertions continuously from inside your cluster.

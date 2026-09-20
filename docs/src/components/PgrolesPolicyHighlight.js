@@ -18,12 +18,15 @@ const fieldsByPath = new Map([
     'profiles.$profile',
     new Set(['login', 'inherit', 'grants', 'default_privileges', 'config']),
   ],
-  ['profiles.$profile.grants.*', new Set(['privileges', 'object', 'on'])],
+  [
+    'profiles.$profile.grants.*',
+    new Set(['privileges', 'object', 'on', 'ensure']),
+  ],
   ['profiles.$profile.grants.*.object', new Set(['type', 'name'])],
   ['profiles.$profile.grants.*.on', new Set(['type', 'name'])],
   [
     'profiles.$profile.default_privileges.*',
-    new Set(['privileges', 'on_type']),
+    new Set(['privileges', 'on_type', 'ensure']),
   ],
   ['schemas.*', new Set(['name', 'profiles', 'role_pattern', 'owner'])],
   [
@@ -31,6 +34,7 @@ const fieldsByPath = new Map([
     new Set([
       'name',
       'external',
+      'preserve_undeclared_grants',
       'login',
       'superuser',
       'createdb',
@@ -55,7 +59,7 @@ const fieldsByPath = new Map([
     'default_privileges.*.grant.*',
     new Set(['role', 'ensure', 'privileges', 'on_type']),
   ],
-  ['memberships.*', new Set(['role', 'members'])],
+  ['memberships.*', new Set(['role', 'members', 'exclusive'])],
   ['memberships.*.members.*', new Set(['name', 'inherit', 'admin'])],
   [
     'retirements.*',
@@ -88,6 +92,10 @@ const fieldHelp = {
   memberships: 'Directed role-membership edges.',
   role: 'The role receiving privileges or being granted to members.',
   members: 'Roles that become members of the granted role.',
+  exclusive:
+    'For predefined or external roles, assert the ordinary-member list is complete. Additive mode skips revocations; cloud-provider roles are not exempt.',
+  preserve_undeclared_grants:
+    'Preserve undeclared in-scope object grants. Explicit ensure: absent rules still revoke; memberships and default privileges are unaffected.',
   privileges: 'PostgreSQL privileges applied to the target object.',
   ensure: 'Whether this privilege must be present or absent.',
   scope: 'The schema or global scope for a default privilege.',

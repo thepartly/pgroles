@@ -140,11 +140,12 @@ function HighlightedCode({ code, language, schema }) {
   )
 }
 
-export function Fence({ children, language, schema }) {
+export function Fence({ children, language, schema, policy }) {
   const [copied, setCopied] = useState(false)
   const resetCopy = useRef()
   const code = String(children).trimEnd()
   const isPgrolesPolicy = schema === 'pgroles-manifest'
+  const policyLabel = policy === 'fragment' ? 'Policy fragment' : 'pgroles.yaml'
 
   function onCopyCode() {
     // Copy the rendered (trimmed) code, and tolerate non-secure contexts or a
@@ -167,10 +168,13 @@ export function Fence({ children, language, schema }) {
         <div className="flex items-center justify-between gap-3 border-b border-stone-700 bg-stone-900 px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate font-mono text-xs font-semibold text-stone-200">
-              pgroles.yaml
+              {policyLabel}
             </span>
-            <span className="rounded-full border border-teal-800 bg-teal-950/60 px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-teal-300">
-              policy schema
+            <span
+              title="Recognizes documented policy fields and YAML syntax; it does not fully validate a policy."
+              className="rounded-full border border-teal-800 bg-teal-950/60 px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-teal-300"
+            >
+              Policy field guide
             </span>
           </div>
           <CopyButton copied={copied} onClick={onCopyCode} />
@@ -189,5 +193,3 @@ export function Fence({ children, language, schema }) {
     </div>
   )
 }
-
-

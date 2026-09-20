@@ -11,11 +11,11 @@ Refunds launches. Deploy creates `app.refunds`, but the report immediately fails
 
 - A wildcard object grant covers matching objects that exist when reconciliation runs.
 - A default privilege changes what a particular owner grants when that owner creates a future object.
-- The migration must create the object as the same owner named by the default privilege.
+- PostgreSQL looks at the `current_user` that creates the object. Creating as `deploy` does not use `app_owner`'s defaults merely because `app_owner` owns the schema; creating after `SET ROLE app_owner` does.
 
-The policy now pairs both halves:
+Merge these entries into chapter 4's policy. Replace the reader's table-specific `orders` grant with the wildcard below, retaining schema `USAGE`, all role definitions, and existing memberships. Add the default privilege rule:
 
-```yaml {% schema="pgroles-manifest" %}
+```yaml {% schema="pgroles-manifest" policy="fragment" %}
 default_owner: app_owner
 
 grants:
@@ -34,7 +34,11 @@ default_privileges:
 
 The wildcard repairs and maintains existing tables. The default covers tables created later by `app_owner`. Neither substitutes for the other.
 
-**Default privileges belong to the creating role, not to the schema and not to the login that happens to run the migration.**
+The lab compares both cases after installing the same default: a table created as `deploy` does not receive it, while a table created with `current_user = app_owner` does. Ownership transfers are not retroactive creation events, so moving an old table to `app_owner` does not apply the default either.
+
+**At creation time, PostgreSQL applies the defaults configured for `current_user`, including the relevant schema-specific defaults. Inheriting another role's privileges does not inherit its default privileges.**
+
+[Download the complete policy after this chapter](/examples/acme-policy/chapter-5.yaml).
 
 {% quick-links %}
 {% quick-link title="Continue: offboarding" description="Use the durable owner to remove Priya without deleting her objects." icon="lightbulb" href="/docs/postgresql-offboarding" /%}

@@ -42,6 +42,10 @@ const nodes = {
         type: String,
         matches: ['pgroles-manifest'],
       },
+      policy: {
+        type: String,
+        matches: ['complete', 'fragment'],
+      },
     },
   },
   link: {
