@@ -5,7 +5,7 @@ description: "Audit effective access through PUBLIC, SECURITY DEFINER, delegatio
 
 An auditor asks a harder question than “what grants are in our YAML?”: **can this role actually perform the operation?** Acme’s role graph is tidy, but PostgreSQL has access paths outside ordinary named ACLs. {% .lead %}
 
-Before changing anything, use the lab to identify the unexpected path, name the role or object that makes it possible, repair that path, and repeat the affected login's query as a negative test.
+The guided steps expose unexpected access paths. As an optional challenge, remove one unintended path and verify that the affected role can no longer perform the forbidden operation.
 
 {% postgres-security-review-lab /%}
 
@@ -34,7 +34,7 @@ The global default matters because PostgreSQL’s built-in function default is g
 
 ## Review predefined roles by capability
 
-[Predefined roles](https://www.postgresql.org/docs/18/predefined-roles.html) are memberships with privileged behavior outside ordinary object ACLs. Audit who holds them and what category of capability each one supplies:
+[Predefined roles](https://www.postgresql.org/docs/18/predefined-roles.html) provide built-in capabilities. Audit their memberships alongside object grants: neither view alone describes all effective access. Categorize the capability each one supplies:
 
 - `pg_read_all_data` and `pg_write_all_data` are broad data-access roles for matching objects, but they do not bypass row-level security.
 - `pg_monitor` groups `pg_read_all_settings`, `pg_read_all_stats`, and `pg_stat_scan_tables` for configuration, statistics, and observation; it is not a business-data ACL.
@@ -42,13 +42,13 @@ The global default matters because PostgreSQL’s built-in function default is g
 - `pg_database_owner` has exactly one implicit member, the current database owner, and membership in it cannot be granted.
 - `pg_read_server_files`, `pg_write_server_files`, and `pg_execute_server_program` are high-risk server-file or program-execution capabilities.
 
-No table-level ACL review will show these paths. Auditing effective access therefore includes one more question: who is a member of a `pg_*` role?
+An object-grant review alone misses built-in capabilities. Auditing effective access therefore includes one more question: who is a member of a `pg_*` role?
 
 pgroles can declare memberships in a predefined role, including an explicit complete-member assertion. See [predefined and external granted roles](/docs/memberships#predefined-and-external-granted-roles) for the managed declaration and its adoption behavior.
 
-## Capstone: prove the repair
+## Optional repair and verification
 
-The lab presents a path that is easy to miss: an ordinary login reaches a function through `PUBLIC`, a `SECURITY DEFINER` function runs with its owner's authority, or a delegated grant survives a cleanup by the wrong grantor. Explain that path before changing the YAML. Then remove the unexpected route, apply the plan, and repeat the same query as the affected login. The negative test must now fail.
+The lab presents paths that are easy to miss: an ordinary login reaches a function through `PUBLIC`, a `SECURITY DEFINER` function runs with its owner's authority, or a role can delegate through `WITH GRANT OPTION`. For the optional repair challenge, put the repair and verification in the same script: every Run starts a fresh database. A negative test passes by proving the forbidden outcome is absent. The query might raise a permission error, return no forbidden rows, or update zero rows.
 
 A `SECURITY DEFINER` function needs review of its owner, body, fixed `search_path`, callable surface, and `PUBLIC` exposure. `WITH GRANT OPTION` needs separate review of who can delegate. See [memberships](/docs/memberships) and [grants](/docs/grants) for the managed declarations and their limits.
 
@@ -57,6 +57,6 @@ One more finding costs nothing to write down: Acme’s application still connect
 **Desired ACLs are necessary; effective-access tests tell you whether every other path agrees with them.**
 
 {% quick-links %}
-{% quick-link title="Open the Acme playground" description="Investigate the finished database with any role and any SQL." icon="lightbulb" href="/docs/postgresql-playground" /%}
+{% quick-link title="Open the Acme playground" description="Investigate the core sandbox with any role and any SQL." icon="lightbulb" href="/docs/postgresql-playground" /%}
 {% quick-link title="Limits and boundaries" description="Review unmanaged column grants, grant options, and effective access." icon="plugins" href="/docs/limitations" /%}
 {% /quick-links %}
