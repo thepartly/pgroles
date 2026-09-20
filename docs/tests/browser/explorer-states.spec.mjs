@@ -31,7 +31,7 @@ test('uses snapshot superuser status for existing executors and manual status on
 
 test('shows imported snapshot superuser status despite a conflicting executor fallback', async ({ page }) => {
   await page.goto(explorerUrl)
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'superuser.json',
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({
@@ -53,7 +53,7 @@ test('renders unavailable-grantor errors with severity and a visible error count
   await page.goto(explorerUrl)
   await page.getByLabel('Reconciliation mode').selectOption('authoritative')
   await page.getByLabel('Desired YAML').fill('roles:\n  - name: deployer\n  - name: reader\n')
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'grantor-loss.json',
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({
@@ -76,7 +76,7 @@ test('hides an old plan before a failed snapshot import is read', async ({ page 
   await page.getByRole('button', { name: 'Resulting role graph' }).click()
   await page.locator('svg[aria-label="Resulting role and privilege graph"] g[role="button"]').first().click()
   await expect(page.getByRole('dialog')).toBeVisible()
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'broken.json',
     mimeType: 'application/json',
     buffer: Buffer.from('{'),
@@ -119,7 +119,7 @@ test('uses compact mobile adjacency and bounds the optional graph for a larger p
 test('reports the core snapshot role limit', async ({ page }) => {
   await page.goto(explorerUrl)
   const roles = Object.fromEntries(Array.from({ length: 1025 }, (_, index) => [`role_${index}`, {}]))
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'too-many-roles.json',
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({ roles })),

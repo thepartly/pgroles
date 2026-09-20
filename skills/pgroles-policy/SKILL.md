@@ -57,6 +57,17 @@ the target environment alongside it. Markdown records declared
 password changes without reading their environment variables. Review the SQL and effective
 privileges as well as the conservative change priorities.
 
+For offline review, add `--review-out review.pgroles.json` to that same `diff`
+run and import the file into the explorer. Preserve its recorded changes,
+preflight evidence, and provenance; opening a recorded review does not replan.
+The first exporter omits exploration inputs, sensitive values, and any SQL
+preview affected by those omissions. Treat omissions as unavailable information,
+not absent policy state. Use `--executor-role` only as an intended-identity
+label: checks performed by the inspecting connection do not establish another
+executor's authority. Inspect again and run live preflight before deployment.
+For the artifact and CI workflow, read
+[the CI guide](../../docs/src/pages/docs/ci-cd.md#recorded-reviews).
+
 Never print database URLs, passwords, or rendered Secrets in logs.
 
 ## Reconciliation Modes

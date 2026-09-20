@@ -25,7 +25,7 @@ test('initializes the real WASM analyzer and rejects malformed YAML', async ({ p
 
 test('rejects secret-bearing snapshots at the WASM boundary', async ({ page }) => {
   await page.goto('docs/explorer/')
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'unsafe.json',
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({ roles: { application: { password: 'must-not-enter-browser-analysis' } } })),

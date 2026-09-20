@@ -50,9 +50,20 @@ pgroles diff --bundle path/to/pgroles.bundle.yaml --database-url postgres://loca
 | `--format` | Output format: `sql` (default), `summary`, `json`, or `markdown` |
 | `--mode` | Reconciliation mode: `authoritative` (default), `additive`, or `adopt` |
 | `--exit-code` | Exit with code 2 when drift is detected (default: `true`) |
-| `--no-exit-code` | Always exit 0, even when drift is detected |
+| `--no-exit-code` | Suppress drift exit code 2; command failures still exit nonzero |
+| `--review-out` | Write a sanitized recorded review artifact alongside normal output |
+| `--target-label` | Human-readable target label for `--review-out`; never a connection URL |
+| `--policy-commit` | Source revision to record with `--review-out` |
+| `--executor-role` | Intended applying identity for `--review-out`; does not switch roles or verify that identity |
 
 The `sql` format prints the full SQL script. The `summary` format shows counts of each change type.
+
+Use `--review-out review.pgroles.json` with any output format to save the same
+planning run for the [explorer](/docs/explorer). Recorded reviews include
+provenance and structured preflight evidence; importing them does not replan.
+See [recorded reviews in CI](/docs/ci-cd#recorded-reviews) for sanitization and
+identity boundaries. Export failures fail the command, including with
+`--no-exit-code`.
 
 For single-manifest mode, the `json` format outputs the change list as a JSON array. For bundle mode, the `json` format returns a typed object with:
 

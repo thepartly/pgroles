@@ -21,8 +21,14 @@ use pgroles_cli::{
     validate_bundle_file, validate_manifest,
 };
 use pgroles_core::diff::{ReconciliationMode, additive_ignores_absence_assertions, plan_changes};
+use pgroles_core::explorer::ExecutorFacts;
 use pgroles_core::ownership::validate_changes_against_managed_surface;
-use pgroles_core::visual::{self, VisualManagedScope, VisualSource};
+use pgroles_core::review_artifact::{
+    EvidenceStatus, ExplorationOmissionReason, PolicyProvenance, PreflightCheck, PreflightEvidence,
+    PreflightFinding, ReviewArtifactInput, ReviewContext, ReviewExploration, ReviewIdentity,
+    ReviewMode, ReviewProvenance, build_review_artifact,
+};
+use pgroles_core::visual::{self, VisualManagedSchema, VisualManagedScope, VisualSource};
 use pgroles_inspect::{InspectConfig, inspect_drop_role_safety};
 
 // ---------------------------------------------------------------------------
@@ -88,6 +94,22 @@ enum Commands {
         /// Disable non-zero exit when drift is detected.
         #[arg(long, action = clap::ArgAction::SetTrue, overrides_with = "exit_code")]
         no_exit_code: bool,
+
+        /// Write a sanitized, review-only plan artifact to this file.
+        #[arg(long)]
+        review_out: Option<PathBuf>,
+
+        /// Human-readable target label recorded in the review artifact.
+        #[arg(long, requires = "review_out")]
+        target_label: Option<String>,
+
+        /// Policy source revision recorded in the review artifact.
+        #[arg(long, requires = "review_out")]
+        policy_commit: Option<String>,
+
+        /// Intended executor role recorded in the review artifact; authority preflight checks the connected inspector instead.
+        #[arg(long, requires = "review_out")]
+        executor_role: Option<String>,
     },
 
     /// Apply the changes to bring the database in sync with the manifest.
@@ -430,6 +452,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             mode,
             exit_code,
             no_exit_code,
+            review_out,
+            target_label,
+            policy_commit,
+            executor_role,
         } => {
             cmd_diff(
                 file.as_deref(),
@@ -438,6 +464,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 &format,
                 mode.into(),
                 exit_code && !no_exit_code,
+                DiffReviewOptions {
+                    review_out: review_out.as_deref(),
+                    target_label: target_label.as_deref(),
+                    policy_commit: policy_commit.as_deref(),
+                    executor_role: executor_role.as_deref(),
+                },
             )
             .await
         }
@@ -865,6 +897,244 @@ fn diff_password_changes(
     }
 }
 
+fn single_manifest_managed_scope(validated: &pgroles_cli::ValidatedManifest) -> VisualManagedScope {
+    let mut roles = validated
+        .expanded
+        .roles
+        .iter()
+        .map(|role| role.name.clone())
+        .collect::<Vec<_>>();
+    roles.extend(
+        validated
+            .manifest
+            .retirements
+            .iter()
+            .map(|retirement| retirement.role.clone()),
+    );
+    roles.sort();
+    roles.dedup();
+    let schemas = validated
+        .manifest
+        .schemas
+        .iter()
+        .map(|binding| VisualManagedSchema {
+            name: binding.name.clone(),
+            owner: binding.owner.is_some() || validated.manifest.default_owner.is_some(),
+            bindings: !binding.profiles.is_empty(),
+        })
+        .collect();
+    VisualManagedScope { roles, schemas }
+}
+
+struct ReviewArtifactWriteInput<'a> {
+    path: &'a Path,
+    policy_content: &'a [u8],
+    policy_commit: Option<&'a str>,
+    target_label: Option<&'a str>,
+    intended_executor: Option<&'a str>,
+    mode: ReconciliationMode,
+    managed_scope: Option<VisualManagedScope>,
+    inspector: &'a ExecutionBackendInfo,
+    current: pgroles_core::model::RoleGraph,
+    changes: &'a [pgroles_core::diff::Change],
+    change_sources: Option<&'a [pgroles_core::report::BundleChangeOwner]>,
+    sql_context: &'a pgroles_core::sql::SqlContext,
+    authority_issues: &'a [pgroles_inspect::AuthorityIssue],
+    drop_safety: &'a pgroles_inspect::DropRoleSafetyAssessment,
+}
+
+fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
+    let ReviewArtifactWriteInput {
+        path,
+        policy_content,
+        policy_commit,
+        target_label,
+        intended_executor,
+        mode,
+        managed_scope,
+        inspector,
+        current,
+        changes,
+        change_sources,
+        sql_context,
+        authority_issues,
+        drop_safety,
+    } = input;
+    let intended_executor = intended_executor.unwrap_or(&inspector.user_name);
+    let intended_is_inspector = intended_executor == inspector.user_name;
+    let mut preflight = vec![
+        PreflightEvidence {
+            check: PreflightCheck::ExecutorAuthority,
+            status: if authority_issues.is_empty() {
+                EvidenceStatus::Passed
+            } else {
+                EvidenceStatus::Failed
+            },
+            actor_role: Some(inspector.user_name.clone()),
+            issue_count: authority_issues.len(),
+            issues: authority_preflight_findings(authority_issues),
+        },
+        PreflightEvidence {
+            check: PreflightCheck::RoleDropSafety,
+            status: if drop_safety.blockers.issues.is_empty() {
+                EvidenceStatus::Passed
+            } else {
+                EvidenceStatus::Failed
+            },
+            actor_role: None,
+            issue_count: drop_safety.warnings.issues.len() + drop_safety.blockers.issues.len(),
+            issues: drop_safety_preflight_findings(drop_safety),
+        },
+        PreflightEvidence {
+            check: PreflightCheck::ServerCompatibility,
+            status: EvidenceStatus::Unknown,
+            actor_role: None,
+            issue_count: 0,
+            issues: Vec::new(),
+        },
+    ];
+    if !intended_is_inspector {
+        preflight.push(PreflightEvidence {
+            check: PreflightCheck::ExecutorAuthority,
+            status: EvidenceStatus::NotRun,
+            actor_role: Some(intended_executor.to_string()),
+            issue_count: 0,
+            issues: Vec::new(),
+        });
+    }
+    let artifact = build_review_artifact(ReviewArtifactInput {
+        provenance: ReviewProvenance {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            captured_at: jiff::Timestamp::now().to_string(),
+            policy: PolicyProvenance::from_content(
+                policy_content,
+                policy_commit.map(ToOwned::to_owned),
+            ),
+            target_label: target_label.unwrap_or("unspecified").to_string(),
+            pg_major_version: sql_context.pg_major_version,
+        },
+        context: ReviewContext {
+            mode: ReviewMode::from(mode),
+            managed_scope,
+            inspector: ReviewIdentity {
+                role: inspector.user_name.clone(),
+                superuser: Some(inspector.superuser),
+            },
+            intended_executor: ReviewIdentity {
+                role: intended_executor.to_string(),
+                superuser: intended_is_inspector.then_some(inspector.superuser),
+            },
+        },
+        preflight,
+        current,
+        changes,
+        change_sources,
+        executor_facts: ExecutorFacts {
+            role: intended_executor.to_string(),
+            superuser: intended_is_inspector && inspector.superuser,
+            memberships: Vec::new(),
+            new_membership_set_role: Default::default(),
+            new_role_set_role: Default::default(),
+            new_role_inherit: Default::default(),
+            new_role_admin_option: Default::default(),
+        },
+        sql_context,
+        exploration: ReviewExploration::Omitted {
+            reason: ExplorationOmissionReason::RecordedOnlyExport,
+        },
+    })
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let rendered = serde_json::to_vec_pretty(&artifact)?;
+    std::fs::write(path, rendered)
+        .with_context(|| format!("failed to write review artifact to {}", path.display()))
+}
+
+fn authority_preflight_findings(
+    issues: &[pgroles_inspect::AuthorityIssue],
+) -> Vec<PreflightFinding> {
+    issues
+        .iter()
+        .map(|issue| {
+            use pgroles_inspect::AuthorityIssue;
+            let (code, role) = match issue {
+                AuthorityIssue::DefaultPrivilegeOwner { owner, .. }
+                | AuthorityIssue::MissingDefaultPrivilegeOwner { owner } => {
+                    ("default_privilege_owner", Some(owner.clone()))
+                }
+                AuthorityIssue::PredefinedRoleGrant { role, .. }
+                | AuthorityIssue::MissingPredefinedRole { role, .. }
+                | AuthorityIssue::ForeignGrantorMembershipRevoke { role, .. } => {
+                    ("membership_authority", Some(role.clone()))
+                }
+                AuthorityIssue::PublicRevoke { .. } => ("public_revoke_authority", None),
+                AuthorityIssue::ForeignGrantorRevoke { grantee, .. } => {
+                    ("foreign_grantor_revoke", Some(grantee.clone()))
+                }
+                AuthorityIssue::RevokeGrantorUnavailable { grantor, .. }
+                | AuthorityIssue::GrantorAuthorityRemovedByPlan { grantor, .. } => {
+                    ("grantor_unavailable", Some(grantor.clone()))
+                }
+            };
+            PreflightFinding {
+                code: code.to_string(),
+                message: issue.to_string(),
+                role,
+            }
+        })
+        .collect()
+}
+
+fn drop_safety_preflight_findings(
+    assessment: &pgroles_inspect::DropRoleSafetyAssessment,
+) -> Vec<PreflightFinding> {
+    assessment
+        .warnings
+        .issues
+        .iter()
+        .map(|issue| PreflightFinding {
+            code: "role_drop_retirement_warning".to_string(),
+            message: format!(
+                "role has {} retirement-handled safety concern(s)",
+                drop_safety_concern_count(issue)
+            ),
+            role: Some(issue.role.clone()),
+        })
+        .chain(
+            assessment
+                .blockers
+                .issues
+                .iter()
+                .map(|issue| PreflightFinding {
+                    code: "drop_role_safety_blocker".to_string(),
+                    message: format!(
+                        "role has {} unresolved drop-safety concern(s)",
+                        drop_safety_concern_count(issue)
+                    ),
+                    role: Some(issue.role.clone()),
+                }),
+        )
+        .collect()
+}
+
+fn drop_safety_concern_count(issue: &pgroles_inspect::DropRoleSafetyIssue) -> usize {
+    issue.owned_object_count
+        + issue.shared_owned_object_count
+        + issue.external_owned_object_count
+        + issue.privilege_dependency_count
+        + issue.external_privilege_dependency_count
+        + issue.other_dependency_count
+        + issue.external_other_dependency_count
+        + issue.active_session_count
+}
+
+#[derive(Clone, Copy)]
+struct DiffReviewOptions<'a> {
+    review_out: Option<&'a Path>,
+    target_label: Option<&'a str>,
+    policy_commit: Option<&'a str>,
+    executor_role: Option<&'a str>,
+}
+
 async fn cmd_diff(
     file: Option<&Path>,
     bundle: Option<&Path>,
@@ -872,7 +1142,14 @@ async fn cmd_diff(
     format: &OutputFormat,
     mode: ReconciliationMode,
     use_exit_code: bool,
+    review: DiffReviewOptions<'_>,
 ) -> Result<ExitCode> {
+    let DiffReviewOptions {
+        review_out,
+        target_label,
+        policy_commit,
+        executor_role,
+    } = review;
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
         let pool = connect_db(database_url).await?;
@@ -898,18 +1175,58 @@ async fn cmd_diff(
             &changes,
             &validated.composed.managed_change_surface,
         )?;
-        preflight_authority(&pool, &changes, &current, false).await?;
+        let authority_issues = preflight_authority(&pool, &changes, &current, false).await?;
         let drop_safety =
             inspect_drop_safety(&pool, &changes, &validated.composed.manifest.retirements).await?;
         let summary = PlanSummary::from_changes(&changes);
+        let sql_context = if matches!(format, OutputFormat::Sql) || review_out.is_some() {
+            Some(detect_sql_context_with_config(&pool, &inspect_config).await?)
+        } else {
+            None
+        };
+        if let Some(review_path) = review_out {
+            let inspector = fetch_execution_backend_info(&pool)
+                .await
+                .context("failed to identify review artifact inspector")?;
+            let policy_content = serde_json::to_vec(&validated.composed.manifest)?;
+            let change_sources = pgroles_core::report::build_bundle_plan(
+                &changes,
+                &validated.composed.report_context(),
+                pgroles_core::report::PlanOutputMode::Redacted,
+            )?
+            .changes
+            .into_iter()
+            .map(|entry| entry.owner)
+            .collect::<Vec<_>>();
+            write_review_artifact(ReviewArtifactWriteInput {
+                path: review_path,
+                policy_content: &policy_content,
+                policy_commit,
+                target_label,
+                intended_executor: executor_role,
+                mode,
+                managed_scope: Some(VisualManagedScope::from(&validated.composed.managed_scope)),
+                inspector: &inspector,
+                current: current.clone(),
+                changes: &changes,
+                change_sources: Some(&change_sources),
+                sql_context: sql_context
+                    .as_ref()
+                    .expect("review artifact requested SQL context"),
+                authority_issues: &authority_issues,
+                drop_safety: &drop_safety,
+            })?;
+        }
 
         match format {
             OutputFormat::Sql => {
-                let sql_ctx = detect_sql_context_with_config(&pool, &inspect_config).await?;
+                let sql_ctx = sql_context
+                    .as_ref()
+                    .expect("SQL output requested SQL context");
                 if summary.is_empty() {
                     println!("-- No changes needed. Database is in sync with manifest.");
                 } else {
-                    print!("{}", format_plan_sql_with_context(&changes, &sql_ctx));
+                    print!("{}", format_plan_sql_with_context(&changes, sql_ctx));
                     eprintln!("\n{summary}");
                     if !drop_safety.is_empty() {
                         eprintln!("\n{drop_safety}");
@@ -974,17 +1291,47 @@ async fn cmd_diff(
         &validated.expanded.roles,
     );
     let changes = diff_password_changes(changes, &validated.expanded, format)?;
-    preflight_authority(&pool, &changes, &current, false).await?;
+    let authority_issues = preflight_authority(&pool, &changes, &current, false).await?;
     let drop_safety = inspect_drop_safety(&pool, &changes, &validated.manifest.retirements).await?;
     let summary = PlanSummary::from_changes(&changes);
+    let sql_context = if matches!(format, OutputFormat::Sql) || review_out.is_some() {
+        Some(detect_sql_context(&pool, &validated.expanded).await?)
+    } else {
+        None
+    };
+    if let Some(review_path) = review_out {
+        let inspector = fetch_execution_backend_info(&pool)
+            .await
+            .context("failed to identify review artifact inspector")?;
+        write_review_artifact(ReviewArtifactWriteInput {
+            path: review_path,
+            policy_content: yaml.as_bytes(),
+            policy_commit,
+            target_label,
+            intended_executor: executor_role,
+            mode,
+            managed_scope: Some(single_manifest_managed_scope(&validated)),
+            inspector: &inspector,
+            current: current.clone(),
+            changes: &changes,
+            change_sources: None,
+            sql_context: sql_context
+                .as_ref()
+                .expect("review artifact requested SQL context"),
+            authority_issues: &authority_issues,
+            drop_safety: &drop_safety,
+        })?;
+    }
 
     match format {
         OutputFormat::Sql => {
-            let sql_ctx = detect_sql_context(&pool, &validated.expanded).await?;
+            let sql_ctx = sql_context
+                .as_ref()
+                .expect("SQL output requested SQL context");
             if summary.is_empty() {
                 println!("-- No changes needed. Database is in sync with manifest.");
             } else {
-                print!("{}", format_plan_sql_with_context(&changes, &sql_ctx));
+                print!("{}", format_plan_sql_with_context(&changes, sql_ctx));
                 eprintln!("\n{summary}");
                 if !drop_safety.is_empty() {
                     eprintln!("\n{drop_safety}");
@@ -1096,14 +1443,14 @@ async fn cmd_apply(
             println!("-- DRY RUN: the following SQL would be executed:\n");
             print!("{sql_output}");
             eprintln!("\n{}", summary.format_plan());
-            preflight_authority(&pool, &changes, &current, false).await?;
+            let _ = preflight_authority(&pool, &changes, &current, false).await?;
             if !drop_safety.is_empty() {
                 eprintln!("\n{drop_safety}");
             }
             return Ok(());
         }
 
-        preflight_authority(&pool, &changes, &current, true).await?;
+        let _ = preflight_authority(&pool, &changes, &current, true).await?;
 
         if drop_safety.has_blockers() {
             anyhow::bail!("{}", drop_safety.blockers);
@@ -1183,14 +1530,14 @@ async fn cmd_apply(
         println!("-- DRY RUN: the following SQL would be executed:\n");
         print!("{sql_output}");
         eprintln!("\n{}", summary.format_plan());
-        preflight_authority(&pool, &changes, &current, false).await?;
+        let _ = preflight_authority(&pool, &changes, &current, false).await?;
         if !drop_safety.is_empty() {
             eprintln!("\n{drop_safety}");
         }
         return Ok(());
     }
 
-    preflight_authority(&pool, &changes, &current, true).await?;
+    let _ = preflight_authority(&pool, &changes, &current, true).await?;
 
     if drop_safety.has_blockers() {
         anyhow::bail!("{}", drop_safety.blockers);
@@ -1560,6 +1907,7 @@ struct ExecutionBackendInfo {
     backend_pid: i32,
     database_name: String,
     user_name: String,
+    superuser: bool,
     in_recovery: bool,
 }
 
@@ -1592,6 +1940,7 @@ where
             pg_backend_pid() AS backend_pid,
             current_database() AS database_name,
             current_user AS user_name,
+            (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
             pg_is_in_recovery() AS in_recovery
         "#,
     )
@@ -1604,6 +1953,7 @@ where
         backend_pid: row.get("backend_pid"),
         database_name: row.get("database_name"),
         user_name: row.get("user_name"),
+        superuser: row.get("superuser"),
         in_recovery: row.get("in_recovery"),
     })
 }
@@ -1822,12 +2172,12 @@ async fn preflight_authority(
     changes: &[pgroles_core::diff::Change],
     current: &pgroles_core::model::RoleGraph,
     blocking: bool,
-) -> Result<()> {
+) -> Result<Vec<pgroles_inspect::AuthorityIssue>> {
     let issues = pgroles_inspect::preflight_authority_issues(pool, changes, current)
         .await
         .context("failed to check executor authority")?;
     if issues.is_empty() {
-        return Ok(());
+        return Ok(issues);
     }
     let message = issues
         .iter()
@@ -1840,7 +2190,7 @@ async fn preflight_authority(
     for issue in &issues {
         eprintln!("Warning: {issue}");
     }
-    Ok(())
+    Ok(issues)
 }
 
 fn warn_additive_absence_assertions(
@@ -2128,6 +2478,7 @@ mod tests {
             backend_pid: 4242,
             database_name: "pgroles_test".to_string(),
             user_name: "postgres".to_string(),
+            superuser: true,
             in_recovery: false,
         };
         let error = sqlx::Error::Database(Box::new(TestDatabaseError {
@@ -2172,7 +2523,10 @@ mod tests {
                 &executable,
                 pgroles_core::report::PlanOutputMode::Redacted
             ),
-            review
+            pgroles_core::report::shape_plan_changes(
+                &review,
+                pgroles_core::report::PlanOutputMode::Redacted
+            )
         );
     }
 

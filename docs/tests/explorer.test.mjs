@@ -9,6 +9,8 @@ import {
   policyRequest,
   readableWasmError,
   resetAnalyzerForTests,
+  reviewArtifactImport,
+  validateReviewArtifactFileSize,
   validateSnapshotFileSize,
   wasmModuleUrl,
 } from '../src/lib/pgrolesExplorer.mjs'
@@ -70,6 +72,28 @@ test('validates an imported envelope version and preserves its executor facts', 
 test('rejects oversized snapshot files before reading them', () => {
   assert.doesNotThrow(() => validateSnapshotFileSize(4_194_304))
   assert.throws(() => validateSnapshotFileSize(4_194_305), /4194305 bytes; limit is 4194304 bytes/)
+  assert.throws(() => validateReviewArtifactFileSize(4_194_305), /review artifact file is 4194305 bytes/)
+})
+
+test('accepts only structurally valid recorded review artifacts', () => {
+  const artifact = {
+    schema_version: 'pgroles.review-artifact.v1',
+    provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    context: { mode: 'additive', inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
+    preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
+    recorded: { changes: [], phases: [], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+  }
+  assert.equal(reviewArtifactImport(artifact), artifact)
+  assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0 }] }))
+  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v2' }), /unsupported review artifact schema version/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: {} } }), /recorded collections are malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'invented' } } }), /SQL preview is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [null] }), /preflight evidence is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'available', sql: {} } } }), /SQL preview content is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, context: { ...artifact.context, mode: 'invented' } }), /execution context is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 1 }] }), /preflight evidence is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, review_fingerprint: 'sha256:not-a-digest' } }), /fingerprint is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, exploration: { status: 'omitted', reason: 'invented' } }), /exploration status is malformed/)
 })
 
 test('preserves malformed-input errors from wasm-bindgen', () => {

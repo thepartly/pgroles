@@ -139,7 +139,7 @@ test('compares executor authority facts without changing the planned default pri
   await expect(page.getByLabel('Executor facts variant')).toHaveValue('inherited')
   await expect(page.getByLabel('Executor role')).toHaveValue('deploy')
 
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'custom-executor.json',
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({
