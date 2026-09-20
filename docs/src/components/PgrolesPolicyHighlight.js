@@ -1,80 +1,10 @@
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
+import manifestMetadata from '../../public/generated/manifest-metadata.json' with { type: 'json' }
 
-const topLevelFields = new Set([
-  'default_owner',
-  'role_pattern',
-  'auth_providers',
-  'profiles',
-  'schemas',
-  'roles',
-  'grants',
-  'default_privileges',
-  'memberships',
-  'retirements',
-])
-
-const fieldsByPath = new Map([
-  [
-    'profiles.$profile',
-    new Set(['login', 'inherit', 'grants', 'default_privileges', 'config']),
-  ],
-  [
-    'profiles.$profile.grants.*',
-    new Set(['privileges', 'object', 'on', 'ensure']),
-  ],
-  ['profiles.$profile.grants.*.object', new Set(['type', 'name'])],
-  ['profiles.$profile.grants.*.on', new Set(['type', 'name'])],
-  [
-    'profiles.$profile.default_privileges.*',
-    new Set(['privileges', 'on_type', 'ensure']),
-  ],
-  ['schemas.*', new Set(['name', 'profiles', 'role_pattern', 'owner'])],
-  [
-    'roles.*',
-    new Set([
-      'name',
-      'external',
-      'preserve_undeclared_grants',
-      'login',
-      'superuser',
-      'createdb',
-      'createrole',
-      'inherit',
-      'replication',
-      'bypassrls',
-      'connection_limit',
-      'comment',
-      'password',
-      'password_valid_until',
-      'config',
-    ]),
-  ],
-  ['roles.*.password', new Set(['from_env'])],
-  ['grants.*', new Set(['role', 'ensure', 'privileges', 'object', 'on'])],
-  ['grants.*.object', new Set(['type', 'schema', 'name'])],
-  ['grants.*.on', new Set(['type', 'schema', 'name'])],
-  ['default_privileges.*', new Set(['owner', 'schema', 'scope', 'grant'])],
-  ['default_privileges.*.scope', new Set(['type', 'schema'])],
-  [
-    'default_privileges.*.grant.*',
-    new Set(['role', 'ensure', 'privileges', 'on_type']),
-  ],
-  ['memberships.*', new Set(['role', 'members', 'exclusive'])],
-  ['memberships.*.members.*', new Set(['name', 'inherit', 'admin'])],
-  [
-    'retirements.*',
-    new Set(['role', 'reassign_owned_to', 'drop_owned', 'terminate_sessions']),
-  ],
-])
-
-const authProviderFields = new Map([
-  ['cloud_sql_iam', new Set(['type', 'project'])],
-  ['alloydb_iam', new Set(['type', 'project', 'cluster'])],
-  ['rds_iam', new Set(['type', 'region'])],
-  ['azure_ad', new Set(['type', 'tenant_id'])],
-  ['supabase', new Set(['type', 'project_ref'])],
-  ['planet_scale', new Set(['type', 'organization'])],
-])
+const manifestSchema = manifestMetadata.manifest_schema
+const fieldNotes = {
+  exclusive: 'Additive mode skips revocations; ordinary cloud-provider management roles are not exempt from exclusivity.',
+}
 
 const roleReferenceFields = new Set([
   'default_owner',
@@ -83,28 +13,6 @@ const roleReferenceFields = new Set([
   'role',
   'reassign_owned_to',
 ])
-
-const fieldHelp = {
-  role_pattern: 'Naming pattern inherited by schema profile bindings, unless overridden.',
-  default_owner: 'Role used when a default privilege omits its owner.',
-  roles: 'Roles whose lifecycle and supported attributes pgroles manages.',
-  grants: 'Object privileges granted to a named role.',
-  memberships: 'Directed role-membership edges.',
-  role: 'The role receiving privileges or being granted to members.',
-  members: 'Roles that become members of the granted role.',
-  exclusive:
-    'For predefined or external roles, assert the ordinary-member list is complete. Additive mode skips revocations; cloud-provider roles are not exempt.',
-  preserve_undeclared_grants:
-    'Preserve undeclared in-scope object grants. Explicit ensure: absent rules still revoke; memberships and default privileges are unaffected.',
-  privileges: 'PostgreSQL privileges applied to the target object.',
-  ensure: 'Whether this privilege must be present or absent.',
-  scope: 'The schema or global scope for a default privilege.',
-  object: 'The database object targeted by this grant.',
-  login: 'Whether PostgreSQL allows this role to log in.',
-  inherit: 'Whether ordinary privileges flow automatically across this edge.',
-  admin: 'Whether the member may administer membership in the granted role.',
-}
-
 function addRange(ranges, node, className, title) {
   if (!node?.range) return
   ranges.push({
@@ -115,77 +23,103 @@ function addRange(ranges, node, className, title) {
   })
 }
 
-function isDynamicKey(path) {
-  const currentPath = normalizedPath(path)
-  return (
-    currentPath === 'profiles' ||
-    currentPath === 'profiles.$profile.config' ||
-    currentPath === 'roles.*.config'
-  )
-}
-
-function normalizedPath(path) {
-  const normalized = [...path]
-  if (normalized[0] === 'profiles' && normalized.length > 1) {
-    normalized[1] = '$profile'
+function dereference(schema) {
+  let resolved = schema
+  const seen = new Set()
+  while (resolved?.$ref?.startsWith('#/') && !seen.has(resolved.$ref)) {
+    seen.add(resolved.$ref)
+    resolved = resolved.$ref
+      .slice(2)
+      .split('/')
+      .map((segment) => segment.replaceAll('~1', '/').replaceAll('~0', '~'))
+      .reduce((value, segment) => value?.[segment], manifestSchema)
   }
-  return normalized.join('.')
+  return resolved ?? schema
 }
 
-function isAllowedField(key, path, parent) {
-  if (normalizedPath(path) === 'auth_providers.*' && isMap(parent)) {
-    const providerType = parent.items.find(
-      (pair) => isScalar(pair.key) && pair.key.value === 'type'
-    )?.value?.value
-    return (
-      authProviderFields.get(String(providerType))?.has(key) || key === 'type'
-    )
-  }
-
-  return fieldsByPath.get(normalizedPath(path))?.has(key) || false
+function scalarField(map, key) {
+  return map?.items.find(
+    (pair) => isScalar(pair.key) && pair.key.value === key && isScalar(pair.value)
+  )?.value?.value
 }
 
-function keyDecoration(key, path, parent) {
-  if (path.length === 0 && topLevelFields.has(key)) {
-    return {
-      className: 'pgroles-section',
-      title: fieldHelp[key] || `pgroles policy section: ${key}`,
-      recognized: true,
+function acceptsDiscriminator(schema, value) {
+  const resolved = dereference(schema)
+  const type = resolved?.properties?.type
+  return type?.const === value || type?.enum?.includes(value)
+}
+
+function schemaBranches(schema, parent) {
+  const resolved = dereference(schema)
+  if (!resolved || typeof resolved !== 'object') return []
+  const allOf = resolved.allOf ?? []
+  const alternatives = [...(resolved.anyOf ?? []), ...(resolved.oneOf ?? [])]
+  if (alternatives.length === 0) return [resolved, ...allOf.flatMap((item) => schemaBranches(item, parent))]
+
+  const discriminator = scalarField(parent, 'type')
+  const discriminated = alternatives.some((item) => {
+    const type = dereference(item)?.properties?.type
+    return type && (Object.hasOwn(type, 'const') || Array.isArray(type.enum))
+  })
+  const selected = discriminator === undefined || !discriminated
+    ? alternatives
+    : alternatives.filter((item) => acceptsDiscriminator(item, discriminator))
+  const discriminatorOnly = discriminated && selected.length === 0
+    ? alternatives.map((item) => ({ properties: { type: dereference(item)?.properties?.type } }))
+    : []
+  return [resolved, ...allOf.flatMap((item) => schemaBranches(item, parent)), ...selected.flatMap((item) => schemaBranches(item, parent)), ...discriminatorOnly]
+}
+
+function fieldForKey(schema, key, parent) {
+  for (const branch of schemaBranches(schema, parent)) {
+    const properties = branch.properties ?? {}
+    if (Object.hasOwn(properties, key)) {
+      return { schema: properties[key], canonical: key, alias: false, dynamic: false }
+    }
+    for (const [canonical, property] of Object.entries(properties)) {
+      if (property['x-serde-aliases']?.includes(key)) {
+        return { schema: property, canonical, alias: true, dynamic: false }
+      }
     }
   }
+  for (const branch of schemaBranches(schema, parent)) {
+    if (branch.additionalProperties && branch.additionalProperties !== true) {
+      return { schema: branch.additionalProperties, canonical: key, alias: false, dynamic: true }
+    }
+  }
+  return null
+}
 
-  if (isDynamicKey(path)) {
-    // `profiles.$profile.config` keys are configuration parameters too, so
-    // decide by the `.config` suffix rather than the first path segment.
+function keyDecoration(key, schema, parent, path) {
+  const field = fieldForKey(schema, key, parent)
+  if (!field) {
+    return {
+      className: 'pgroles-unrecognized',
+      title: 'Unrecognized field. pgroles currently ignores unknown YAML keys.',
+      recognized: false,
+    }
+  }
+  if (field.dynamic) {
     return {
       className: 'pgroles-identifier',
-      title: normalizedPath(path).endsWith('.config')
-        ? 'PostgreSQL configuration parameter.'
-        : 'Reusable pgroles profile name.',
+      title: field.schema.description ?? 'Named policy entry.',
       recognized: true,
+      field,
     }
   }
-
-  if (key === 'on' && isAllowedField(key, path, parent)) {
+  if (field.alias) {
     return {
       className: 'pgroles-deprecated',
-      title: 'Legacy alias. Prefer the canonical object field.',
+      title: `Legacy alias. Prefer the canonical ${field.canonical} field.`,
       recognized: true,
+      field,
     }
   }
-
-  if (isAllowedField(key, path, parent)) {
-    return {
-      className: 'pgroles-field',
-      title: fieldHelp[key] || `Recognized pgroles field: ${key}`,
-      recognized: true,
-    }
-  }
-
   return {
-    className: 'pgroles-unrecognized',
-    title: 'Unrecognized field. pgroles currently ignores unknown YAML keys.',
-    recognized: false,
+    className: path.length === 0 ? 'pgroles-section' : 'pgroles-field',
+    title: [field.schema.description ?? `Recognized pgroles field: ${key}`, fieldNotes[key]].filter(Boolean).join(' '),
+    recognized: true,
+    field,
   }
 }
 
@@ -259,24 +193,25 @@ function addScalarValues(ranges, node, decoration) {
   }
 }
 
-function walkNode(ranges, node, path = []) {
+function walkNode(ranges, node, schema = manifestSchema, path = []) {
   if (isMap(node)) {
     node.items.forEach((pair) => {
       const key = isScalar(pair.key) ? String(pair.key.value) : null
       if (!key) return
 
-      const keyStyle = keyDecoration(key, path, node)
+      const keyStyle = keyDecoration(key, schema, node, path)
       addRange(ranges, pair.key, keyStyle.className, keyStyle.title)
       if (keyStyle.recognized) {
-        addScalarValues(ranges, pair.value, valueDecoration(key, path))
+        addScalarValues(ranges, pair.value, valueDecoration(keyStyle.field.canonical, path))
       }
-      walkNode(ranges, pair.value, [...path, key])
+      walkNode(ranges, pair.value, keyStyle.field?.schema ?? {}, [...path, key])
     })
     return
   }
 
   if (isSeq(node)) {
-    node.items.forEach((item) => walkNode(ranges, item, [...path, '*']))
+    const itemSchema = dereference(schema)?.items ?? {}
+    node.items.forEach((item) => walkNode(ranges, item, itemSchema, [...path, '*']))
   }
 }
 

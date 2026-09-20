@@ -1,0 +1,4 @@
+{
+  "schema_version": "pgroles.policy.v1",
+  "desired_yaml": "roles:\n  - name: readers\n  - name: application\nmemberships:\n  - role: readers\n    exclusive: true\n    members:\n      - name: application\n"
+}

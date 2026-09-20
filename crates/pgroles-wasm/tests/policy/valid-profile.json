@@ -1,0 +1,4 @@
+{
+  "schema_version": "pgroles.policy.v1",
+  "desired_yaml": "profiles:\n  reader:\n    grants:\n      - privileges: [SELECT]\n        object: { type: table, name: \"*\" }\nschemas:\n  - name: analytics\n    profiles: [reader]\n"
+}

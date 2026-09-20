@@ -9,6 +9,8 @@ on:
       - "crates/pgroles-wasm/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/check-manifest-metadata.sh"
+      - "scripts/generate-manifest-metadata.sh"
       - ".github/workflows/docs-pages.yml"
   pull_request:
     branches: [main]
@@ -19,6 +21,8 @@ on:
       - "crates/pgroles-wasm/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/check-manifest-metadata.sh"
+      - "scripts/generate-manifest-metadata.sh"
       - ".github/workflows/docs-pages.yml"
   workflow_dispatch:
 
@@ -67,6 +71,10 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Verify generated manifest metadata
+        run: scripts/check-manifest-metadata.sh
+        working-directory: ${{ github.workspace }}
 
       - name: Install active toolchain WASM target
         run: rustup target add wasm32-unknown-unknown

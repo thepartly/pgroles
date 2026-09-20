@@ -209,6 +209,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Verify generated manifest metadata
+        run: scripts/check-manifest-metadata.sh
+
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 

@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::authoring::prepare_policy;
 use crate::bounds::{
     MAX_CONFIG_ENTRIES, MAX_DEFAULT_PRIVILEGES, MAX_GRANTS, MAX_MEMBERSHIPS, MAX_PRIVILEGES,
     MAX_ROLES, MAX_SCHEMAS,
 };
 use crate::diff::{Change, ReconciliationMode, plan_changes};
-use crate::manifest::{ObjectType, Privilege, expand_manifest, parse_manifest};
+use crate::manifest::{ObjectType, Privilege};
 use crate::model::{
     DefaultPrivKey, DefaultPrivState, DefaultPrivilegeScope, GrantKey, GrantState, Grantee,
     MembershipEdge, RoleGraph, RoleState, SchemaState,
@@ -321,12 +322,18 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
         ));
     }
     request.validate_bounds()?;
-    let manifest = parse_manifest(&request.desired_yaml)?;
-    if manifest.roles.iter().any(|role| role.password.is_some()) {
+    let prepared = prepare_policy(&request.desired_yaml)?;
+    if prepared
+        .manifest
+        .roles
+        .iter()
+        .any(|role| role.password.is_some())
+    {
         return Err(AnalysisError::PasswordSourceNotAllowed);
     }
-    let expanded = expand_manifest(&manifest)?;
-    let desired = RoleGraph::from_expanded(&expanded, manifest.default_owner.as_deref())?;
+    let manifest = prepared.manifest;
+    let expanded = prepared.expanded;
+    let desired = prepared.desired;
     let mut graph = request.current.into_graph();
     let mut set_role: BTreeMap<_, _> = request
         .executor

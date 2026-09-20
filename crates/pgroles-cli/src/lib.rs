@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 
 pub mod candidate;
 
+use pgroles_core::authoring::{PreparedPolicy, prepare_policy};
 use pgroles_core::composition::{self, ComposedPolicy, PolicyBundle, PolicyDocument};
 use pgroles_core::diff::{self, Change};
 use pgroles_core::manifest::{self, ExpandedManifest, PolicyManifest, RoleRetirement};
@@ -46,38 +47,23 @@ pub fn parse_and_expand(yaml: &str) -> Result<ExpandedManifest> {
 /// Full validation: parse, expand, and build a RoleGraph from a manifest string.
 /// Returns the expanded manifest and the desired RoleGraph.
 pub fn validate_manifest(yaml: &str) -> Result<ValidatedManifest> {
-    let policy_manifest = parse(yaml)?;
+    let prepared = prepare_policy(yaml).map_err(|err| anyhow::anyhow!("{err}"))?;
 
-    if policy_manifest.roles.is_empty()
-        && policy_manifest.schemas.is_empty()
-        && policy_manifest.grants.is_empty()
-        && policy_manifest.memberships.is_empty()
+    if prepared.manifest.roles.is_empty()
+        && prepared.manifest.schemas.is_empty()
+        && prepared.manifest.grants.is_empty()
+        && prepared.manifest.memberships.is_empty()
     {
         tracing::warn!(
             "manifest defines no roles, schemas, grants, or memberships — is the file correct?"
         );
     }
 
-    let expanded =
-        manifest::expand_manifest(&policy_manifest).map_err(|err| anyhow::anyhow!("{err}"))?;
-
-    let default_owner = policy_manifest.default_owner.as_deref();
-    let desired = RoleGraph::from_expanded(&expanded, default_owner)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-
-    Ok(ValidatedManifest {
-        manifest: policy_manifest,
-        expanded,
-        desired,
-    })
+    Ok(prepared)
 }
 
 /// The result of successfully validating a manifest.
-pub struct ValidatedManifest {
-    pub manifest: PolicyManifest,
-    pub expanded: ExpandedManifest,
-    pub desired: RoleGraph,
-}
+pub type ValidatedManifest = PreparedPolicy;
 
 /// Load, validate, and compose a policy bundle from disk.
 pub fn validate_bundle_file(path: &Path) -> Result<ValidatedBundle> {

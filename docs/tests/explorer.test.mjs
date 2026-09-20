@@ -5,6 +5,8 @@ import {
   analyzeRequest,
   explorerImport,
   loadAnalyzer,
+  loadPolicyEngine,
+  policyRequest,
   readableWasmError,
   resetAnalyzerForTests,
   validateSnapshotFileSize,
@@ -31,6 +33,17 @@ test('builds the versioned request expected by the Rust boundary', () => {
   assert.deepEqual(analyzeRequest({ current: { roles: {} }, desiredYaml: 'roles: []', mode: 'additive', executorRole: 'deployer' }), {
     schema_version: 'pgroles.explorer.v1', current: { roles: {} }, desired_yaml: 'roles: []', mode: 'additive', executor: { role: 'deployer', superuser: false, memberships: [], new_membership_set_role: 'unknown', new_role_set_role: 'unknown', new_role_inherit: 'unknown', new_role_admin_option: 'unknown' },
   })
+})
+
+test('authoring needs only YAML and shares initialization with analysis', async () => {
+  resetAnalyzerForTests()
+  let imports = 0
+  const engine = { default: async () => {}, validate: () => {}, compile: () => {}, analyze: () => {} }
+  const importer = async () => { imports += 1; return engine }
+  assert.equal(await loadPolicyEngine('/pgroles', importer), engine)
+  assert.equal(await loadAnalyzer('/pgroles', importer), engine.analyze)
+  assert.equal(imports, 1)
+  assert.deepEqual(policyRequest('roles: []'), { schema_version: 'pgroles.policy.v1', desired_yaml: 'roles: []' })
 })
 
 test('preserves every imported executor authority fact in the request', () => {

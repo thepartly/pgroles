@@ -22,6 +22,7 @@ import {
   validateSnapshotFileSize,
 } from '@/lib/pgrolesExplorer.mjs'
 import { explorerScenarios, getExplorerScenario } from '@/lib/explorerScenarios.mjs'
+import { PolicyAuthoring } from '@/components/PolicyAuthoring'
 
 const DEFAULT_SCENARIO = explorerScenarios[0]
 
@@ -348,10 +349,11 @@ export function PgrolesExplorer() {
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(18rem,.8fr)]">
         <div className="overflow-hidden rounded-2xl border bg-white dark:bg-stone-900">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-            <div><h2 className="font-display text-base font-semibold">Desired YAML</h2><p className="text-xs text-muted-foreground">Edit locally, then analyze the plan.</p></div>
+            <div><h2 className="font-display text-base font-semibold">Desired YAML</h2><p className="text-xs text-muted-foreground">Validate, inspect expansion, then compare with the snapshot.</p></div>
             <select aria-label="Load bundled scenario" value={activeScenarioId} onChange={(event) => selectScenario(event.target.value)} className="rounded-md border bg-transparent px-3 py-2 text-sm">{explorerScenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}</select>
           </div>
           <textarea aria-label="Desired YAML" spellCheck="false" value={desiredYaml} onChange={(event) => { setDesiredYaml(event.target.value); clearAnalysis() }} className="min-h-[28rem] w-full resize-y bg-stone-950 p-4 font-mono text-[13px] leading-6 text-stone-100 outline-none" />
+          <PolicyAuthoring desiredYaml={desiredYaml} basePath={router.basePath} />
         </div>
 
         <div className="space-y-5">
@@ -382,7 +384,7 @@ export function PgrolesExplorer() {
             <button type="button" onClick={runAnalysis} disabled={loading || !executorRole.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-3 font-semibold text-stone-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">
               {loading ? <IconLoader2 className="size-5 animate-spin" /> : <IconPlayerPlay className="size-5" />} {loading ? 'Loading analyzer…' : 'Analyze plan'}
             </button>
-            <p className="text-xs leading-5 text-muted-foreground">The WASM module is downloaded only after you choose Analyze plan.</p>
+            <p className="text-xs leading-5 text-muted-foreground">The WASM module is downloaded when you first validate, inspect expansion, or analyze a plan.</p>
           </section>
         </div>
       </section>

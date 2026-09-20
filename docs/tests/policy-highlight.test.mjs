@@ -93,8 +93,29 @@ memberships:
   for (const key of ['preserve_undeclared_grants', 'exclusive']) {
     const [range] = rangesForKey(code, key)
     assert.equal(range.className, 'pgroles-field')
-    assert.match(range.title, /Additive mode skips|Explicit ensure: absent/)
+    assert.match(range.title, key === 'exclusive' ? /complete membership/ : /Preserve this role/)
   }
+})
+
+test('uses schema variants, aliases, and dynamic maps', () => {
+  const code = `profiles:
+  warehouse:
+    config:
+      statement_timeout: 5s
+grants:
+  - role: warehouse_reader
+    on:
+      type: table
+      schema: warehouse
+      name: orders
+auth_providers:
+  - type: cloud_sql_iam
+    project: example-project
+`
+  assertRecognizedPolicy(code, 'schema variants, aliases, and dynamic maps')
+  const [alias] = rangesForKey(code, 'on')
+  assert.equal(alias.className, 'pgroles-deprecated')
+  assert.match(alias.title, /canonical object field/)
 })
 
 test('marks fields outside their supported policy paths as unrecognized', () => {
@@ -112,4 +133,22 @@ memberships:
     .filter((range) => range.className === 'pgroles-unrecognized')
     .map((range) => code.slice(range.start, range.end))
   assert.deepEqual(unrecognized, ['exclusive', 'exclusive', 'boguskey'])
+})
+
+test('does not recognize unrelated or unknown provider fields', () => {
+  const code = `auth_providers:
+  - type: cloud_sql_iam
+    project: acme
+    region: unrelated
+  - type: not_a_provider
+    project: unknown
+roles:
+  - name: reader
+    imaginary_option: true
+`
+  const unrecognized = getPgrolesSemanticRanges(code).ranges
+    .filter((range) => range.className === 'pgroles-unrecognized')
+    .map((range) => code.slice(range.start, range.end))
+  assert.deepEqual(unrecognized, ['region', 'project', 'imaginary_option'])
+  assert(rangesForKey(code, 'type').every((range) => range.className === 'pgroles-field'))
 })

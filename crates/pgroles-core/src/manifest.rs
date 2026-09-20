@@ -11,6 +11,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ManifestError {
+    #[error("policy YAML has {actual} bytes, which exceeds the limit of {limit}")]
+    YamlTooLarge { actual: usize, limit: usize },
+
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
@@ -264,7 +267,7 @@ impl Ensure {
 // ---------------------------------------------------------------------------
 
 /// Top-level policy manifest — the YAML file that users write.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyManifest {
     /// Default role naming pattern for schema profile bindings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,7 +365,7 @@ pub enum AuthProvider {
 }
 
 /// A reusable privilege profile — defines what grants a role should have.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Profile {
     #[serde(default)]
     /// Whether the role may initiate database sessions.
@@ -395,11 +398,12 @@ pub struct Profile {
 }
 
 /// A grant template within a profile (schema is filled in during expansion).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileGrant {
     /// PostgreSQL privileges to reconcile on the selected objects.
     pub privileges: Vec<Privilege>,
     #[serde(alias = "on")]
+    #[schemars(extend("x-serde-aliases" = ["on"]))]
     /// Object kind and target to which the privileges apply.
     pub object: ProfileObjectTarget,
     /// Whether the privilege must be present or absent. Expansion rejects
@@ -412,7 +416,7 @@ pub struct ProfileGrant {
 }
 
 /// Object target within a profile — schema is omitted (filled during expansion).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileObjectTarget {
     #[serde(rename = "type")]
     /// PostgreSQL object kind.
@@ -497,7 +501,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// A concrete role definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RoleDefinition {
     /// PostgreSQL role name.
     pub name: String,
@@ -668,6 +672,7 @@ pub struct Grant {
     /// PostgreSQL privileges to reconcile on the selected objects.
     pub privileges: Vec<Privilege>,
     #[serde(alias = "on")]
+    #[schemars(extend("x-serde-aliases" = ["on"]))]
     /// Object kind and target to which the privileges apply.
     pub object: ObjectTarget,
     #[serde(default, skip_serializing_if = "Ensure::is_present")]
