@@ -24,7 +24,8 @@ use pgroles_core::diff::{ReconciliationMode, additive_ignores_absence_assertions
 use pgroles_core::explorer::ExecutorFacts;
 use pgroles_core::ownership::validate_changes_against_managed_surface;
 use pgroles_core::review_artifact::{
-    EvidenceStatus, ExplorationOmissionReason, PolicyProvenance, PreflightCheck, PreflightEvidence,
+    EvidenceCheck, EvidenceCoverage, EvidenceCoverageKind, EvidenceStatus,
+    ExplorationOmissionReason, PolicyProvenance, PreflightCheck, PreflightEvidence,
     PreflightFinding, ReviewArtifactInput, ReviewContext, ReviewExploration, ReviewIdentity,
     ReviewMode, ReviewProvenance, build_review_artifact,
 };
@@ -943,6 +944,79 @@ struct ReviewArtifactWriteInput<'a> {
     drop_safety: &'a pgroles_inspect::DropRoleSafetyAssessment,
 }
 
+fn targeted_authority_coverage(
+    changes: &[pgroles_core::diff::Change],
+    inspector_is_superuser: bool,
+    pg_major_version: i32,
+) -> EvidenceCoverage {
+    use pgroles_core::diff::Change;
+    let mut checks_performed = std::collections::BTreeSet::new();
+    let mut checked_change_indices = Vec::new();
+    let has_membership_change = changes.iter().any(|change| {
+        matches!(
+            change,
+            Change::AddMember { .. } | Change::RemoveMember { .. }
+        )
+    });
+    let phase_checks_active = !inspector_is_superuser && pg_major_version >= 16;
+    for (index, change) in changes.iter().enumerate() {
+        let checked = match change {
+            Change::SetDefaultPrivilege { .. } => {
+                checks_performed.insert(EvidenceCheck::DefaultPrivilegeOwner);
+                true
+            }
+            Change::RevokeDefaultPrivilege { .. } => {
+                if phase_checks_active && has_membership_change {
+                    checks_performed.insert(EvidenceCheck::PlanOrderAuthority);
+                } else {
+                    checks_performed.insert(EvidenceCheck::DefaultPrivilegeOwner);
+                }
+                true
+            }
+            Change::Revoke { grantor, .. } => {
+                if grantor.is_some() {
+                    checks_performed.insert(EvidenceCheck::GrantorReachability);
+                } else {
+                    checks_performed.insert(EvidenceCheck::RevokeAclOwnership);
+                }
+                true
+            }
+            Change::AddMember { role, .. } => {
+                let checked = pgroles_core::manifest::is_predefined_role(role);
+                if checked {
+                    checks_performed.insert(EvidenceCheck::PredefinedRoleMembership);
+                }
+                checked
+            }
+            Change::RemoveMember { role, grantor, .. } => {
+                if pgroles_core::manifest::is_predefined_role(role) {
+                    checks_performed.insert(EvidenceCheck::PredefinedRoleMembership);
+                }
+                if grantor.is_some() {
+                    checks_performed.insert(EvidenceCheck::GrantorReachability);
+                    if phase_checks_active {
+                        checks_performed.insert(EvidenceCheck::PlanOrderAuthority);
+                    }
+                }
+                grantor.is_some() || pgroles_core::manifest::is_predefined_role(role)
+            }
+            _ => false,
+        };
+        if checked {
+            checked_change_indices.push(index);
+        }
+    }
+    let unchecked_change_indices = (0..changes.len())
+        .filter(|index| !checked_change_indices.contains(index))
+        .collect();
+    EvidenceCoverage {
+        kind: EvidenceCoverageKind::Targeted,
+        checks_performed: checks_performed.into_iter().collect(),
+        checked_change_indices,
+        unchecked_change_indices,
+    }
+}
+
 fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
     let ReviewArtifactWriteInput {
         path,
@@ -962,21 +1036,37 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
     } = input;
     let intended_executor = intended_executor.unwrap_or(&inspector.user_name);
     let intended_is_inspector = intended_executor == inspector.user_name;
+    let authority_coverage =
+        targeted_authority_coverage(changes, inspector.superuser, sql_context.pg_major_version);
+    let unchecked_changes = (0..changes.len()).collect::<Vec<_>>();
+    let drop_checked = changes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, change)| {
+            matches!(change, pgroles_core::diff::Change::DropRole { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let drop_unchecked = (0..changes.len())
+        .filter(|index| !drop_checked.contains(index))
+        .collect();
     let mut preflight = vec![
         PreflightEvidence {
             check: PreflightCheck::ExecutorAuthority,
             status: if authority_issues.is_empty() {
-                EvidenceStatus::Passed
+                EvidenceStatus::Unknown
             } else {
                 EvidenceStatus::Failed
             },
             actor_role: Some(inspector.user_name.clone()),
             issue_count: authority_issues.len(),
             issues: authority_preflight_findings(authority_issues),
+            coverage: authority_coverage,
         },
         PreflightEvidence {
             check: PreflightCheck::RoleDropSafety,
-            status: if drop_safety.blockers.issues.is_empty() {
+            status: if drop_checked.is_empty() {
+                EvidenceStatus::Unknown
+            } else if drop_safety.blockers.issues.is_empty() {
                 EvidenceStatus::Passed
             } else {
                 EvidenceStatus::Failed
@@ -984,6 +1074,16 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
             actor_role: None,
             issue_count: drop_safety.warnings.issues.len() + drop_safety.blockers.issues.len(),
             issues: drop_safety_preflight_findings(drop_safety),
+            coverage: EvidenceCoverage {
+                kind: EvidenceCoverageKind::Targeted,
+                checks_performed: if drop_checked.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![EvidenceCheck::DropRoleSafety]
+                },
+                checked_change_indices: drop_checked,
+                unchecked_change_indices: drop_unchecked,
+            },
         },
         PreflightEvidence {
             check: PreflightCheck::ServerCompatibility,
@@ -991,6 +1091,12 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
             actor_role: None,
             issue_count: 0,
             issues: Vec::new(),
+            coverage: EvidenceCoverage {
+                kind: EvidenceCoverageKind::Targeted,
+                checks_performed: Vec::new(),
+                checked_change_indices: Vec::new(),
+                unchecked_change_indices: unchecked_changes.clone(),
+            },
         },
     ];
     if !intended_is_inspector {
@@ -1000,6 +1106,12 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
             actor_role: Some(intended_executor.to_string()),
             issue_count: 0,
             issues: Vec::new(),
+            coverage: EvidenceCoverage {
+                kind: EvidenceCoverageKind::Targeted,
+                checks_performed: Vec::new(),
+                checked_change_indices: Vec::new(),
+                unchecked_change_indices: unchecked_changes,
+            },
         });
     }
     let artifact = build_review_artifact(ReviewArtifactInput {
@@ -1024,6 +1136,7 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
                 role: intended_executor.to_string(),
                 superuser: intended_is_inspector.then_some(inspector.superuser),
             },
+            authority_graph_complete: false,
         },
         preflight,
         current,

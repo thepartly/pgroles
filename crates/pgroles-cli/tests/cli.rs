@@ -1476,6 +1476,20 @@ mod live_db {
         })
     }
 
+    fn query_has_role_usage(member: &str, role: &str) -> bool {
+        with_runtime(async {
+            let pool = PgPool::connect(&database_url())
+                .await
+                .expect("failed to connect to live test database");
+            sqlx::query_scalar("SELECT pg_has_role($1, $2, 'USAGE')")
+                .bind(member)
+                .bind(role)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to query role usage")
+        })
+    }
+
     fn query_has_function_privilege(role: &str, signature: &str) -> bool {
         with_runtime(async {
             let pool = PgPool::connect(&database_url())
@@ -3006,7 +3020,12 @@ roles:
             .iter()
             .find(|item| item["check"] == "executor_authority")
             .expect("executor authority evidence");
-        assert_eq!(authority["status"], "passed");
+        assert_eq!(authority["status"], "unknown");
+        assert_eq!(authority["coverage"]["kind"], "targeted");
+        assert_eq!(
+            authority["coverage"]["checks_performed"],
+            serde_json::json!([])
+        );
         assert_eq!(
             authority["actor_role"],
             artifact_json["context"]["inspector"]["role"]
@@ -3101,6 +3120,162 @@ roles:
             "diff must not create the planned role"
         );
         drop(bundle_dir);
+    }
+
+    #[test]
+    #[ignore]
+    fn review_authority_is_unknown_for_unchecked_create_as_ordinary_inspector() {
+        let inspector = unique_name("review_inspector");
+        let planned = unique_name("review_planned_role");
+        let _cleanup = TestDbCleanup::new(format!(
+            r#"DROP ROLE IF EXISTS "{planned}"; DROP ROLE IF EXISTS "{inspector}";"#
+        ));
+        execute_sql(&format!(
+            r#"CREATE ROLE "{inspector}" LOGIN PASSWORD 'testpassword';"#
+        ));
+        let manifest = write_temp_manifest(&format!("roles:\n  - name: {planned}\n"));
+        let artifact = NamedTempFile::new().expect("artifact");
+
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url_for_role(&inspector, "testpassword"),
+                "--format",
+                "markdown",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+                "--no-exit-code",
+            ])
+            .assert()
+            .success();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.path()).expect("read review artifact"))
+                .expect("review artifact JSON");
+        let authority = value["preflight"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["check"] == "executor_authority")
+            .unwrap();
+        assert_eq!(authority["status"], "unknown");
+        assert_eq!(authority["coverage"]["kind"], "targeted");
+        assert_eq!(
+            authority["coverage"]["checks_performed"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            authority["coverage"]["checked_change_indices"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            authority["coverage"]["unchecked_change_indices"],
+            serde_json::json!([0])
+        );
+        assert!(!query_role_exists(&planned));
+    }
+
+    #[test]
+    #[ignore]
+    fn review_does_not_disprove_owner_authority_through_unmanaged_intermediate() {
+        let inspector = unique_name("review_path_inspector");
+        let intermediate = unique_name("review_path_intermediate");
+        let owner = unique_name("review_path_owner");
+        let _cleanup = TestDbCleanup::new(format!(
+            r#"
+            REVOKE "{owner}" FROM "{intermediate}";
+            REVOKE "{intermediate}" FROM "{inspector}";
+            DROP ROLE IF EXISTS "{owner}";
+            DROP ROLE IF EXISTS "{intermediate}";
+            DROP ROLE IF EXISTS "{inspector}";
+            "#
+        ));
+        execute_sql(&format!(
+            r#"
+            CREATE ROLE "{inspector}" LOGIN PASSWORD 'testpassword';
+            CREATE ROLE "{intermediate}";
+            CREATE ROLE "{owner}";
+            GRANT "{owner}" TO "{intermediate}" WITH INHERIT TRUE;
+            GRANT "{intermediate}" TO "{inspector}" WITH INHERIT TRUE;
+            "#
+        ));
+        assert!(
+            query_has_role_usage(&inspector, &owner),
+            "the live unmanaged intermediate must provide owner USAGE"
+        );
+        let manifest = write_temp_manifest(&format!(
+            r#"
+roles:
+  - name: {inspector}
+    external: true
+  - name: {owner}
+    external: true
+default_privileges:
+  - owner: {owner}
+    schema: public
+    grant:
+      - role: {inspector}
+        privileges: [SELECT]
+        on_type: table
+"#
+        ));
+        let artifact = NamedTempFile::new().expect("artifact");
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url_for_role(&inspector, "testpassword"),
+                "--format",
+                "markdown",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+                "--no-exit-code",
+            ])
+            .assert()
+            .success();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.path()).expect("read review artifact"))
+                .expect("review artifact JSON");
+        assert_eq!(value["context"]["authority_graph_complete"], false);
+        assert!(
+            value["recorded"]["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["change"]["kind"] == "set_default_privilege")
+        );
+        assert!(
+            !value["recorded"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["kind"] == "required_role_unavailable"
+                    && finding["role"] == owner)
+        );
+        assert!(
+            value["recorded"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |finding| finding["kind"] == "required_role_reachability_unknown"
+                        && finding["role"] == owner
+                )
+        );
+        let authority = value["preflight"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["check"] == "executor_authority")
+            .unwrap();
+        assert_eq!(authority["status"], "unknown");
+        assert_eq!(authority["issue_count"], 0);
     }
 
     #[test]

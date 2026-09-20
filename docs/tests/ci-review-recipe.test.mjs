@@ -16,7 +16,8 @@ const comment = steps.find((step) => step.name === 'Comment on PR')
 test('documented CI recipe accepts drift but propagates real failures', () => {
   const directory = mkdtempSync(join(tmpdir(), 'pgroles-ci-recipe-'))
   try {
-    writeFileSync(join(directory, 'docker'), '#!/bin/sh\ncat "$REPORT_SOURCE"\nexit "$DIFF_EXIT"\n', { mode: 0o755 })
+    writeFileSync(join(directory, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_OUTPUT"\ncat "$REPORT_SOURCE"\nexit "$DIFF_EXIT"\n', { mode: 0o755 })
+    writeFileSync(join(directory, 'git'), '#!/bin/sh\ntest "$1" = rev-parse && test "$2" = HEAD || exit 1\nprintf "%s\\n" 0123456789abcdef\n', { mode: 0o755 })
     const reportPath = join(directory, 'source.md')
     const payload = '## Review\nA role named `$(exit 92)` stays report data.\n'
     writeFileSync(reportPath, payload)
@@ -24,10 +25,13 @@ test('documented CI recipe accepts drift but propagates real failures', () => {
       const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', generate.run], {
         cwd: directory,
         encoding: 'utf8',
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GITHUB_WORKSPACE: directory, REPORT_SOURCE: reportPath, DIFF_EXIT: String(status) },
+        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GITHUB_WORKSPACE: directory, REPORT_SOURCE: reportPath, ARGS_OUTPUT: join(directory, 'docker-args'), DIFF_EXIT: String(status) },
       })
       assert.equal(result.status, expected, result.stderr)
       assert.equal(readFileSync(join(directory, 'review.md'), 'utf8'), payload)
+      const argumentsPassed = readFileSync(join(directory, 'docker-args'), 'utf8').split('\n')
+      assert.equal(argumentsPassed[argumentsPassed.indexOf('--target-label') + 1], 'staging')
+      assert.equal(argumentsPassed[argumentsPassed.indexOf('--policy-commit') + 1], '0123456789abcdef')
     }
   } finally {
     rmSync(directory, { recursive: true, force: true })

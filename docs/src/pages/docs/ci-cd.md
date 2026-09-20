@@ -98,6 +98,8 @@ connection, validation, inspection, or export errors:
             -v "$GITHUB_WORKSPACE:/work" \
             ghcr.io/thepartly/pgroles:latest \
             diff -f /work/pgroles.yaml --mode adopt --format markdown \
+            --target-label staging \
+            --policy-commit "$(git rev-parse HEAD)" \
             --review-out /work/review.pgroles.json --exit-code > review.md; then
             status=0
           else
@@ -257,6 +259,11 @@ The policy content digest covers the original YAML bytes for a single manifest,
 or the serialized composed manifest for a bundle.
 The latter is a label, not impersonation: live preflight evidence collected as
 the inspecting connection identity does not verify a different executor.
+Authority evidence identifies the targeted checks' coverage and unchecked
+changes. Finding no issue in those checks does not establish authority for the
+whole plan. Native phase analysis marks its scoped authority graph as incomplete:
+a missing path is unknown, rather than proof that the executor cannot reach a
+role. Live preflight failures remain separate from that modelled uncertainty.
 
 Neither review fingerprints nor explorer fingerprints are approval tokens.
 At deployment, inspect current database state again, run live preflight, and
