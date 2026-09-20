@@ -96,7 +96,7 @@ GROUP BY relrowsecurity;`,
       },
       {
         id: "tenant-policy-acme",
-        title: "Apply Acme’s policy",
+        title: "Query as Acme",
         why: "The policy compares the active database identity with each row’s customer. acme_app should see Acme and nothing from Globex.",
         prompt: "Read orders as acme_app with the tenant policy installed.",
         setup: policySeed,
@@ -119,7 +119,7 @@ SELECT id, customer FROM app.orders ORDER BY id;`,
       },
       {
         id: "tenant-policy-globex",
-        title: "Apply Globex’s policy",
+        title: "Query as Globex",
         why: "The same SQL and table grant produce a different row set under a different active identity.",
         prompt: "Run the unchanged query as globex_app.",
         setup: policySeed,
@@ -171,7 +171,7 @@ FROM app.orders;`,
           row?.accepted_rows === 1 &&
           row?.rejected_rows === 0,
         observation:
-          "The valid insert committed before the next statement failed. WITH CHECK rejected the proposed Globex value with SQLSTATE 42501, so the cross-tenant row never appeared.",
+          "This lab executes each statement separately, without an explicit transaction. The Acme insert therefore commits before the Globex insert fails. In a single transaction without error recovery, the failure would abort that transaction. WITH CHECK returned SQLSTATE 42501, so the cross-tenant row never appeared.",
       },
       {
         id: "force-owner",

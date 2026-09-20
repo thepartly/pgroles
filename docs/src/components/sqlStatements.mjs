@@ -1,12 +1,10 @@
 // Statement-at-a-time SQL execution for the labs, shared by the React engine
 // and the Node test suite.
 //
-// PGlite's `exec` runs a multi-statement string inside one implicit
-// transaction, so a failing statement rolls back everything before it. psql
-// does the opposite: each statement autocommits and execution stops at the
-// first error. The lessons rely on psql's behavior — a step can GRANT, then
-// deliberately hit an expected error, and the grant must survive — so we
-// split the input into statements and execute them one at a time.
+// These labs execute statements one at a time and stop at the first error.
+// Without an explicit transaction, each successful statement commits before
+// the next begins. This chosen behavior lets a lesson make a change and then
+// test an expected failure without rolling the earlier change back.
 
 /**
  * Split SQL text into individual statements on top-level semicolons,
@@ -69,9 +67,9 @@ export function splitSqlStatements(sql) {
 }
 
 /**
- * Execute SQL statement-by-statement against a PGlite database. Earlier
- * statements autocommit; execution stops at the first error, which is
- * reported alongside every result produced before it.
+ * Execute SQL statement-by-statement against a PGlite database, stopping at
+ * the first error and preserving earlier results. Without an explicit
+ * transaction, each successful statement autocommits.
  */
 export async function runSql(database, sql) {
   const output = { commands: [], results: [], error: null, errorCode: null };

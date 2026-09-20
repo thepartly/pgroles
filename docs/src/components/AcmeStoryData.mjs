@@ -252,7 +252,7 @@ const chapters = {
       },
       {
         title: "Open the schema gate — and watch the error move",
-        why: "Schema USAGE makes names inside app reachable, and nothing more. Statements run one at a time here, like psql, so a single run can grant the gate, become Alice with SET ROLE — the same switch the role selector uses — and immediately retest the report through her eyes.",
+        why: "Schema USAGE makes names inside app reachable, and nothing more. This lab executes each statement separately, so a single run can grant the gate, become Alice with SET ROLE — the same switch the role selector uses — and immediately retest the report through her eyes.",
         prompt: "Grant USAGE, become Alice, and run the report again.",
         setup: founderSeed,
         role: "postgres",
@@ -1082,7 +1082,7 @@ WHERE granted.rolname = 'analyst' AND member.rolname = 'team_lead';`,
       "Effective access hides outside ordinary direct ACLs. Investigate four surprises: PUBLIC, SECURITY DEFINER, delegated grant options, and broad predefined roles.",
     next: {
       href: "/docs/postgresql-playground",
-      title: "Audit the complete Acme database",
+      title: "Explore the core Acme sandbox",
     },
     actors: [
       ["auditor", "Auditor"],
@@ -1191,10 +1191,10 @@ SET SESSION AUTHORIZATION postgres;`,
           "Contractor can now read through a grant made by team_lead. pgroles does not model application grant options, so this boundary needs a separate review.",
       },
       {
-        title: "Surprise 4: a predefined read-everything role",
-        why: "PostgreSQL ships broad predefined roles. pg_read_all_data passes read checks for every schema and matching object in the database, current and future, without an ACL entry anywhere. pg_monitor is different: it exposes monitoring information rather than application-table data.",
+        title: "Surprise 4: broad read privileges without per-table grants",
+        why: "PostgreSQL ships predefined roles with distinct capabilities. pg_read_all_data supplies broad read privileges without requiring a grant on each table, while pg_monitor exposes monitoring information rather than application-table data. pg_read_all_data remains subject to row-level security; it does not carry BYPASSRLS.",
         prompt:
-          "Hand contractor the read-everything key, then run the report as contractor.",
+          "Grant contractor pg_read_all_data, then verify schema USAGE and table SELECT without an explicit app.orders ACL for either grantee.",
         setup: completeSeed,
         role: "postgres",
         sql: `GRANT pg_read_all_data TO contractor;
@@ -1211,8 +1211,8 @@ ${reportSql}`,
   ) AS acl_entry;`,
         cards: (row, output) => [
           [
-            "Table ACL entries",
-            row?.acl_entry ? "found" : "none anywhere",
+            "Explicit app.orders ACL",
+            row?.acl_entry ? "found" : "none for these grantees on app.orders",
             row?.acl_entry ? "blocked" : "focus",
           ],
           [
@@ -1221,8 +1221,8 @@ ${reportSql}`,
             row?.via_predefined ? "focus" : "blocked",
           ],
           [
-            "Every read check",
-            row?.schema_usage && row?.object_select ? "passes" : "blocked",
+            "Schema USAGE and table SELECT",
+            row?.schema_usage && row?.object_select ? "allowed" : "blocked",
             row?.schema_usage && row?.object_select ? "pass" : "blocked",
           ],
           [
@@ -1239,15 +1239,15 @@ ${reportSql}`,
           row?.object_select &&
           !row?.acl_entry,
         observation:
-          "Neither contractor nor pg_read_all_data appears in any table ACL, yet every read check passes—PostgreSQL special-cases the predefined roles inside its permission logic, so this membership opens every schema and table, legacy included. In pgroles policy, declare who may hold a predefined role and mark the stanza exclusive: declared members converge, and anyone else gets planned for revocation.",
+          "pg_read_all_data supplies schema USAGE and broad SELECT privileges without corresponding grants on each object. It does not bypass RLS, so table privileges alone do not establish which rows this role can read.",
       },
     ],
   },
   playground: {
-    eyebrow: "Final lab · The Acme database",
-    title: "Audit the whole story yourself",
+    eyebrow: "Final lab · Core Acme sandbox",
+    title: "Explore the core Acme database",
     description:
-      "The finished database is open. Choose a role, edit any query, and investigate every access path without changing the canonical scenario.",
+      "The canonical roles, ownership, grants, defaults, hierarchy, and security-review function are open. Choose a role and query freely; the tenant logins and RLS policies live in their separate disposable lab.",
     actors: [
       ["alice", "Alice"],
       ["bob", "Bob"],
@@ -1263,7 +1263,7 @@ ${reportSql}`,
     steps: [
       {
         title: "Find every path to orders",
-        why: "Start with evidence, not assumptions. Change the role or query freely; every run gets a fresh copy of Acme’s completed database.",
+        why: "Start with evidence, not assumptions. Change the role or query freely; every run gets a fresh copy of Acme’s core sandbox.",
         prompt:
           "Which roles can read orders, call the definer function, administer a membership, or own an object?",
         setup: completeSeed,

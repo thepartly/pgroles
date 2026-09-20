@@ -9,7 +9,7 @@ Acme has one `app.orders` table and two tenant-facing applications. Both need to
 
 ## Policy is another permission gate
 
-The migration owns this policy. It grants both application roles the ordinary schema and table privileges, enables RLS, and creates one policy for both roles. The policy names the roles and checks `current_user`, so the visible customer is tied to the active database identity.
+Define and maintain the row policy in a SQL migration. This SQL example includes ordinary grants to show both permission gates. The policy names the roles and checks `current_user`, so the visible customer is tied to the active database identity.
 
 ```sql
 GRANT USAGE ON SCHEMA app TO acme_app, globex_app;
@@ -29,7 +29,7 @@ CREATE POLICY tenant_rows ON app.orders
   );
 ```
 
-The pgroles policy records only the identities and ordinary grants around that migration:
+pgroles manages the surrounding roles and grants through this manifest:
 
 ```yaml {% schema="pgroles-manifest" %}
 roles:
@@ -63,9 +63,31 @@ Run the same query as each login and assert that `acme_app` sees only Acme rows 
 
 Table owners normally bypass RLS. `ALTER TABLE ... FORCE ROW LEVEL SECURITY` subjects an owner to policy evaluation, but it does not constrain superusers or roles with `BYPASSRLS`; use scoped test logins for these assertions. A table with RLS enabled and no applicable policy is default-deny for ordinary roles.
 
+FORCE makes ordinary owner queries obey RLS, but it does not remove the owner's ability to change or disable it. Keep application roles separate from table ownership and policy administration.
+
 ## Optional challenges
 
-Add a second permissive Globex policy and observe that permissive policies combine with `OR`: a broad policy can expand the rows a role sees. Then add a restrictive policy and observe that restrictive policies combine with `AND`. Remove every permissive policy and verify that restrictive policies alone allow zero rows.
+Use the “Query as Acme” step, which starts with `tenant_rows` installed. Select the database superuser to change policies, then use `SET ROLE acme_app` for the query. Put the policy changes and verification in the same script: every Run starts a fresh database.
+
+Add another permissive `SELECT` policy for `acme_app` that permits Globex rows:
+
+```sql
+CREATE POLICY extra_customer ON app.orders
+  FOR SELECT TO acme_app
+  USING (customer = 'Globex');
+```
+
+Run the `SELECT` again as `acme_app`: it now sees both customers.
+
+Only applicable policies participate: permissive policies combine with `OR`, while restrictive policies constrain them through `AND`. Add a restrictive policy for the same role and command:
+
+```sql
+CREATE POLICY acme_boundary ON app.orders
+  AS RESTRICTIVE FOR SELECT TO acme_app
+  USING (customer = 'Acme');
+```
+
+Remove every applicable permissive policy and verify that restrictive policies alone allow zero rows.
 
 Try replacing the two logins with one shared login and a caller-supplied tenant setting. That setting is freely chosen input, not authentication, unless a trusted boundary binds it to the caller's identity.
 

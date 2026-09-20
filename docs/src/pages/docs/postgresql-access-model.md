@@ -31,7 +31,7 @@ Superusers bypass ordinary privilege checks. Object owners start with ordinary p
 
 {% callout title="Three similar names, three different mechanisms" %}
 
-`PUBLIC` means every current and future database role when it appears as a grantee. The `public` schema is simply a schema with that name. Predefined roles such as `pg_read_all_data` are named capability roles that users receive through membership.
+`PUBLIC` means every current and future database role when it appears as a grantee. The `public` schema is simply a schema with that name. Predefined roles such as `pg_read_all_data` are built-in PostgreSQL roles with privileged capabilities; membership is how a recipient receives one.
 
 {% /callout %}
 
@@ -39,7 +39,7 @@ The lab shows `session_user → current_user` before and after each run. `sessio
 
 ## The policy so far
 
-The lab fixed today’s database, but the two `GRANT` statements you ran live only in PostgreSQL’s catalogs now—invisible history the moment your session ends. This is where **pgroles** enters the story: you describe the roles, grants, and memberships that *should* exist in a YAML policy, and `pgroles plan` compares that intent with the live database and proposes the exact SQL to converge them. Every chapter ends by recording its repair this way, and by chapter 3 the difference between “what the database accumulated” and “what the policy declares” becomes the whole plot.
+The lab fixed today’s database, and its `GRANT` statements remain durable catalog state. They do not, however, record version-controlled intent about which roles, grants, and memberships should exist. This is where **pgroles** enters the story: you declare that intent in YAML, and `pgroles plan` compares it with the live database and proposes SQL to converge them. Every chapter records its repair this way, and by chapter 3 the difference between “what the database accumulated” and “what the policy declares” becomes the whole plot.
 
 This first policy is the small team’s literal state: Alice receives both grants directly.
 

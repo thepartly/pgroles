@@ -24,11 +24,11 @@ test('shows default deny with actor identity, table SELECT, and active row secur
 test('shows each tenant only its own rows under the shared policy', async ({ page }) => {
   await page.goto(rlsUrl)
 
-  await runStep(page, 'Apply Acme’s policy')
+  await runStep(page, 'Query as Acme')
   await expect(page.getByRole('cell', { name: 'Acme', exact: true })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'Globex', exact: true })).toBeHidden()
 
-  await runStep(page, 'Apply Globex’s policy')
+  await runStep(page, 'Query as Globex')
   await expect(page.getByRole('cell', { name: 'Globex', exact: true })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'Acme', exact: true })).toBeHidden()
 })
