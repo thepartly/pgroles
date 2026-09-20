@@ -162,10 +162,7 @@ pub fn format_plan_sql(changes: &[Change]) -> String {
 
 /// Format a plan as SQL statements using an explicit SQL context.
 pub fn format_plan_sql_with_context(changes: &[Change], ctx: &sql::SqlContext) -> String {
-    sql::render_all_with_context(
-        &report::shape_plan_changes(changes, PlanOutputMode::Redacted),
-        ctx,
-    )
+    sql::render_all_with_context(&report::redact_password_changes(changes), ctx)
 }
 
 /// Format a plan as JSON for machine consumption.
@@ -1180,14 +1177,29 @@ roles:
 
     #[test]
     fn format_plan_sql_redacts_passwords() {
-        let changes = vec![Change::SetPassword {
-            name: "app-svc".to_string(),
-            password: "super-secret".to_string(),
-        }];
+        let changes = vec![
+            Change::AlterRole {
+                name: "app-svc".to_string(),
+                attributes: vec![pgroles_core::model::RoleAttribute::SetConfig(
+                    "application_name".to_string(),
+                    "planned-config".to_string(),
+                )],
+            },
+            Change::SetComment {
+                name: "app-svc".to_string(),
+                comment: Some("planned-comment".to_string()),
+            },
+            Change::SetPassword {
+                name: "app-svc".to_string(),
+                password: "super-secret".to_string(),
+            },
+        ];
 
         let sql = format_plan_sql_with_context(&changes, &sql::SqlContext::default());
         assert!(sql.contains("[REDACTED]"), "got: {sql}");
         assert!(!sql.contains("super-secret"), "got: {sql}");
+        assert!(sql.contains("planned-config"), "got: {sql}");
+        assert!(sql.contains("planned-comment"), "got: {sql}");
     }
 
     #[test]

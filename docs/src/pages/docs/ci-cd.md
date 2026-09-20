@@ -83,36 +83,65 @@ jobs:
 
 ### Diff as a PR comment
 
-Post the planned SQL changes as a PR comment for review:
+Generate the Markdown report and recorded review artifact from one planning run.
+The CLI exit code controls the CI decision; the explorer is a review interface.
+This example accepts both an unchanged plan and detected drift, while failing on
+connection, validation, inspection, or export errors:
 
 ```yaml
       - name: Generate diff
-        id: diff
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          OUTPUT=$(docker run --rm \
-            -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            -v "${{ github.workspace }}:/work" \
+          if docker run --rm \
+            -e DATABASE_URL \
+            -v "$GITHUB_WORKSPACE:/work" \
             ghcr.io/thepartly/pgroles:latest \
-            diff -f /work/pgroles.yaml 2>&1) || true
-          echo "diff<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+            diff -f /work/pgroles.yaml --mode adopt --format markdown \
+            --review-out /work/review.pgroles.json --exit-code > review.md; then
+            status=0
+          else
+            status=$?
+          fi
+          case "$status" in
+            0|2) ;;
+            *) exit "$status" ;;
+          esac
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pgroles-review
+          path: |
+            review.md
+            review.pgroles.json
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
-            const diff = `${{ steps.diff.outputs.diff }}`;
-            if (diff.trim()) {
+            const fs = require('node:fs');
+            const report = fs.readFileSync('review.md', 'utf8');
+            if (report.trim()) {
+              const body = report.length > 60000
+                ? report.slice(0, 60000) + '\n\nReport truncated. Download the pgroles-review workflow artifact for the complete review.'
+                : report;
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `### pgroles diff\n\`\`\`sql\n${diff}\n\`\`\``
+                body
               });
             }
 ```
+
+The comment step needs `pull-requests: write` permission. Treat uploaded reports
+as database metadata and choose access and retention accordingly. Report text is
+read as data from a file, never interpolated into JavaScript source.
+This recipe publishes a review even when drift exists; use the earlier drift
+check to fail on differences. `diff` can report preflight findings without
+failing, so a CI policy that rejects those findings must inspect the structured
+evidence explicitly.
 
 ### Using cargo install
 
@@ -145,7 +174,7 @@ drift-check:
 `pgroles diff` supports multiple output formats:
 
 ```shell
-# Raw SQL (default) — human-readable, good for PR comments
+# Raw SQL (default) — execution-oriented output; may contain sensitive values
 pgroles diff -f pgroles.yaml
 
 # JSON — machine-readable, good for programmatic processing
@@ -191,6 +220,45 @@ pgroles diff --bundle bundle.yaml --mode adopt --format markdown > bundle-review
 
 Markdown records declared password changes without resolving application-password environment variables; database connection credentials are still required. The report includes complete redacted change details, source attribution, and conservative priorities. Revocations, retirement, ownership transfers, password changes, role alterations, PUBLIC grants, elevated new roles, and membership administration are high priority. Other access changes still require review; these labels do not evaluate your application's transitive privileges or availability requirements.
 
-The `pgroles.review.v1` fingerprint identifies the displayed changes, source attribution, and reconciliation mode. Password values and database identity are excluded, so password-only value changes do not change this fingerprint, and identical reports from different databases share a fingerprint. Record the target environment alongside the artifact. It is not a database-state fingerprint or an operator approval token. Existing `--format json` output remains available for structured integrations, including bundle ownership annotations.
+The `pgroles.review.v1` fingerprint identifies the displayed changes, source attribution, and reconciliation mode. Password values, role configuration values, comments, and database identity are excluded. Changes only to those omitted values do not change this fingerprint, and identical reports from different databases share a fingerprint. Record the target environment alongside the artifact. It is not a database-state fingerprint or an operator approval token. Existing `--format json` output remains available for structured integrations, including bundle ownership annotations.
 
 Keep stderr with the report: executor-authority warnings and role-drop preflight findings are emitted there. `--exit-code` returns 2 for structural drift; declared password operations alone return 0 because PostgreSQL passwords cannot be read back for comparison. Posting a report is a separate pipeline action; generating one does not publish it.
+
+## Recorded reviews
+
+Export a review alongside the normal output:
+
+```bash
+pgroles diff -f pgroles.yaml --mode adopt --format markdown \
+  --review-out review.pgroles.json --target-label staging \
+  --no-exit-code > review.md
+```
+
+Import `review.pgroles.json` in the [plan explorer](/docs/explorer). It displays
+the CLI's recorded changes, SQL preview, phase analysis, findings, managed scope,
+provenance, and preflight evidence. Opening the file neither connects to a
+database nor recalculates the plan with the browser's current WASM version.
+Markdown and the artifact come from the same planning run.
+The viewer displays recorded provenance and fingerprints without authenticating
+the file; obtain review artifacts from a trusted source, such as your CI run.
+
+The first exporter creates recorded reviews without exploration inputs. It
+omits password values, role configuration values, and comments, and records
+the omissions. Redacted values do not mean absent values. These files cannot
+be replanned exactly; use a separately sanitized snapshot to explore a new,
+hypothetical variation. If any change contains sensitive values, this first
+exporter omits the entire SQL preview rather than inserting executable
+placeholder values.
+
+Artifacts retain role and object names, managed scope, and supplied labels.
+Review this metadata before sharing. Use `--policy-commit` to record a source
+revision and `--executor-role` to identify the intended applying identity.
+The policy content digest covers the original YAML bytes for a single manifest,
+or the serialized composed manifest for a bundle.
+The latter is a label, not impersonation: live preflight evidence collected as
+the inspecting connection identity does not verify a different executor.
+
+Neither review fingerprints nor explorer fingerprints are approval tokens.
+At deployment, inspect current database state again, run live preflight, and
+use the supported approval/execution contract. A local `pgroles explore`
+launcher is not part of this implementation.

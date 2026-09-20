@@ -19,6 +19,8 @@ import {
   explorerImport,
   loadAnalyzer,
   readableWasmError,
+  reviewArtifactImport,
+  validateReviewArtifactFileSize,
   validateSnapshotFileSize,
 } from '@/lib/pgrolesExplorer.mjs'
 import { explorerScenarios, getExplorerScenario } from '@/lib/explorerScenarios.mjs'
@@ -94,9 +96,9 @@ function FindingItem({ finding, changes }) {
   }
   const change = finding.change_index == null ? null : changes[finding.change_index]
   return (
-    <li data-severity={severity} className={`flex gap-3 rounded-lg border p-3 text-sm ${tones[severity] ?? tones.warning}`}>
+    <li data-severity={severity} className={`flex min-w-0 gap-3 rounded-lg border p-3 text-sm ${tones[severity] ?? tones.warning}`}>
       <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
-      <span>
+      <span className="min-w-0 break-words">
         <span className="mb-1 block text-xs font-semibold uppercase">{humanize(severity)}</span>
         {(finding.phase || change) && <span className="mb-1 block text-xs font-semibold opacity-75">{finding.phase ? humanize(finding.phase) : 'Plan'}{change ? ` · ${changeLabel(change)}` : ''}</span>}
         {finding.message}
@@ -172,15 +174,17 @@ function Graph({ visual, onSelect }) {
   )
 }
 
-function RoleAdjacency({ visual, onSelect }) {
+function RoleAdjacency({ visual, onSelect, maxRows }) {
   const labels = new Map(visual.nodes.map((node) => [node.id, node.label]))
   const roles = visual.nodes.filter((node) => node.kind === 'role' || node.kind === 'external_principal')
+  const displayedRoles = maxRows ? roles.slice(0, maxRows) : roles
   return (
     <section>
       <h2 className="font-display text-xl font-semibold">Role index</h2>
-      <p className="mt-1 text-sm text-muted-foreground">A compact, complete list of roles and their nearest connections.</p>
+      <p className="mt-1 text-sm text-muted-foreground">A compact list of roles and their nearest connections.</p>
+      {displayedRoles.length < roles.length && <p className="mt-1 text-xs text-muted-foreground">Showing {displayedRoles.length} of {roles.length} roles from this recorded artifact.</p>}
       <ul className="mt-3 max-h-[28rem] space-y-2 overflow-y-auto pr-1">
-        {roles.map((role) => {
+        {displayedRoles.map((role) => {
           const connections = visual.edges.filter((edge) => edge.source === role.id || edge.target === role.id)
           return <li key={role.id}><button type="button" onClick={() => onSelect(role)} className="w-full rounded-lg border bg-white p-3 text-left dark:bg-stone-900"><span className="font-mono text-sm font-semibold">{role.label}</span><span className="mt-1 block text-xs text-muted-foreground">{connections.length === 0 ? 'No connections' : connections.slice(0, 3).map((edge) => labels.get(edge.source === role.id ? edge.target : edge.source) ?? edge.label).join(' · ')}{connections.length > 3 ? ` · +${connections.length - 3} more` : ''}</span></button></li>
         })}
@@ -189,9 +193,35 @@ function RoleAdjacency({ visual, onSelect }) {
   )
 }
 
+function RecordedReview({ artifact, onSelectNode }) {
+  const { provenance, context, preflight, recorded, exploration } = artifact
+  const changes = new Map(recorded.changes.map((entry) => [entry.index, entry]))
+  const recordedChange = (entry) => ({ [entry.change.kind]: entry.change })
+  const recordedChangeLabel = (entry) => {
+    const subject = entry.change.name ?? entry.change.role ?? entry.change.owner ?? entry.change.from_role
+    return subject ? `${humanize(entry.change.kind)} · ${typeof subject === 'string' ? subject : JSON.stringify(subject)}` : humanize(entry.change.kind)
+  }
+  return (
+    <section aria-label="Recorded plan review" className="min-w-0 space-y-6 overflow-hidden rounded-2xl border-2 border-teal-600/40 bg-teal-50/30 p-5 dark:bg-teal-950/10">
+      <div><p className="text-xs font-semibold tracking-wider text-teal-700 uppercase dark:text-teal-300">Recorded review</p><h2 className="mt-1 break-all font-display text-xl font-semibold">{provenance.target_label}</h2><p className="mt-2 break-words text-sm text-muted-foreground">Captured {provenance.captured_at} by pgroles {provenance.tool_version} against PostgreSQL {provenance.pg_major_version}. This is the exported plan as recorded; opening it does not inspect a database or recompute the plan.</p></div>
+      <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4"><div className="min-w-0"><dt className="text-muted-foreground">Mode</dt><dd className="font-semibold">{humanize(context.mode)}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Inspector</dt><dd className="break-all font-mono">{context.inspector.role}{context.inspector.superuser != null ? ` · superuser ${context.inspector.superuser ? 'yes' : 'no'}` : ''}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Intended executor</dt><dd className="break-all font-mono">{context.intended_executor.role}{context.intended_executor.superuser != null ? ` · superuser ${context.intended_executor.superuser ? 'yes' : 'no'}` : ''}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Policy digest</dt><dd className="truncate font-mono" title={provenance.policy.content_digest}>{provenance.policy.content_digest}</dd>{provenance.policy.commit && <dd className="truncate font-mono text-xs text-muted-foreground">Commit {provenance.policy.commit}</dd>}</div></dl>
+      {context.managed_scope && <details className="rounded-lg border bg-white/70 p-3 text-sm dark:bg-stone-900/70"><summary className="cursor-pointer font-semibold">Managed scope</summary><pre className="mt-3 overflow-auto text-xs">{JSON.stringify(context.managed_scope, null, 2)}</pre></details>}
+      <div><h3 className="font-display text-lg font-semibold">Preflight evidence</h3><ul className="mt-2 grid gap-2 sm:grid-cols-3">{preflight.map((item, evidenceIndex) => <li key={`${item.check}-${item.actor_role ?? 'no-actor'}-${evidenceIndex}`} className="rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><span className="block text-xs text-muted-foreground">{humanize(item.check)}{item.actor_role ? ` · ${item.actor_role}` : ''}</span><strong>{humanize(item.status)}</strong>{item.issue_count > 0 && <span> · {item.issue_count} issue{item.issue_count === 1 ? '' : 's'}</span>}{item.issues?.length > 0 && <ul className="mt-2 space-y-1 text-xs">{item.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><strong>{humanize(issue.code)}</strong>{issue.role ? ` · ${issue.role}` : ''}: {issue.message}</li>)}</ul>}</li>)}</ul></div>
+      <div className="min-w-0"><h3 className="font-display text-lg font-semibold">Recorded changes</h3><ol className="mt-2 min-w-0 space-y-2">{recorded.changes.map((entry) => <li key={entry.index} className="min-w-0 rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><span className="text-xs font-semibold uppercase text-muted-foreground">{humanize(entry.priority)} · change {entry.index + 1}</span>{entry.source && <span className="ml-2 break-all text-xs text-muted-foreground">{entry.source.document} · <code>{JSON.stringify(entry.source.managed_key)}</code></span>}<p className="mt-1 font-mono text-xs">{humanize(entry.change.kind)}</p><pre className="mt-2 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{JSON.stringify(entry.change, null, 2)}</pre>{entry.omissions?.map((omission) => <p key={omission.field} className="mt-1 text-xs text-amber-700 dark:text-amber-300">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}</li>)}</ol></div>
+      {recorded.findings.length > 0 && <div><h3 className="font-display text-lg font-semibold">Recorded findings</h3><ul className="mt-2 space-y-2">{recorded.findings.map((finding, index) => <FindingItem key={index} finding={finding} changes={recorded.changes.map(recordedChange)} />)}</ul></div>}
+      <div><h3 className="font-display text-lg font-semibold">Recorded phases</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reachability is the recorded conservative model for {context.intended_executor.role}, not a live preflight. Missing executor membership facts may produce unknown or unreachable results.</p><ol className="mt-2 space-y-3">{recorded.phases.map((phase) => <li key={phase.phase} className="rounded-lg border bg-white p-3 dark:bg-stone-900"><strong>{humanize(phase.phase)}</strong><ul className="mt-2 space-y-1 text-xs">{phase.change_indices.map((index) => <li key={index} className="font-mono">{changes.has(index) ? recordedChangeLabel(changes.get(index)) : `Change ${index + 1}`}</li>)}</ul><div className="mt-3 grid gap-2 sm:grid-cols-2"><ReachabilityList label="Inherited usage" values={phase.executor_usage}/><ReachabilityList label="SET ROLE" values={phase.executor_reachability}/></div></li>)}</ol></div>
+      <div className="min-w-0"><h3 className="font-display text-lg font-semibold">SQL preview</h3>{recorded.sql_preview.status === 'available' ? <pre className="mt-2 max-h-96 w-full max-w-full overflow-auto rounded-lg bg-stone-950 p-4 text-xs leading-5 text-stone-100">{recorded.sql_preview.sql}</pre> : <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">SQL omitted: {humanize(recorded.sql_preview.reason)}. Sensitive changes: {recorded.sql_preview.sensitive_change_indices.join(', ') || 'not listed'}.</p>}</div>
+      <div><h3 className="font-display text-lg font-semibold">Recorded resulting graph</h3><div className="mt-2"><RoleAdjacency visual={recorded.visual} onSelect={onSelectNode} maxRows={1024}/></div></div>
+      {recorded.omissions?.map((omission) => <p key={omission.field} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}
+      <div className="rounded-lg bg-stone-200/60 p-3 text-xs leading-5 text-muted-foreground dark:bg-stone-800/60"><p>Review fingerprint: <code className="break-all">{recorded.review_fingerprint}</code>. This is a portable content fingerprint, not an approval token.</p><p className="mt-1">Provenance and fingerprint are displayed as recorded; this viewer does not authenticate the artifact.</p><p className="mt-1">Hypothetical variation unavailable: {humanize(exploration.reason)}.</p></div>
+    </section>
+  )
+}
+
 export function PgrolesExplorer() {
   const router = useRouter()
   const fileInput = useRef(null)
+  const reviewFileInput = useRef(null)
   const analysisRun = useRef(0)
   const loadedScenario = useRef(null)
   const initial = DEFAULT_SCENARIO
@@ -215,6 +245,7 @@ export function PgrolesExplorer() {
   const [loading, setLoading] = useState(false)
   const [showGraph, setShowGraph] = useState(false)
   const [selectedNode, setSelectedNode] = useState(null)
+  const [reviewArtifact, setReviewArtifact] = useState(null)
 
   const snapshotRoles = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot.roles) && snapshot.roles && typeof snapshot.roles === 'object' ? snapshot.roles : null
   const executorInSnapshot = snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, executorRole)
@@ -309,6 +340,24 @@ export function PgrolesExplorer() {
     }
   }
 
+  async function importReview(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    clearAnalysis()
+    setReviewArtifact(null)
+    const run = analysisRun.current
+    setError('')
+    try {
+      validateReviewArtifactFileSize(file.size)
+      const artifact = reviewArtifactImport(JSON.parse(await file.text()))
+      if (analysisRun.current === run) setReviewArtifact(artifact)
+    } catch (readError) {
+      if (analysisRun.current === run) setError(`Could not read review artifact: ${readableWasmError(readError)}`)
+    } finally {
+      event.target.value = ''
+    }
+  }
+
   async function runAnalysis() {
     const run = ++analysisRun.current
     setLoading(true)
@@ -328,11 +377,33 @@ export function PgrolesExplorer() {
     }
   }
 
+  if (reviewArtifact) {
+    return (
+      <div className="not-prose space-y-7">
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">The recorded artifact is read locally and is not uploaded, persisted, added to URLs, or included in telemetry.</div>
+        <div className="flex flex-wrap gap-3">
+          <input ref={reviewFileInput} aria-label="Recorded review file" type="file" accept="application/json,.json" onChange={importReview} className="sr-only" />
+          <button type="button" onClick={() => reviewFileInput.current?.click()} className="rounded-lg border px-4 py-2 text-sm font-semibold">Open another recorded review</button>
+          <button type="button" onClick={() => { setReviewArtifact(null); setSelectedNode(null) }} className="rounded-lg border px-4 py-2 text-sm font-semibold">Return to policy explorer</button>
+        </div>
+        <RecordedReview artifact={reviewArtifact} onSelectNode={setSelectedNode} />
+        <RoleSheet node={selectedNode} edges={reviewArtifact.recorded.visual.edges} onClose={() => setSelectedNode(null)} />
+      </div>
+    )
+  }
+
   return (
     <div className="not-prose space-y-7">
       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
         Analysis runs in this browser. Snapshot and policy data are not uploaded, persisted, added to URLs, or included in telemetry.
       </div>
+
+      <section className="rounded-2xl border bg-white p-5 dark:bg-stone-900">
+        <h2 className="font-display text-base font-semibold">Recorded plan review</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Open a sanitized <code>pgroles.review-artifact.v1</code> export locally. It is shown as recorded without loading the analyzer.</p>
+        <input ref={reviewFileInput} aria-label="Recorded review file" type="file" accept="application/json,.json" onChange={importReview} className="sr-only" />
+        <button type="button" onClick={() => reviewFileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Open recorded review</button>
+      </section>
 
       {scenarioNotice && <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">{scenarioNotice}</div>}
 
@@ -360,7 +431,7 @@ export function PgrolesExplorer() {
           <section className="rounded-2xl border bg-white p-5 dark:bg-stone-900">
             <h2 className="font-display text-base font-semibold">Current snapshot</h2>
             <p className="mt-1 break-all text-sm text-muted-foreground">{snapshotName}</p>
-            <input ref={fileInput} type="file" accept="application/json,.json" onChange={importSnapshot} className="sr-only" />
+            <input ref={fileInput} aria-label="Sanitized snapshot file" type="file" accept="application/json,.json" onChange={importSnapshot} className="sr-only" />
             <button type="button" onClick={() => fileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Import sanitized JSON</button>
           </section>
           <section className="space-y-4 rounded-2xl border bg-white p-5 dark:bg-stone-900">

@@ -13,6 +13,7 @@ pub mod overlap;
 pub mod ownership;
 pub mod report;
 pub mod review;
+pub mod review_artifact;
 #[cfg(feature = "passwords")]
 pub mod scram;
 pub mod sql;

@@ -1052,7 +1052,11 @@ fn diff_help() {
         .stdout(predicate::str::contains("--database-url"))
         .stdout(predicate::str::contains("--file"))
         .stdout(predicate::str::contains("--format"))
-        .stdout(predicate::str::contains("--no-exit-code"));
+        .stdout(predicate::str::contains("--no-exit-code"))
+        .stdout(predicate::str::contains("--review-out"))
+        .stdout(predicate::str::contains("--target-label"))
+        .stdout(predicate::str::contains("--policy-commit"))
+        .stdout(predicate::str::contains("--executor-role"));
 }
 
 #[test]
@@ -2936,6 +2940,228 @@ schemas:
             ])
             .assert()
             .success();
+    }
+
+    #[test]
+    #[ignore]
+    fn diff_review_out_writes_a_sanitized_recorded_artifact() {
+        let role = unique_name("review_artifact_canary");
+        let password_source = "REVIEW_ARTIFACT_UNRESOLVED_PASSWORD";
+        let _cleanup = TestDbCleanup::new(format!(r#"DROP ROLE IF EXISTS "{role}";"#));
+        execute_sql(&format!(r#"DROP ROLE IF EXISTS "{role}";"#));
+        let manifest = write_temp_manifest(&format!(
+            r#"
+roles:
+  - name: {role}
+    login: true
+    comment: "comment that must not be exported"
+    config:
+      application_name: "config value that must not be exported"
+    password:
+      from_env: {password_source}
+"#,
+        ));
+        let artifact = NamedTempFile::new().expect("failed to create review artifact");
+
+        let output = pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--format",
+                "markdown",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+                "--target-label",
+                "test-pg16",
+                "--executor-role",
+                "intended_executor",
+                "--no-exit-code",
+            ])
+            .env_remove(password_source)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+
+        let rendered = std::fs::read_to_string(artifact.path()).expect("read review artifact");
+        assert!(rendered.contains("pgroles.review-artifact.v1"));
+        assert!(rendered.contains("recorded_only_export"));
+        assert!(rendered.contains("test-pg16"));
+        assert!(rendered.contains("intended_executor"));
+        assert!(!rendered.contains("comment that must not be exported"));
+        assert!(!rendered.contains("config value that must not be exported"));
+        assert!(!rendered.contains(password_source));
+        let artifact_json: serde_json::Value =
+            serde_json::from_str(&rendered).expect("valid review artifact");
+        assert_eq!(
+            artifact_json["recorded"]["sql_preview"]["status"],
+            "omitted"
+        );
+        let authority = artifact_json["preflight"]
+            .as_array()
+            .expect("preflight evidence")
+            .iter()
+            .find(|item| item["check"] == "executor_authority")
+            .expect("executor authority evidence");
+        assert_eq!(authority["status"], "passed");
+        assert_eq!(
+            authority["actor_role"],
+            artifact_json["context"]["inspector"]["role"]
+        );
+        assert_eq!(
+            artifact_json["context"]["intended_executor"]["role"],
+            "intended_executor"
+        );
+        assert!(
+            artifact_json["context"]["intended_executor"]["superuser"].is_null(),
+            "an uninspected intended executor must not inherit inspector facts"
+        );
+        let stdout = String::from_utf8(output.stdout).expect("markdown stdout");
+        for canary in [
+            password_source,
+            "comment that must not be exported",
+            "config value that must not be exported",
+        ] {
+            assert!(!stdout.contains(canary), "Markdown leaked {canary}");
+        }
+        assert!(
+            !query_role_exists(&role),
+            "diff must not create the planned role"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn diff_bundle_review_out_matches_json_change_sources() {
+        let role = unique_name("review_bundle_role");
+        let _cleanup = TestDbCleanup::new(format!(r#"DROP ROLE IF EXISTS "{role}";"#));
+        execute_sql(&format!(r#"DROP ROLE IF EXISTS "{role}";"#));
+        let (bundle_dir, bundle_path) = write_temp_bundle(
+            r#"
+sources:
+  - file: app.yaml
+"#,
+            &[(
+                "app.yaml",
+                &format!(
+                    r#"
+policy:
+  name: app
+scope:
+  roles: [{role}]
+roles:
+  - name: {role}
+"#,
+                ),
+            )],
+        );
+        let artifact = NamedTempFile::new().expect("failed to create review artifact");
+
+        let output = pgroles_cmd()
+            .args([
+                "diff",
+                "--bundle",
+                bundle_path.to_str().expect("bundle path utf-8"),
+                "--database-url",
+                &database_url(),
+                "--format",
+                "json",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+                "--no-exit-code",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let bundle_json: serde_json::Value =
+            serde_json::from_slice(&output).expect("bundle JSON stdout");
+        let artifact_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.path()).expect("read artifact"))
+                .expect("artifact JSON");
+        let bundle_changes = bundle_json["changes"].as_array().expect("bundle changes");
+        let recorded_changes = artifact_json["recorded"]["changes"]
+            .as_array()
+            .expect("recorded changes");
+        assert_eq!(bundle_changes.len(), 1);
+        assert_eq!(recorded_changes.len(), bundle_changes.len());
+        assert_eq!(recorded_changes[0]["source"], bundle_changes[0]["owner"]);
+        assert_eq!(recorded_changes[0]["change"]["kind"], "create_role");
+        assert_eq!(
+            recorded_changes[0]["change"]["name"],
+            bundle_changes[0]["change"]["CreateRole"]["name"]
+        );
+        assert_eq!(recorded_changes[0]["source"]["document"], "app");
+        assert!(
+            !query_role_exists(&role),
+            "diff must not create the planned role"
+        );
+        drop(bundle_dir);
+    }
+
+    #[test]
+    #[ignore]
+    fn diff_review_out_preserves_safe_sql_and_drift_exit() {
+        let manifest = write_temp_manifest(
+            r#"
+roles:
+  - name: review_artifact_safe_sql_canary
+    login: true
+"#,
+        );
+        let artifact = NamedTempFile::new().expect("failed to create review artifact");
+        let output = pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--format",
+                "sql",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("run diff");
+        assert_eq!(output.status.code(), Some(2));
+        let stdout = String::from_utf8(output.stdout).expect("SQL stdout");
+        let artifact_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.path()).expect("read review artifact"))
+                .expect("valid review artifact JSON");
+        assert_eq!(
+            artifact_json["recorded"]["sql_preview"]["status"],
+            "available"
+        );
+        assert_eq!(artifact_json["recorded"]["sql_preview"]["sql"], stdout);
+    }
+
+    #[test]
+    #[ignore]
+    fn diff_review_out_bad_path_fails() {
+        let manifest = write_temp_manifest(VALID_MINIMAL);
+        let missing = tempfile::tempdir()
+            .expect("temporary directory")
+            .path()
+            .join("missing/review.json");
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--review-out",
+                missing.to_str().unwrap(),
+                "--no-exit-code",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("failed to write review artifact"));
     }
 
     #[test]

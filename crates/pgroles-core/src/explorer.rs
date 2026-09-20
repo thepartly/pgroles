@@ -52,6 +52,15 @@ pub struct AnalyzeResponse {
     pub fingerprint_kind: FingerprintKind,
 }
 
+/// Phase simulation for a plan that has already been produced by a canonical
+/// planner. This never computes or filters changes.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanAnalysis {
+    pub phases: Vec<PhaseAnalysis>,
+    pub findings: Vec<AuthorityFinding>,
+    pub visual: VisualGraph,
+}
+
 /// A password-free snapshot. Callers must sanitize arbitrary role config values.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,9 +343,43 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     let manifest = prepared.manifest;
     let expanded = prepared.expanded;
     let desired = prepared.desired;
-    let mut graph = request.current.into_graph();
-    let mut set_role: BTreeMap<_, _> = request
-        .executor
+    let graph = request.current.into_graph();
+    let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
+    let analysis = analyze_changes(graph, &changes, &request.executor);
+    let phases = analysis.phases;
+    let findings = analysis.findings;
+    let visual = analysis.visual;
+    let fingerprint_bytes = serde_json::to_vec(&(
+        EXPLORER_SCHEMA_VERSION,
+        request.mode.to_string(),
+        &request.executor,
+        &changes,
+        &phases,
+        &findings,
+    ))?;
+    let plan_fingerprint = format!(
+        "sha256:{}",
+        hex_digest(Sha256::digest(fingerprint_bytes).as_slice())
+    );
+    Ok(AnalyzeResponse {
+        schema_version: EXPLORER_SCHEMA_VERSION.into(),
+        changes,
+        phases,
+        findings,
+        visual,
+        plan_fingerprint,
+        fingerprint_kind: FingerprintKind::Illustrative,
+    })
+}
+
+/// Analyze ordered changes against the inspected starting graph without
+/// invoking the diff engine or changing reconciliation semantics.
+pub fn analyze_changes(
+    mut graph: RoleGraph,
+    changes: &[Change],
+    executor: &ExecutorFacts,
+) -> PlanAnalysis {
+    let mut set_role: BTreeMap<_, _> = executor
         .memberships
         .iter()
         .map(|fact| ((fact.role.clone(), fact.member.clone()), fact.set_role))
@@ -362,7 +405,7 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
             )
         })
         .collect();
-    for fact in &request.executor.memberships {
+    for fact in &executor.memberships {
         usage.insert((fact.role.clone(), fact.member.clone()), fact.inherit);
     }
     let mut admin_options: BTreeMap<_, _> = graph
@@ -379,17 +422,15 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
             )
         })
         .collect();
-    for fact in &request.executor.memberships {
+    for fact in &executor.memberships {
         admin_options.insert((fact.role.clone(), fact.member.clone()), fact.admin_option);
     }
-    let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
-
     let mut phases = Vec::new();
     let mut findings = Vec::new();
-    let mut current_reachability = reachability(&graph, &set_role, &request.executor);
-    let mut current_usage = reachability(&graph, &usage, &request.executor);
+    let mut current_reachability = reachability(&graph, &set_role, executor);
+    let mut current_usage = reachability(&graph, &usage, executor);
     let mut global_change_index = 0;
-    for (phase, phase_changes) in grouped_phases(&changes) {
+    for (phase, phase_changes) in grouped_phases(changes) {
         let phase_usage_before = current_usage.clone();
         for change in &phase_changes {
             analyze_required_authority(
@@ -400,7 +441,7 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
                     set_reachable: &current_reachability,
                     usage_reachable: &current_usage,
                     admin_options: &admin_options,
-                    is_superuser: executor_is_superuser(&graph, &request.executor),
+                    is_superuser: executor_is_superuser(&graph, executor),
                 },
                 &mut findings,
             );
@@ -409,15 +450,15 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
                 &mut set_role,
                 &mut usage,
                 &mut admin_options,
-                &request.executor,
+                executor,
                 change,
             );
-            current_reachability = reachability(&graph, &set_role, &request.executor);
-            current_usage = reachability(&graph, &usage, &request.executor);
+            current_reachability = reachability(&graph, &set_role, executor);
+            current_usage = reachability(&graph, &usage, executor);
             global_change_index += 1;
         }
-        let after = reachability(&graph, &set_role, &request.executor);
-        let usage_after = reachability(&graph, &usage, &request.executor);
+        let after = reachability(&graph, &set_role, executor);
+        let usage_after = reachability(&graph, &usage, executor);
         compare_reachability(phase, &phase_usage_before, &usage_after, &mut findings);
         phases.push(PhaseAnalysis {
             phase,
@@ -442,28 +483,11 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     }
     // `graph` is the simulated state after the mode-filtered plan. In additive
     // and adopt modes it can intentionally differ from raw desired state.
-    let visual = build_visual_graph(&graph, VisualSource::Desired);
-    let fingerprint_bytes = serde_json::to_vec(&(
-        EXPLORER_SCHEMA_VERSION,
-        request.mode.to_string(),
-        &request.executor,
-        &changes,
-        &phases,
-        &findings,
-    ))?;
-    let plan_fingerprint = format!(
-        "sha256:{}",
-        hex_digest(Sha256::digest(fingerprint_bytes).as_slice())
-    );
-    Ok(AnalyzeResponse {
-        schema_version: EXPLORER_SCHEMA_VERSION.into(),
-        changes,
+    PlanAnalysis {
         phases,
         findings,
-        visual,
-        plan_fingerprint,
-        fingerprint_kind: FingerprintKind::Illustrative,
-    })
+        visual: build_visual_graph(&graph, VisualSource::Desired),
+    }
 }
 
 impl AnalyzeRequest {

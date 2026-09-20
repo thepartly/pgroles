@@ -6,7 +6,7 @@ test('validates and compiles without usable snapshot or executor facts', async (
   expect((await metadataResponse.json()).schema_version).toBe('pgroles.manifest-metadata.v1')
   await page.goto('docs/explorer/')
   await page.getByLabel('Executor role').fill('')
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
     name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{"unexpected":true}'),
   })
   await page.getByLabel('Desired YAML').fill('roles:\n  - name: application\n    login: true\n    password:\n      from_env: NEVER_RESOLVE_THIS\n')

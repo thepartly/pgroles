@@ -93,6 +93,13 @@ analysis has no verified target identity or execution context. Findings that
 need ownership, grantor, or live privilege evidence remain database preflight
 requirements.
 
+The docs explorer can also open `pgroles.review-artifact.v1` files exported by
+native `pgroles diff --review-out review.pgroles.json`. Those files contain
+recorded results and are rendered without initializing WASM or recalculating
+the plan. The first artifact version omits exploration inputs; its SQL preview
+comes from the native planning run and is omitted when changes contain sensitive
+values. See the [recorded review workflow](../../docs/src/pages/docs/ci-cd.md#recorded-reviews).
+
 Run browser-safe checks package-scoped, because workspace feature unification
 can enable `pgroles-core/passwords` through the CLI or operator:
 

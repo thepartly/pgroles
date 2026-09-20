@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use crate::diff::Change;
 use crate::manifest::{ObjectType, SchemaBindingFacet};
+use crate::model::RoleAttribute;
 use crate::model::{DefaultPrivKey, DefaultPrivilegeScope, GrantKey, Grantee};
 use crate::ownership::{
     ManagedScope, MembershipKey, OwnershipIndex, SchemaFacetKey, describe_change, grant_schema_name,
@@ -108,6 +109,36 @@ pub fn shape_plan_changes(changes: &[Change], mode: PlanOutputMode) -> Vec<Chang
         PlanOutputMode::Redacted => changes
             .iter()
             .map(|change| match change {
+                Change::CreateRole { name, state } => {
+                    let mut state = state.clone();
+                    if state.comment.is_some() {
+                        state.comment = Some("[REDACTED]".to_string());
+                    }
+                    for value in state.config.values_mut() {
+                        *value = "[REDACTED]".to_string();
+                    }
+                    Change::CreateRole {
+                        name: name.clone(),
+                        state,
+                    }
+                }
+                Change::AlterRole { name, attributes } => Change::AlterRole {
+                    name: name.clone(),
+                    attributes: attributes
+                        .iter()
+                        .map(|attribute| match attribute {
+                            RoleAttribute::SetConfig(parameter, _) => RoleAttribute::SetConfig(
+                                parameter.clone(),
+                                "[REDACTED]".to_string(),
+                            ),
+                            other => other.clone(),
+                        })
+                        .collect(),
+                },
+                Change::SetComment { name, comment } => Change::SetComment {
+                    name: name.clone(),
+                    comment: comment.as_ref().map(|_| "[REDACTED]".to_string()),
+                },
                 Change::SetPassword { name, .. } => Change::SetPassword {
                     name: name.clone(),
                     password: "[REDACTED]".to_string(),
@@ -116,6 +147,23 @@ pub fn shape_plan_changes(changes: &[Change], mode: PlanOutputMode) -> Vec<Chang
             })
             .collect(),
     }
+}
+
+/// Redact credential material while preserving non-password statement values.
+///
+/// SQL output needs role configuration and comments to describe the actual
+/// plan. Review formats use [`shape_plan_changes`] for broader sanitization.
+pub fn redact_password_changes(changes: &[Change]) -> Vec<Change> {
+    changes
+        .iter()
+        .map(|change| match change {
+            Change::SetPassword { name, .. } => Change::SetPassword {
+                name: name.clone(),
+                password: "[REDACTED]".to_string(),
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 pub fn render_plan_json(

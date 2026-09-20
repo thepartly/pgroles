@@ -1,0 +1,249 @@
+{
+  "schema_version": "pgroles.review-artifact.v1",
+  "provenance": {
+    "tool_version": "0.12.0",
+    "captured_at": "2026-09-20T11:05:29.195440973Z",
+    "policy": {
+      "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
+    },
+    "target_label": "Local PostgreSQL review fixture",
+    "pg_major_version": 16
+  },
+  "context": {
+    "mode": "adopt",
+    "managed_scope": {
+      "roles": [
+        "review_app",
+        "review_app_reader"
+      ],
+      "schemas": []
+    },
+    "inspector": {
+      "role": "postgres",
+      "superuser": true
+    },
+    "intended_executor": {
+      "role": "review_deployer"
+    }
+  },
+  "preflight": [
+    {
+      "check": "executor_authority",
+      "status": "passed",
+      "actor_role": "postgres",
+      "issue_count": 0
+    },
+    {
+      "check": "role_drop_safety",
+      "status": "passed",
+      "issue_count": 0
+    },
+    {
+      "check": "server_compatibility",
+      "status": "unknown",
+      "issue_count": 0
+    },
+    {
+      "check": "executor_authority",
+      "status": "not_run",
+      "actor_role": "review_deployer",
+      "issue_count": 0
+    }
+  ],
+  "recorded": {
+    "changes": [
+      {
+        "index": 0,
+        "priority": "Review",
+        "change": {
+          "kind": "create_role",
+          "name": "review_app",
+          "state": {
+            "login": true,
+            "superuser": false,
+            "createdb": false,
+            "createrole": false,
+            "inherit": true,
+            "replication": false,
+            "bypassrls": false,
+            "connection_limit": -1,
+            "comment_present": false,
+            "password_valid_until": null,
+            "config_parameters": []
+          }
+        }
+      },
+      {
+        "index": 1,
+        "priority": "Review",
+        "change": {
+          "kind": "create_role",
+          "name": "review_app_reader",
+          "state": {
+            "login": false,
+            "superuser": false,
+            "createdb": false,
+            "createrole": false,
+            "inherit": true,
+            "replication": false,
+            "bypassrls": false,
+            "connection_limit": -1,
+            "comment_present": false,
+            "password_valid_until": null,
+            "config_parameters": []
+          }
+        }
+      },
+      {
+        "index": 2,
+        "priority": "Review",
+        "change": {
+          "kind": "add_member",
+          "role": "review_app_reader",
+          "member": "review_app",
+          "inherit": true,
+          "admin": false
+        }
+      }
+    ],
+    "phases": [
+      {
+        "phase": "create",
+        "change_indices": [
+          0,
+          1
+        ],
+        "executor_reachability": [
+          {
+            "role": "review_app",
+            "status": "unknown"
+          },
+          {
+            "role": "review_app_reader",
+            "status": "unknown"
+          },
+          {
+            "role": "review_deployer",
+            "status": "reachable"
+          }
+        ],
+        "executor_usage": [
+          {
+            "role": "review_app",
+            "status": "unknown"
+          },
+          {
+            "role": "review_app_reader",
+            "status": "unknown"
+          },
+          {
+            "role": "review_deployer",
+            "status": "reachable"
+          }
+        ]
+      },
+      {
+        "phase": "membership_add",
+        "change_indices": [
+          2
+        ],
+        "executor_reachability": [
+          {
+            "role": "review_app",
+            "status": "unknown"
+          },
+          {
+            "role": "review_app_reader",
+            "status": "unknown"
+          },
+          {
+            "role": "review_deployer",
+            "status": "reachable"
+          }
+        ],
+        "executor_usage": [
+          {
+            "role": "review_app",
+            "status": "unknown"
+          },
+          {
+            "role": "review_app_reader",
+            "status": "unknown"
+          },
+          {
+            "role": "review_deployer",
+            "status": "reachable"
+          }
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "kind": "database_preflight_required",
+        "severity": "warning",
+        "phase": "create",
+        "change_index": 0,
+        "message": "this operation requires database ownership or privilege preflight"
+      },
+      {
+        "kind": "database_preflight_required",
+        "severity": "warning",
+        "phase": "create",
+        "change_index": 1,
+        "message": "this operation requires database ownership or privilege preflight"
+      },
+      {
+        "kind": "required_role_reachability_unknown",
+        "severity": "warning",
+        "phase": "membership_add",
+        "change_index": 2,
+        "role": "review_app_reader",
+        "message": "ADMIN OPTION for role review_app_reader is not proven; database preflight is required"
+      }
+    ],
+    "visual": {
+      "schema_version": "pgroles.visual_graph.v1",
+      "meta": {
+        "source": "desired",
+        "role_count": 2,
+        "grant_count": 0,
+        "default_privilege_count": 0,
+        "membership_count": 1,
+        "collapsed": true
+      },
+      "nodes": [
+        {
+          "id": "role:review_app",
+          "label": "review_app",
+          "kind": "role",
+          "managed": true,
+          "login": true
+        },
+        {
+          "id": "role:review_app_reader",
+          "label": "review_app_reader",
+          "kind": "role",
+          "managed": true,
+          "login": false
+        }
+      ],
+      "edges": [
+        {
+          "source": "role:review_app",
+          "target": "role:review_app_reader",
+          "kind": "membership",
+          "label": "member"
+        }
+      ]
+    },
+    "sql_preview": {
+      "status": "available",
+      "sql": "CREATE ROLE \"review_app\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nCREATE ROLE \"review_app_reader\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nGRANT \"review_app_reader\" TO \"review_app\" WITH INHERIT TRUE;"
+    },
+    "review_fingerprint": "sha256:dd420dc2f6ac213109f94f00c18c3fd0a312e350c42deeebf8b2313ca4e9dc57"
+  },
+  "exploration": {
+    "status": "omitted",
+    "reason": "recorded_only_export"
+  }
+}

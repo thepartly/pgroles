@@ -1,0 +1,8 @@
+roles:
+  - name: review_app_reader
+  - name: review_app
+    login: true
+memberships:
+  - role: review_app_reader
+    members:
+      - name: review_app

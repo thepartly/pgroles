@@ -126,7 +126,7 @@ pub fn render_markdown(
         .count();
     let info = rows.len() - high - review;
     let mut output = format!(
-        "## pgroles review\n\nSource: {}. Mode: {mode:?}.\n\n{} change(s): **{high} high priority**, {review} review, {info} informational.\n\nRedacted report fingerprint (pgroles.review.v1): `{fingerprint}`\n\nThis identifies the displayed changes, source attribution, and mode. It excludes password values and database identity and is not an approval token or a database-state fingerprint. Record the target environment alongside this report. Declared passwords appear even when no structural drift exists. Priorities are conservative change-kind hints; inspect the details and database impact before applying.\n",
+        "## pgroles review\n\nSource: {}. Mode: {mode:?}.\n\n{} change(s): **{high} high priority**, {review} review, {info} informational.\n\nRedacted report fingerprint (pgroles.review.v1): `{fingerprint}`\n\nThis identifies the displayed changes, source attribution, and mode. It excludes password values, role configuration values, role comments, and database identity and is not an approval token or a database-state fingerprint. Record the target environment alongside this report. Declared passwords appear even when no structural drift exists. Priorities are conservative change-kind hints; inspect the details and database impact before applying.\n",
         escape(source),
         rows.len()
     );
@@ -215,13 +215,28 @@ mod tests {
     }
     #[test]
     fn redacts_credentials_and_escapes_untrusted_markdown() {
-        let changes = vec![Change::SetPassword {
-            name: "x|[link](javascript:bad)<b>\nnext ~~hidden~~ @team #123 https://example.com www.example.com".into(),
-            password: "SCRAM-secret".into(),
-        }];
+        let changes = vec![
+            Change::SetPassword {
+                name: "x|[link](javascript:bad)<b>\nnext ~~hidden~~ @team #123 https://example.com www.example.com".into(),
+                password: "SCRAM-secret".into(),
+            },
+            Change::SetComment {
+                name: "app".into(),
+                comment: Some("COMMENT-secret".into()),
+            },
+            Change::AlterRole {
+                name: "app".into(),
+                attributes: vec![crate::model::RoleAttribute::SetConfig(
+                    "app.token".into(),
+                    "CONFIG-secret".into(),
+                )],
+            },
+        ];
         let report =
             render_markdown(&changes, "[source]|<b>", ReconciliationMode::Additive, None).unwrap();
         assert!(!report.contains("SCRAM-secret"));
+        assert!(!report.contains("COMMENT-secret"));
+        assert!(!report.contains("CONFIG-secret"));
         assert!(!report.contains("<b>"));
         assert!(!report.contains("[link]"));
         assert!(report.contains("&#124;"));
@@ -231,7 +246,7 @@ mod tests {
         assert!(!report.contains("https://"));
         assert!(!report.contains("www.example.com"));
         assert!(report.contains("REDACTED"));
-        assert!(report.contains("1 high priority"));
+        assert!(report.contains("2 high priority"));
     }
     #[test]
     fn fingerprint_tracks_report_context_but_not_password_verifiers() {
