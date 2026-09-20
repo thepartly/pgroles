@@ -268,6 +268,9 @@ export function PgrolesExplorer() {
   const [showGraph, setShowGraph] = useState(false)
   const [selectedNode, setSelectedNode] = useState(null)
 
+  const snapshotRoles = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot.roles) && snapshot.roles && typeof snapshot.roles === 'object' ? snapshot.roles : null
+  const executorInSnapshot = snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, executorRole)
+  const effectiveExecutorSuperuser = executorInSnapshot ? snapshotRoles[executorRole]?.superuser === true : executorSuperuser
   const findingsBySeverity = useMemo(() => result?.findings ?? [], [result])
   const errorCount = useMemo(() => findingsBySeverity.filter((finding) => finding.severity === 'error').length, [findingsBySeverity])
 
@@ -328,7 +331,7 @@ export function PgrolesExplorer() {
     setError('')
     try {
       const analyze = await loadAnalyzer(router.basePath)
-      const request = analyzeRequest({ current: snapshot, desiredYaml, mode, executorRole, executorSuperuser, executorMemberships, newMembershipSetRole, newRoleSetRole, newRoleInherit, newRoleAdminOption })
+      const request = analyzeRequest({ current: snapshot, desiredYaml, mode, executorRole, executorSuperuser: effectiveExecutorSuperuser, executorMemberships, newMembershipSetRole, newRoleSetRole, newRoleInherit, newRoleAdminOption })
       const nextResult = analyze(request)
       if (analysisRun.current === run) setResult(nextResult)
     } catch (analysisError) {
@@ -365,7 +368,7 @@ export function PgrolesExplorer() {
           </section>
           <section className="space-y-4 rounded-2xl border bg-white p-5 dark:bg-stone-900">
             <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={executorSuperuser} onChange={(event) => { setExecutorSuperuser(event.target.checked); clearAnalysis() }} /> Executor is a superuser</label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={executorInSnapshot} onChange={(event) => { setExecutorSuperuser(event.target.checked); clearAnalysis() }} /> Executor is a superuser {executorInSnapshot && <span className="text-xs text-muted-foreground">From snapshot</span>}</label>
             <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
             <label className="block text-sm font-medium">Reconciliation mode<select value={mode} onChange={(event) => { setMode(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="authoritative">Authoritative</option><option value="additive">Additive</option><option value="adopt">Adopt</option></select></label>
             <button type="button" onClick={runAnalysis} disabled={loading || !executorRole.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-3 font-semibold text-stone-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">

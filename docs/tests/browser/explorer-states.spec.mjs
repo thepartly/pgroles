@@ -8,6 +8,47 @@ async function analyze(page) {
   await expect(page.getByText('Execution phases')).toBeVisible()
 }
 
+test('uses snapshot superuser status for existing executors and manual status only for absent roles', async ({ page }) => {
+  await page.goto(explorerUrl)
+  const checkbox = page.getByRole('checkbox', { name: /Executor is a superuser/ })
+  await expect(checkbox).toBeEnabled()
+  await checkbox.check()
+
+  await page.getByLabel('Executor role').fill('app_reader')
+  await expect(checkbox).toBeDisabled()
+  await expect(checkbox).not.toBeChecked()
+  await expect(page.getByText('From snapshot', { exact: true })).toBeVisible()
+  await analyze(page)
+  await expect(page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' }).first()).toBeVisible()
+
+  await page.getByLabel('Executor role').fill('platform_admin')
+  await expect(checkbox).toBeEnabled()
+  await expect(checkbox).toBeChecked()
+  await expect(page.getByText('From snapshot', { exact: true })).toBeHidden()
+  await analyze(page)
+  await expect(page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' })).toHaveCount(0)
+})
+
+test('shows imported snapshot superuser status despite a conflicting executor fallback', async ({ page }) => {
+  await page.goto(explorerUrl)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'superuser.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      current: { roles: { existing_admin: { superuser: true } } },
+      executor: { role: 'existing_admin', superuser: false },
+    })),
+  })
+  const checkbox = page.getByRole('checkbox', { name: /Executor is a superuser/ })
+  await expect(checkbox).toBeDisabled()
+  await expect(checkbox).toBeChecked()
+  await expect(page.getByText('From snapshot', { exact: true })).toBeVisible()
+
+  await page.getByLabel('Executor role').fill('absent_admin')
+  await expect(checkbox).toBeEnabled()
+  await expect(checkbox).not.toBeChecked()
+})
+
 test('renders unavailable-grantor errors with severity and a visible error count', async ({ page }) => {
   await page.goto(explorerUrl)
   await page.getByLabel('Desired YAML').fill('roles:\n  - name: deployer\n  - name: reader\n')
