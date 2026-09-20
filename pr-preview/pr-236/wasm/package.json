@@ -4,7 +4,7 @@
   "collaborators": [
     "Brian Thorne <brian@partly.com"
   ],
-  "description": "Browser-safe WebAssembly adapter for pgroles explorer analysis",
+  "description": "Browser-safe WebAssembly adapter for pgroles policy authoring and plan analysis",
   "version": "0.12.0",
   "license": "MIT",
   "repository": {

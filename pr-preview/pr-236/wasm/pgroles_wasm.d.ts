@@ -10,11 +10,17 @@
  */
 export function analyze(input: any): any;
 
+export function compile(input: any): any;
+
+export function validate(input: any): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly analyze: (a: number, b: number) => void;
+    readonly compile: (a: number, b: number) => void;
+    readonly validate: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
