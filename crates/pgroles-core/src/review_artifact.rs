@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::diff::{Change, ReconciliationMode};
 use crate::explorer::{
-    AuthorityFinding, ExecutorFacts, FindingKind, FindingSeverity, PlanAnalysis, PlanPhase,
-    RoleReachability, analyze_changes,
+    AuthorityFinding, ExecutorFacts, FindingKind, FindingSeverity, PlanAnalysis,
+    PlanAnalysisOptions, PlanPhase, RoleReachability, analyze_changes_with_options,
 };
 use crate::manifest::{ObjectType, Privilege};
 use crate::model::{DefaultPrivilegeScope, Grantee, RoleAttribute, RoleGraph, RoleState};
@@ -79,6 +79,7 @@ pub struct ReviewContext {
     pub managed_scope: Option<VisualManagedScope>,
     pub inspector: ReviewIdentity,
     pub intended_executor: ReviewIdentity,
+    pub authority_graph_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +116,37 @@ pub struct PreflightEvidence {
     pub issue_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<PreflightFinding>,
+    pub coverage: EvidenceCoverage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceCoverage {
+    pub kind: EvidenceCoverageKind,
+    /// Targeted probe families that actually ran. Their success does not
+    /// establish complete authority for a change.
+    pub checks_performed: Vec<EvidenceCheck>,
+    /// Changes considered by at least one targeted probe.
+    pub checked_change_indices: Vec<usize>,
+    /// Changes outside every recorded probe's scope.
+    pub unchecked_change_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceCheck {
+    DefaultPrivilegeOwner,
+    PredefinedRoleMembership,
+    GrantorReachability,
+    RevokeAclOwnership,
+    PlanOrderAuthority,
+    DropRoleSafety,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceCoverageKind {
+    Complete,
+    Targeted,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,7 +282,14 @@ pub fn build_review_artifact(
             changes: input.changes.len(),
         });
     }
-    let analysis = analyze_changes(input.current, input.changes, &input.executor_facts);
+    let analysis = analyze_changes_with_options(
+        input.current,
+        input.changes,
+        &input.executor_facts,
+        PlanAnalysisOptions {
+            authority_graph_complete: input.context.authority_graph_complete,
+        },
+    );
     let changes: Vec<_> = input
         .changes
         .iter()
@@ -723,6 +762,7 @@ mod tests {
                     role: "deployer".into(),
                     superuser: Some(false),
                 },
+                authority_graph_complete: true,
             },
             preflight: vec![PreflightEvidence {
                 check: PreflightCheck::ExecutorAuthority,
@@ -730,6 +770,12 @@ mod tests {
                 actor_role: Some("deployer".into()),
                 issue_count: 0,
                 issues: Vec::new(),
+                coverage: EvidenceCoverage {
+                    kind: EvidenceCoverageKind::Complete,
+                    checks_performed: Vec::new(),
+                    checked_change_indices: (0..changes.len()).collect(),
+                    unchecked_change_indices: Vec::new(),
+                },
             }],
             current,
             changes,

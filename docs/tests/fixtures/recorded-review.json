@@ -2,7 +2,7 @@
   "schema_version": "pgroles.review-artifact.v1",
   "provenance": {
     "tool_version": "0.12.0",
-    "captured_at": "2026-09-20T11:05:29.195440973Z",
+    "captured_at": "2026-09-20T18:56:39.82503744Z",
     "policy": {
       "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
     },
@@ -24,30 +24,71 @@
     },
     "intended_executor": {
       "role": "review_deployer"
-    }
+    },
+    "authority_graph_complete": false
   },
   "preflight": [
     {
       "check": "executor_authority",
-      "status": "passed",
+      "status": "unknown",
       "actor_role": "postgres",
-      "issue_count": 0
+      "issue_count": 0,
+      "coverage": {
+        "kind": "targeted",
+        "checks_performed": [],
+        "checked_change_indices": [],
+        "unchecked_change_indices": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     {
       "check": "role_drop_safety",
-      "status": "passed",
-      "issue_count": 0
+      "status": "unknown",
+      "issue_count": 0,
+      "coverage": {
+        "kind": "targeted",
+        "checks_performed": [],
+        "checked_change_indices": [],
+        "unchecked_change_indices": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     {
       "check": "server_compatibility",
       "status": "unknown",
-      "issue_count": 0
+      "issue_count": 0,
+      "coverage": {
+        "kind": "targeted",
+        "checks_performed": [],
+        "checked_change_indices": [],
+        "unchecked_change_indices": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     {
       "check": "executor_authority",
       "status": "not_run",
       "actor_role": "review_deployer",
-      "issue_count": 0
+      "issue_count": 0,
+      "coverage": {
+        "kind": "targeted",
+        "checks_performed": [],
+        "checked_change_indices": [],
+        "unchecked_change_indices": [
+          0,
+          1,
+          2
+        ]
+      }
     }
   ],
   "recorded": {
@@ -240,7 +281,7 @@
       "status": "available",
       "sql": "CREATE ROLE \"review_app\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nCREATE ROLE \"review_app_reader\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nGRANT \"review_app_reader\" TO \"review_app\" WITH INHERIT TRUE;"
     },
-    "review_fingerprint": "sha256:dd420dc2f6ac213109f94f00c18c3fd0a312e350c42deeebf8b2313ca4e9dc57"
+    "review_fingerprint": "sha256:619cd735d954ee644c046e9bbac6b338bde8fc8d1d64cf98ec529f5a46489421"
   },
   "exploration": {
     "status": "omitted",

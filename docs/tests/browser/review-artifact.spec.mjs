@@ -57,14 +57,28 @@ for (const width of [360, 390, 768]) {
   })
 }
 
-test('clears a recorded review before rejecting a malformed nested artifact', async ({ page }) => {
-  const artifact = JSON.parse(await readFile(fixturePath, 'utf8'))
-  await page.goto('docs/explorer/')
-  await uploadReview(page, artifact)
-  await expect(page.getByRole('region', { name: 'Recorded plan review' })).toBeVisible()
+for (const [name, mutate, error] of [
+  ['null preflight', (artifact) => { artifact.preflight = [null] }, 'preflight evidence'],
+  ['false recorded omissions', (artifact) => { artifact.recorded.omissions = false }, 'omissions'],
+  ['zero change omissions', (artifact) => { artifact.recorded.changes[0].omissions = 0 }, 'changes'],
+  ['empty-string change omissions', (artifact) => { artifact.recorded.changes[0].omissions = '' }, 'changes'],
+  ['missing drop-role name', (artifact) => { artifact.recorded.changes[0].change = { kind: 'drop_role' } }, 'changes'],
+  ['repeated phase index', (artifact) => { artifact.recorded.phases[0].change_indices.push(0) }, 'phases'],
+  ['missing phases', (artifact) => { artifact.recorded.phases = [] }, 'phases'],
+]) {
+  test(`rejects ${name}, clears the previous review, and recovers`, async ({ page }) => {
+    const valid = await readFile(fixturePath)
+    const artifact = JSON.parse(valid)
+    await page.goto('docs/explorer/')
+    await uploadReview(page, valid)
+    await expect(page.getByRole('region', { name: 'Recorded plan review' })).toBeVisible()
 
-  artifact.preflight = [null]
-  await uploadReview(page, artifact, 'malformed-review.json')
-  await expect(page.getByRole('region', { name: 'Recorded plan review' })).toBeHidden()
-  await expect(page.locator('article').getByRole('alert')).toContainText('review artifact preflight evidence is malformed')
-})
+    mutate(artifact)
+    await uploadReview(page, artifact, 'malformed-review.json')
+    await expect(page.getByRole('region', { name: 'Recorded plan review' })).toBeHidden()
+    await expect(page.locator('article').getByRole('alert')).toContainText(`review artifact ${error} ${error === 'preflight evidence' ? 'is' : 'are'} malformed`)
+
+    await uploadReview(page, valid, 'recorded-review.json')
+    await expect(page.getByRole('region', { name: 'Recorded plan review' })).toBeVisible()
+  })
+}

@@ -61,6 +61,22 @@ pub struct PlanAnalysis {
     pub visual: VisualGraph,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PlanAnalysisOptions {
+    /// Whether absence from the supplied authority graph proves absence in
+    /// PostgreSQL. `true` treats the graph as authoritative; scoped native
+    /// inspection must use `false`.
+    pub authority_graph_complete: bool,
+}
+
+impl Default for PlanAnalysisOptions {
+    fn default() -> Self {
+        Self {
+            authority_graph_complete: true,
+        }
+    }
+}
+
 /// A password-free snapshot. Callers must sanitize arbitrary role config values.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -375,9 +391,18 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
 /// Analyze ordered changes against the inspected starting graph without
 /// invoking the diff engine or changing reconciliation semantics.
 pub fn analyze_changes(
+    graph: RoleGraph,
+    changes: &[Change],
+    executor: &ExecutorFacts,
+) -> PlanAnalysis {
+    analyze_changes_with_options(graph, changes, executor, PlanAnalysisOptions::default())
+}
+
+pub fn analyze_changes_with_options(
     mut graph: RoleGraph,
     changes: &[Change],
     executor: &ExecutorFacts,
+    options: PlanAnalysisOptions,
 ) -> PlanAnalysis {
     let mut set_role: BTreeMap<_, _> = executor
         .memberships
@@ -427,8 +452,14 @@ pub fn analyze_changes(
     }
     let mut phases = Vec::new();
     let mut findings = Vec::new();
-    let mut current_reachability = reachability(&graph, &set_role, executor);
-    let mut current_usage = reachability(&graph, &usage, executor);
+    let mut current_reachability = reachability(
+        &graph,
+        &set_role,
+        executor,
+        options.authority_graph_complete,
+    );
+    let mut current_usage =
+        reachability(&graph, &usage, executor, options.authority_graph_complete);
     let mut global_change_index = 0;
     for (phase, phase_changes) in grouped_phases(changes) {
         let phase_usage_before = current_usage.clone();
@@ -442,6 +473,7 @@ pub fn analyze_changes(
                     usage_reachable: &current_usage,
                     admin_options: &admin_options,
                     is_superuser: executor_is_superuser(&graph, executor),
+                    authority_graph_complete: options.authority_graph_complete,
                 },
                 &mut findings,
             );
@@ -453,12 +485,23 @@ pub fn analyze_changes(
                 executor,
                 change,
             );
-            current_reachability = reachability(&graph, &set_role, executor);
-            current_usage = reachability(&graph, &usage, executor);
+            current_reachability = reachability(
+                &graph,
+                &set_role,
+                executor,
+                options.authority_graph_complete,
+            );
+            current_usage =
+                reachability(&graph, &usage, executor, options.authority_graph_complete);
             global_change_index += 1;
         }
-        let after = reachability(&graph, &set_role, executor);
-        let usage_after = reachability(&graph, &usage, executor);
+        let after = reachability(
+            &graph,
+            &set_role,
+            executor,
+            options.authority_graph_complete,
+        );
+        let usage_after = reachability(&graph, &usage, executor, options.authority_graph_complete);
         compare_reachability(phase, &phase_usage_before, &usage_after, &mut findings);
         phases.push(PhaseAnalysis {
             phase,
@@ -742,6 +785,7 @@ fn reachability(
     graph: &RoleGraph,
     facts: &BTreeMap<(String, String), SetRoleCapability>,
     executor: &ExecutorFacts,
+    authority_graph_complete: bool,
 ) -> BTreeMap<String, ReachabilityStatus> {
     if executor_is_superuser(graph, executor) {
         return graph
@@ -799,7 +843,7 @@ fn reachability(
                 role.clone(),
                 if definite.contains(&role) {
                     ReachabilityStatus::Reachable
-                } else if possible.contains(&role) {
+                } else if possible.contains(&role) || !authority_graph_complete {
                     ReachabilityStatus::Unknown
                 } else {
                     ReachabilityStatus::Unreachable
@@ -873,6 +917,7 @@ struct AuthorityState<'a> {
     usage_reachable: &'a BTreeMap<String, ReachabilityStatus>,
     admin_options: &'a BTreeMap<(String, String), SetRoleCapability>,
     is_superuser: bool,
+    authority_graph_complete: bool,
 }
 
 fn analyze_required_authority(
@@ -900,10 +945,15 @@ fn analyze_required_authority(
     if !authority.is_superuser
         && let Some((role, reachability, authority_name)) = required
     {
-        let status = reachability
-            .get(role)
-            .copied()
-            .unwrap_or(ReachabilityStatus::Unreachable);
+        let status =
+            reachability
+                .get(role)
+                .copied()
+                .unwrap_or(if authority.authority_graph_complete {
+                    ReachabilityStatus::Unreachable
+                } else {
+                    ReachabilityStatus::Unknown
+                });
         if status != ReachabilityStatus::Reachable {
             let (kind, severity, qualifier) = if status == ReachabilityStatus::Unknown {
                 (
@@ -944,16 +994,22 @@ fn analyze_required_authority(
             .filter(|((granted_role, _), _)| granted_role == role)
             .map(|((_, member), admin)| {
                 (
-                    authority
-                        .usage_reachable
-                        .get(member)
-                        .copied()
-                        .unwrap_or(ReachabilityStatus::Unreachable),
+                    authority.usage_reachable.get(member).copied().unwrap_or(
+                        if authority.authority_graph_complete {
+                            ReachabilityStatus::Unreachable
+                        } else {
+                            ReachabilityStatus::Unknown
+                        },
+                    ),
                     *admin,
                 )
             })
             .fold(
-                ReachabilityStatus::Unreachable,
+                if authority.authority_graph_complete {
+                    ReachabilityStatus::Unreachable
+                } else {
+                    ReachabilityStatus::Unknown
+                },
                 |best, (member, admin)| match (member, admin) {
                     (ReachabilityStatus::Reachable, SetRoleCapability::Allowed) => {
                         ReachabilityStatus::Reachable
@@ -1448,6 +1504,40 @@ mod tests {
         let response = analyze(input).unwrap();
         assert!(response.findings.iter().any(|finding| {
             finding.kind == FindingKind::RequiredRoleUnavailable
+                && finding.role.as_deref() == Some("owner")
+        }));
+    }
+
+    #[test]
+    fn incomplete_authority_graph_does_not_disprove_an_unseen_owner_path() {
+        let mut graph = RoleGraph::default();
+        graph.roles.insert("deployer".into(), RoleState::default());
+        graph.roles.insert("owner".into(), RoleState::default());
+        let executor = request(ReconciliationMode::Authoritative).executor;
+        let changes = vec![Change::SetDefaultPrivilege {
+            owner: "owner".into(),
+            scope: DefaultPrivilegeScope::Schema {
+                schema: "app".into(),
+            },
+            on_type: ObjectType::Table,
+            grantee: Grantee::from("deployer"),
+            privileges: BTreeSet::from([Privilege::Select]),
+        }];
+
+        let analysis = analyze_changes_with_options(
+            graph,
+            &changes,
+            &executor,
+            PlanAnalysisOptions {
+                authority_graph_complete: false,
+            },
+        );
+        assert!(!analysis.findings.iter().any(|finding| {
+            finding.kind == FindingKind::RequiredRoleUnavailable
+                && finding.role.as_deref() == Some("owner")
+        }));
+        assert!(analysis.findings.iter().any(|finding| {
+            finding.kind == FindingKind::RequiredRoleReachabilityUnknown
                 && finding.role.as_deref() == Some("owner")
         }));
     }

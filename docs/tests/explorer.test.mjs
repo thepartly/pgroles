@@ -79,21 +79,78 @@ test('accepts only structurally valid recorded review artifacts', () => {
   const artifact = {
     schema_version: 'pgroles.review-artifact.v1',
     provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
-    context: { mode: 'additive', inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
+    context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
     preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
     recorded: { changes: [], phases: [], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
-  assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0 }] }))
+  assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [] } }] }))
   assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v2' }), /unsupported review artifact schema version/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: {} } }), /recorded collections are malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'invented' } } }), /SQL preview is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [null] }), /preflight evidence is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'available', sql: {} } } }), /SQL preview content is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, context: { ...artifact.context, mode: 'invented' } }), /execution context is malformed/)
-  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 1 }] }), /preflight evidence is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 1, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [] } }] }), /preflight evidence is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, review_fingerprint: 'sha256:not-a-digest' } }), /fingerprint is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, exploration: { status: 'omitted', reason: 'invented' } }), /exploration status is malformed/)
+})
+
+test('rejects falsy nested review fields, malformed change variants, and incomplete phases', () => {
+  const artifact = {
+    schema_version: 'pgroles.review-artifact.v1',
+    provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
+    preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
+    recorded: {
+      changes: [{ index: 0, priority: 'Review', change: { kind: 'drop_role', name: 'obsolete' } }],
+      phases: [{ phase: 'retire', change_indices: [0], executor_reachability: [], executor_usage: [] }],
+      findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}`,
+    },
+  }
+  assert.equal(reviewArtifactImport(artifact), artifact)
+  for (const omissions of [false, 0, '']) {
+    assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: [{ ...artifact.recorded.changes[0], omissions }] } }), /changes are malformed/)
+  }
+  for (const source of [false, 0, '']) {
+    assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: [{ ...artifact.recorded.changes[0], source }] } }), /changes are malformed/)
+  }
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: [{ ...artifact.recorded.changes[0], change: { kind: 'drop_role' } }] } }), /changes are malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, phases: [] } }), /phases are malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, phases: [{ ...artifact.recorded.phases[0], change_indices: [0, 0] }] } }), /phases are malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, phases: [{ ...artifact.recorded.phases[0], change_indices: [] }] } }), /phases are malformed/)
+})
+
+test('accepts every sanitized ReviewChange variant', () => {
+  const state = { login: false, superuser: false, createdb: false, createrole: false, inherit: true, replication: false, bypassrls: false, connection_limit: -1, comment_present: false, password_valid_until: null, config_parameters: [] }
+  const changes = [
+    { kind: 'create_role', name: 'role', state }, { kind: 'create_schema', name: 'schema', owner: null },
+    { kind: 'alter_schema_owner', name: 'schema', owner: 'owner' }, { kind: 'ensure_schema_owner_privileges', name: 'schema', owner: 'owner', privileges: ['USAGE'] },
+    { kind: 'alter_role', name: 'role', attributes: [{ kind: 'set_config', parameter: 'work_mem' }, { kind: 'valid_until', value: null }] }, { kind: 'set_comment', name: 'role', comment_present: true },
+    { kind: 'grant', role: 'role', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'items' }, { kind: 'revoke', role: 'role', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'items', grantor: null },
+    { kind: 'set_default_privilege', owner: 'owner', scope: { type: 'global' }, on_type: 'table', grantee: 'role', privileges: ['SELECT'] }, { kind: 'revoke_default_privilege', owner: 'owner', scope: { type: 'schema', schema: 'app' }, on_type: 'table', grantee: 'PUBLIC', privileges: ['SELECT'] },
+    { kind: 'add_member', role: 'group', member: 'role', inherit: true, admin: false }, { kind: 'remove_member', role: 'group', member: 'role', grantor: null },
+    { kind: 'reassign_owned', from_role: 'old', to_role: 'new' }, { kind: 'drop_owned', role: 'old' }, { kind: 'terminate_sessions', role: 'old' }, { kind: 'set_password', name: 'role' }, { kind: 'drop_role', name: 'old' },
+  ]
+  const artifact = {
+    schema_version: 'pgroles.review-artifact.v1', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
+    recorded: { changes: changes.map((change, index) => ({ index, priority: 'Review', change })), phases: [{ phase: 'create', change_indices: changes.map((_, index) => index), executor_reachability: [], executor_usage: [] }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+  }
+  assert.equal(reviewArtifactImport(artifact), artifact)
+})
+
+test('rejects authority overclaims, contradictory coverage, and invented source keys', () => {
+  const artifact = {
+    schema_version: 'pgroles.review-artifact.v1', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, exploration: { status: 'omitted', reason: 'recorded_only_export' },
+    recorded: { changes: [{ index: 0, priority: 'Review', source: { document: 'roles.yaml', managed_key: { kind: 'role', name: 'app' } }, change: { kind: 'drop_role', name: 'app' } }], phases: [{ phase: 'retire', change_indices: [0], executor_reachability: [], executor_usage: [] }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    preflight: [{ check: 'executor_authority', status: 'unknown', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [0] } }],
+  }
+  assert.equal(reviewArtifactImport(artifact), artifact)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], status: 'passed' }] }), /preflight evidence is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], coverage: { ...artifact.preflight[0].coverage, kind: 'complete' } }] }), /preflight coverage is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: [{ ...artifact.recorded.changes[0], source: { document: 'roles.yaml', managed_key: { kind: 'invented' } } }] } }), /changes are malformed/)
 })
 
 test('preserves malformed-input errors from wasm-bindgen', () => {
