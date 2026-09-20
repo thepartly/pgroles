@@ -66,10 +66,10 @@ export function Hero() {
                 Start with a diff
               </Link>
               <Link
-                href="/docs/operator"
+                href="/docs/operator-quick-start"
                 className={buttonVariants({ variant: 'outline', size: 'lg' })}
               >
-                Explore the operator
+                Try the operator
               </Link>
             </div>
 
