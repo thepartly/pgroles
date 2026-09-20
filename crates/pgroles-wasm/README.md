@@ -22,16 +22,20 @@ const result = analyze({
 })
 ```
 
-`current` is only the managed, sanitized snapshot. Its grants may include a
+`current` is only the managed, password-free snapshot, sanitized by the caller.
+Role configuration accepts arbitrary strings and can contain credentials;
+remove sensitive values before importing or sharing a snapshot. Its grants may include a
 `grantors` map and memberships a `grantors` list when an exporter knows
-PostgreSQL 16+ attribution. The executor is separate auxiliary context:
+PostgreSQL 16+ attribution. `inherent_grants` records owner privilege targets as
+`{ role, object_type, schema, name }`, so planning does not revoke intrinsic
+privileges. The executor is separate auxiliary context:
 `memberships` records `{ role, member, set_role, inherit, admin_option }`,
 where each authority option is `allowed`, `denied`, or `unknown`. The executor
 also accepts `new_membership_set_role`, `new_role_set_role`, `new_role_inherit`,
 and `new_role_admin_option` with the same tri-state semantics.
 
 The request strictly decodes `schema_version`, `current`, `desired_yaml`,
-`mode`, and `executor`; unknown fields, credentials, password fields, and
+`mode`, and `executor`; unknown fields, explicit credential fields, password fields, and
 password sources in desired YAML are rejected. The response contains ordered
 `changes`, phase `changes`, `executor_reachability` (SET ROLE) and
 `executor_usage` (inherited privileges), findings, a visual graph, and an

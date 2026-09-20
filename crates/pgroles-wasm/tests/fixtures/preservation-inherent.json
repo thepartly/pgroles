@@ -1,0 +1,33 @@
+{
+  "schema_version": "pgroles.explorer.v1",
+  "current": {
+    "roles": { "deployer": {}, "brownfield": {}, "app_owner": {} },
+    "grants": [
+      {
+        "role": "brownfield",
+        "object_type": "table",
+        "schema": "app",
+        "name": "legacy",
+        "privileges": ["SELECT"]
+      },
+      {
+        "role": "app_owner",
+        "object_type": "table",
+        "schema": "app",
+        "name": "widgets",
+        "privileges": ["SELECT", "INSERT"]
+      }
+    ],
+    "inherent_grants": [
+      {
+        "role": "app_owner",
+        "object_type": "table",
+        "schema": "app",
+        "name": "widgets"
+      }
+    ]
+  },
+  "desired_yaml": "roles:\n  - name: deployer\n  - name: brownfield\n    preserve_undeclared_grants: true\n  - name: app_owner\ngrants:\n  - role: app_owner\n    privileges: [SELECT]\n    object: { type: table, schema: app, name: widgets }\n",
+  "mode": "authoritative",
+  "executor": { "role": "deployer", "superuser": false }
+}

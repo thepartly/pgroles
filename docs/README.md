@@ -30,12 +30,14 @@ from forks do not receive it, so the docs workflow skips them.
 npm run lint
 npm run test:labs
 npm run test:explorer
-npm run test:browser
 npm run test:routing
-npm run build
+DOCS_BASE_PATH=/pgroles/pr-preview/pr-236 npm run build
+DOCS_TEST_BASE_PATH=/pgroles/pr-preview/pr-236 npm run test:browser
 ```
 
 `test:labs` runs the interactive lab exercises in `src/components` against
-PGlite. `test:browser` uses the generated WASM package in `public/wasm`, and
-`build` produces the static export in `out/`. The generated WASM package is
-ignored by Git and rebuilt by the docs workflow.
+PGlite. `build` produces the static export in `out/`. `test:browser` serves that
+export under the configured deployment path and checks the generated JavaScript
+and WASM assets. Use the same base path for both commands. The docs workflow
+rebuilds WASM, removes its generated `.gitignore` from the export, and verifies
+the assets can be staged for Git-based Pages deployment.

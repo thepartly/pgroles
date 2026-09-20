@@ -18,6 +18,7 @@ import {
   explorerImport,
   loadAnalyzer,
   readableWasmError,
+  validateSnapshotFileSize,
 } from '@/lib/pgrolesExplorer.mjs'
 
 const examples = {
@@ -141,6 +142,26 @@ function ReachabilityList({ label, values = [] }) {
   )
 }
 
+function FindingItem({ finding, changes }) {
+  const severity = finding.severity ?? 'warning'
+  const tones = {
+    error: 'border-red-300 bg-red-50 text-red-950 dark:border-red-900 dark:bg-red-950/30 dark:text-red-100',
+    info: 'border-teal-300 bg-teal-50 text-teal-950 dark:border-teal-900 dark:bg-teal-950/30 dark:text-teal-100',
+    warning: 'border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100',
+  }
+  const change = finding.change_index == null ? null : changes[finding.change_index]
+  return (
+    <li data-severity={severity} className={`flex gap-3 rounded-lg border p-3 text-sm ${tones[severity] ?? tones.warning}`}>
+      <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
+      <span>
+        <span className="mb-1 block text-xs font-semibold uppercase">{humanize(severity)}</span>
+        {(finding.phase || change) && <span className="mb-1 block text-xs font-semibold opacity-75">{finding.phase ? humanize(finding.phase) : 'Plan'}{change ? ` · ${changeLabel(change)}` : ''}</span>}
+        {finding.message}
+      </span>
+    </li>
+  )
+}
+
 function RoleSheet({ node, edges, onClose }) {
   if (!node) return null
   const connected = edges.filter((edge) => edge.source === node.id || edge.target === node.id)
@@ -163,12 +184,20 @@ function RoleSheet({ node, edges, onClose }) {
   )
 }
 
+const MAX_GRAPH_NODES = 48
+
 function Graph({ visual, onSelect }) {
   const [zoom, setZoom] = useState(1)
-  const width = Math.max(720, visual.nodes.length * 150)
-  const positions = new Map(visual.nodes.map((node, index) => {
-    const angle = (index / Math.max(visual.nodes.length, 1)) * Math.PI * 2
-    return [node.id, { x: width / 2 + Math.cos(angle) * width * 0.34, y: 230 + Math.sin(angle) * 165 }]
+  const nodes = visual.nodes.slice(0, MAX_GRAPH_NODES)
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  const columns = Math.min(6, Math.max(1, Math.ceil(Math.sqrt(nodes.length))))
+  const rows = Math.ceil(nodes.length / columns)
+  const width = Math.min(1080, Math.max(360, columns * 170))
+  const height = Math.min(720, Math.max(180, rows * 90))
+  const positions = new Map(nodes.map((node, index) => {
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    return [node.id, { x: ((column + 0.5) * width) / columns, y: ((row + 0.5) * height) / rows }]
   }))
   return (
     <div className="rounded-xl border bg-[radial-gradient(circle_at_1px_1px,rgba(120,113,108,.22)_1px,transparent_0)] bg-[size:20px_20px]">
@@ -178,14 +207,15 @@ function Graph({ visual, onSelect }) {
         <button type="button" aria-label="Zoom graph in" onClick={() => setZoom((value) => Math.min(1.8, value + .2))} className="rounded p-2 hover:bg-stone-100 dark:hover:bg-stone-800"><IconZoomIn className="size-4" /></button>
       </div>
       <div className="overflow-auto p-3" style={{ touchAction: 'pan-x pan-y' }}>
-        <svg viewBox={`0 0 ${width} 460`} width={width * zoom} height={460 * zoom} role="img" aria-label="Resulting role and privilege graph">
+        {visual.nodes.length > nodes.length && <p className="mb-2 text-xs text-muted-foreground">Showing {nodes.length} of {visual.nodes.length} nodes. Use the role list for the complete result.</p>}
+        <svg viewBox={`0 0 ${width} ${height}`} width={width * zoom} height={height * zoom} role="img" aria-label="Resulting role and privilege graph" data-node-count={nodes.length}>
           <defs><marker id="explorer-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" className="fill-teal-600" /></marker></defs>
-          {visual.edges.map((edge, index) => {
+          {visual.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).map((edge, index) => {
             const source = positions.get(edge.source); const target = positions.get(edge.target)
             if (!source || !target) return null
             return <line key={index} x1={source.x} y1={source.y} x2={target.x} y2={target.y} className="stroke-teal-600" strokeWidth="2" markerEnd="url(#explorer-arrow)" />
           })}
-          {visual.nodes.map((node) => {
+          {nodes.map((node) => {
             const point = positions.get(node.id)
             return <g key={node.id} role="button" tabIndex="0" aria-label={`${humanize(node.kind)} ${node.label}`} onClick={() => onSelect(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelect(node) }} className="cursor-pointer outline-none">
               <rect x={point.x - 70} y={point.y - 28} width="140" height="56" rx="10" className="fill-white stroke-stone-400 hover:stroke-amber-500 dark:fill-stone-900 dark:stroke-stone-600" strokeWidth="2" />
@@ -199,9 +229,27 @@ function Graph({ visual, onSelect }) {
   )
 }
 
+function RoleAdjacency({ visual, onSelect }) {
+  const labels = new Map(visual.nodes.map((node) => [node.id, node.label]))
+  const roles = visual.nodes.filter((node) => node.kind === 'role' || node.kind === 'external_principal')
+  return (
+    <section>
+      <h2 className="font-display text-xl font-semibold">Role index</h2>
+      <p className="mt-1 text-sm text-muted-foreground">A compact, complete list of roles and their nearest connections.</p>
+      <ul className="mt-3 max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+        {roles.map((role) => {
+          const connections = visual.edges.filter((edge) => edge.source === role.id || edge.target === role.id)
+          return <li key={role.id}><button type="button" onClick={() => onSelect(role)} className="w-full rounded-lg border bg-white p-3 text-left dark:bg-stone-900"><span className="font-mono text-sm font-semibold">{role.label}</span><span className="mt-1 block text-xs text-muted-foreground">{connections.length === 0 ? 'No connections' : connections.slice(0, 3).map((edge) => labels.get(edge.source === role.id ? edge.target : edge.source) ?? edge.label).join(' · ')}{connections.length > 3 ? ` · +${connections.length - 3} more` : ''}</span></button></li>
+        })}
+      </ul>
+    </section>
+  )
+}
+
 export function PgrolesExplorer() {
   const router = useRouter()
   const fileInput = useRef(null)
+  const analysisRun = useRef(0)
   const initial = examples.onboarding
   const [desiredYaml, setDesiredYaml] = useState(initial.yaml)
   const [snapshot, setSnapshot] = useState(initial.snapshot)
@@ -221,6 +269,14 @@ export function PgrolesExplorer() {
   const [selectedNode, setSelectedNode] = useState(null)
 
   const findingsBySeverity = useMemo(() => result?.findings ?? [], [result])
+  const errorCount = useMemo(() => findingsBySeverity.filter((finding) => finding.severity === 'error').length, [findingsBySeverity])
+
+  function clearAnalysis() {
+    analysisRun.current += 1
+    setResult(null)
+    setSelectedNode(null)
+    setLoading(false)
+  }
 
   function selectExample(key) {
     const example = examples[key]
@@ -234,15 +290,20 @@ export function PgrolesExplorer() {
     setNewRoleSetRole('unknown')
     setNewRoleInherit('unknown')
     setNewRoleAdminOption('unknown')
-    setResult(null)
+    clearAnalysis()
     setError('')
   }
 
   async function importSnapshot(event) {
     const file = event.target.files?.[0]
     if (!file) return
+    clearAnalysis()
+    const run = analysisRun.current
+    setError('')
     try {
+      validateSnapshotFileSize(file.size)
       const parsed = explorerImport(JSON.parse(await file.text()))
+      if (analysisRun.current !== run) return
       setSnapshot(parsed.current)
       setSnapshotName(file.name)
       if (parsed.executor?.role) setExecutorRole(parsed.executor.role)
@@ -252,27 +313,31 @@ export function PgrolesExplorer() {
       setNewRoleSetRole(parsed.executor?.new_role_set_role ?? 'unknown')
       setNewRoleInherit(parsed.executor?.new_role_inherit ?? 'unknown')
       setNewRoleAdminOption(parsed.executor?.new_role_admin_option ?? 'unknown')
-      setResult(null)
-      setError('')
     } catch (readError) {
-      setError(`Could not read snapshot: ${readableWasmError(readError)}`)
+      if (analysisRun.current === run) {
+        setError(`Could not read snapshot: ${readableWasmError(readError)}`)
+      }
     } finally {
       event.target.value = ''
     }
   }
 
   async function runAnalysis() {
+    const run = ++analysisRun.current
     setLoading(true)
     setError('')
     try {
       const analyze = await loadAnalyzer(router.basePath)
       const request = analyzeRequest({ current: snapshot, desiredYaml, mode, executorRole, executorSuperuser, executorMemberships, newMembershipSetRole, newRoleSetRole, newRoleInherit, newRoleAdminOption })
-      setResult(analyze(request))
+      const nextResult = analyze(request)
+      if (analysisRun.current === run) setResult(nextResult)
     } catch (analysisError) {
-      setResult(null)
-      setError(readableWasmError(analysisError))
+      if (analysisRun.current === run) {
+        setResult(null)
+        setError(readableWasmError(analysisError))
+      }
     } finally {
-      setLoading(false)
+      if (analysisRun.current === run) setLoading(false)
     }
   }
 
@@ -288,7 +353,7 @@ export function PgrolesExplorer() {
             <div><h2 className="font-display text-base font-semibold">Desired YAML</h2><p className="text-xs text-muted-foreground">Edit locally, then analyze the plan.</p></div>
             <select aria-label="Load bundled example" defaultValue="onboarding" onChange={(event) => selectExample(event.target.value)} className="rounded-md border bg-transparent px-3 py-2 text-sm"><option value="onboarding">Brownfield example</option><option value="empty">New database example</option></select>
           </div>
-          <textarea aria-label="Desired YAML" spellCheck="false" value={desiredYaml} onChange={(event) => { setDesiredYaml(event.target.value); setResult(null) }} className="min-h-[28rem] w-full resize-y bg-stone-950 p-4 font-mono text-[13px] leading-6 text-stone-100 outline-none" />
+          <textarea aria-label="Desired YAML" spellCheck="false" value={desiredYaml} onChange={(event) => { setDesiredYaml(event.target.value); clearAnalysis() }} className="min-h-[28rem] w-full resize-y bg-stone-950 p-4 font-mono text-[13px] leading-6 text-stone-100 outline-none" />
         </div>
 
         <div className="space-y-5">
@@ -299,10 +364,10 @@ export function PgrolesExplorer() {
             <button type="button" onClick={() => fileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Import sanitized JSON</button>
           </section>
           <section className="space-y-4 rounded-2xl border bg-white p-5 dark:bg-stone-900">
-            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); setResult(null) }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={executorSuperuser} onChange={(event) => { setExecutorSuperuser(event.target.checked); setResult(null) }} /> Executor is a superuser</label>
-            <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); setResult(null) }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
-            <label className="block text-sm font-medium">Reconciliation mode<select value={mode} onChange={(event) => { setMode(event.target.value); setResult(null) }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="authoritative">Authoritative</option><option value="additive">Additive</option><option value="adopt">Adopt</option></select></label>
+            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={executorSuperuser} onChange={(event) => { setExecutorSuperuser(event.target.checked); clearAnalysis() }} /> Executor is a superuser</label>
+            <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
+            <label className="block text-sm font-medium">Reconciliation mode<select value={mode} onChange={(event) => { setMode(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="authoritative">Authoritative</option><option value="additive">Additive</option><option value="adopt">Adopt</option></select></label>
             <button type="button" onClick={runAnalysis} disabled={loading || !executorRole.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-3 font-semibold text-stone-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">
               {loading ? <IconLoader2 className="size-5 animate-spin" /> : <IconPlayerPlay className="size-5" />} {loading ? 'Loading analyzer…' : 'Analyze plan'}
             </button>
@@ -316,15 +381,16 @@ export function PgrolesExplorer() {
       {result && <section aria-live="polite" className="space-y-6">
         <div className="grid gap-4 sm:grid-cols-3">
           <div className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Changes</span><strong className="mt-1 block text-2xl">{result.changes.length}</strong></div>
-          <div className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Findings</span><strong className="mt-1 block text-2xl">{result.findings.length}</strong></div>
+          <div className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Findings</span><strong className="mt-1 block text-2xl">{result.findings.length}</strong>{errorCount > 0 && <span className="mt-1 block text-xs font-semibold text-red-700 dark:text-red-300">{errorCount} error{errorCount === 1 ? '' : 's'}</span>}</div>
           <div className="min-w-0 rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Illustrative plan fingerprint</span><code className="mt-1 block truncate text-sm" title={result.plan_fingerprint}>{result.plan_fingerprint}</code></div>
         </div>
         <p className="rounded-lg bg-stone-200/60 px-4 py-3 text-xs leading-5 text-muted-foreground dark:bg-stone-800/60">This fingerprint identifies the effects, mode, and executor facts supplied to this browser analysis. It is not an approval token and does not include verified target identity or the full execution context.</p>
 
-        {findingsBySeverity.length > 0 && <div><h2 className="font-display text-xl font-semibold">Authority findings</h2><ul className="mt-3 space-y-2">{findingsBySeverity.map((finding, index) => <li key={index} className="flex gap-3 rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><IconAlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600"/><span>{(finding.phase || finding.change_index != null) && <span className="mb-1 block text-xs font-semibold text-muted-foreground">{finding.phase ? humanize(finding.phase) : 'Plan'}{finding.change_index != null && result.changes[finding.change_index] ? ` · ${changeLabel(result.changes[finding.change_index])}` : ''}</span>}{finding.message}</span></li>)}</ul></div>}
+        {findingsBySeverity.length > 0 && <div><h2 className="font-display text-xl font-semibold">Authority findings</h2><ul className="mt-3 space-y-2">{findingsBySeverity.map((finding, index) => <FindingItem key={index} finding={finding} changes={result.changes} />)}</ul></div>}
 
         <div><h2 className="font-display text-xl font-semibold">Execution phases</h2><p className="mt-1 mb-5 text-sm text-muted-foreground">Each boundary is simulated by pgroles-core before the next phase is evaluated.</p><PhaseTimeline phases={result.phases} /></div>
 
+        <RoleAdjacency visual={result.visual} onSelect={setSelectedNode} />
         <div>
           <button type="button" onClick={() => setShowGraph((visible) => !visible)} aria-expanded={showGraph} className="flex w-full items-center justify-between rounded-xl border bg-white p-4 text-left font-semibold dark:bg-stone-900"><span className="flex items-center gap-2"><IconNetwork className="size-5"/> Resulting role graph</span><IconChevronRight className={`size-5 transition ${showGraph ? 'rotate-90' : ''}`}/></button>
           {showGraph && <div className="mt-3"><p className="mb-2 text-xs text-muted-foreground">Scroll to explore. Select a node for role and connection details.</p><Graph visual={result.visual} onSelect={setSelectedNode}/></div>}

@@ -233,19 +233,7 @@ pub(crate) fn policy_changes(
     expanded: &pgroles_core::manifest::ExpandedManifest,
     reconciliation_mode: pgroles_core::diff::ReconciliationMode,
 ) -> Vec<pgroles_core::diff::Change> {
-    let mut changes = pgroles_core::diff::filter_changes(
-        pgroles_core::diff::apply_role_retirements(
-            pgroles_core::diff::diff(current, desired),
-            &manifest.retirements,
-        ),
-        reconciliation_mode,
-    );
-    changes = pgroles_core::diff::filter_external_role_changes(
-        changes,
-        &expanded.roles,
-        &expanded.memberships,
-    );
-    pgroles_core::diff::filter_preserved_grant_revokes(changes, &expanded.roles, desired)
+    pgroles_core::diff::plan_changes(current, desired, manifest, expanded, reconciliation_mode)
 }
 
 /// Run one pre-lock Kubernetes API call under [`K8S_CALL_TIMEOUT`].

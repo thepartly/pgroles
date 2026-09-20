@@ -66,9 +66,11 @@ jobs:
           cache-dependency-path: docs/package-lock.json
           registry-url: https://registry.npmjs.org
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Install active toolchain WASM target
+        run: rustup target add wasm32-unknown-unknown
+        working-directory: ${{ github.workspace }}
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
@@ -99,9 +101,6 @@ jobs:
       - name: Install browser for explorer tests
         run: npx playwright install --with-deps chromium
 
-      - name: Run explorer browser tests
-        run: npm run test:browser
-
       - name: Verify generated reference rendering
         working-directory: docs
         run: npm run test:reference
@@ -119,6 +118,30 @@ jobs:
               || steps.pages.outputs.base_path
             }}
         run: npm run build
+
+      - name: Assert exported WASM assets
+        run: |
+          rm -f out/wasm/.gitignore
+          test -s out/wasm/pgroles_wasm.js
+          test -s out/wasm/pgroles_wasm_bg.wasm
+
+      - name: Verify exported WASM assets stage for Git deployment
+        run: |
+          stage_dir="$(mktemp -d)"
+          git init -q "$stage_dir"
+          cp -R out/wasm "$stage_dir/wasm"
+          git -C "$stage_dir" add --dry-run wasm/pgroles_wasm.js wasm/pgroles_wasm_bg.wasm | grep -F 'pgroles_wasm.js'
+          git -C "$stage_dir" add --dry-run wasm/pgroles_wasm.js wasm/pgroles_wasm_bg.wasm | grep -F 'pgroles_wasm_bg.wasm'
+
+      - name: Run explorer browser tests against static export
+        env:
+          DOCS_TEST_BASE_PATH: >-
+            ${{
+              github.event_name == 'pull_request'
+              && format('{0}/pr-preview/pr-{1}', steps.pages.outputs.base_path, github.event.pull_request.number)
+              || steps.pages.outputs.base_path
+            }}
+        run: npm run test:browser
 
       - name: Disable Jekyll
         run: touch out/.nojekyll
