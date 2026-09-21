@@ -213,3 +213,105 @@ test('index omits sidebar, contents disclosure, build footer, and interactive la
   }, basePath)
   expect(Object.values(resultCounts)).toEqual([1, 0, 0])
 })
+
+for (const outcome of ['success', 'failure', 'new query']) {
+  test(`pagination preserves loaded results while additional fragments resolve: ${outcome}`, async ({
+    page,
+  }) => {
+    await page.goto('docs/quick-start/')
+    await page
+      .getByRole('button', { name: 'Search documentation', exact: true })
+      .click()
+    const links = await search(page, 'roles')
+    const originalPaths = await resultPaths(links)
+    const originalFirst = await links.first().elementHandle()
+    const list = page.getByRole('list', { name: 'Search results' })
+    const scroller = list.locator('..')
+    const more = page.getByRole('button', { name: 'Show more results' })
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    let requests = 0
+    let failRequests = outcome === 'failure'
+    await page.route('**/pagefind/fragment/*', async (route) => {
+      requests += 1
+      await gate
+      if (failRequests) await route.abort()
+      else await route.continue()
+    })
+    await more.focus()
+    await more.scrollIntoViewIfNeeded()
+    const scrollTop = await scroller.evaluate((element) => element.scrollTop)
+    await page.keyboard.press('Enter')
+    await expect.poll(() => requests).toBeGreaterThan(0)
+    await expect(links).toHaveCount(10)
+    expect(await resultPaths(links)).toEqual(originalPaths)
+    expect(await originalFirst.evaluate((element) => element.isConnected)).toBe(
+      true
+    )
+    await expect(more).toBeFocused()
+    await expect(more).toHaveAttribute('aria-disabled', 'true')
+    expect(await scroller.evaluate((element) => element.scrollTop)).toBeCloseTo(
+      scrollTop,
+      0
+    )
+    await expect(
+      page.getByText('Loading more results…', { exact: true })
+    ).toBeVisible()
+    if (outcome === 'new query') {
+      await page.getByRole('searchbox').fill('review-out')
+      release()
+      await expect(links).toHaveCount(3)
+      await expect(links.first()).toContainText('Recorded reviews')
+    } else {
+      release()
+      if (outcome === 'failure') {
+        await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
+          'Your loaded results are still available'
+        )
+        await expect(links).toHaveCount(10)
+        expect(await resultPaths(links)).toEqual(originalPaths)
+        expect(
+          await scroller.evaluate((element) => element.scrollTop)
+        ).toBeCloseTo(scrollTop, 0)
+        const retry = page.getByRole('button', { name: 'Retry more results' })
+        await expect(retry).toBeFocused()
+        failRequests = false
+        await page.keyboard.press('Enter')
+      }
+      await expect(links).toHaveCount(20)
+      expect((await resultPaths(links)).slice(0, 10)).toEqual(originalPaths)
+      expect(
+        await originalFirst.evaluate((element) => element.isConnected)
+      ).toBe(true)
+      await expect(links.nth(10)).toBeFocused()
+      expect(
+        await scroller.evaluate((element) => element.scrollTop)
+      ).toBeCloseTo(scrollTop, 0)
+    }
+  })
+}
+
+test('selects page-level matches as well as precise field headings', async ({
+  page,
+}) => {
+  await page.goto('docs/quick-start/')
+  await page
+    .getByRole('button', { name: 'Search documentation', exact: true })
+    .click()
+  let links = await search(page, 'row level security')
+  const lesson = links.filter({ hasText: '8. Same table, different rows' })
+  await expect(lesson).toHaveAttribute(
+    'href',
+    `${basePath}/docs/postgresql-row-security/`
+  )
+  links = await search(page, 'exclusive')
+  await expect(links.filter({ hasText: 'Manifest reference' })).toHaveAttribute(
+    'href',
+    /#exclusive$/
+  )
+  links = await search(page, 'preserve_undeclared_grants')
+  await expect(links.first()).toContainText('Manifest reference')
+  await expect(links.first()).toHaveAttribute('href', /manifest-reference\/#/)
+})

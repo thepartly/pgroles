@@ -34,8 +34,7 @@ export function excerptText(encoded) {
 }
 
 export function bestSection(result) {
-  const sections =
-    result.sub_results?.filter((section) => section.url.includes('#')) ?? []
+  const sections = result.sub_results ?? []
   const score = (section) =>
     (section.weighted_locations ?? []).reduce(
       (total, location) => total + location.balanced_score,

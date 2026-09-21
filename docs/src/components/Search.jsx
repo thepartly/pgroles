@@ -20,13 +20,15 @@ function SearchContents({ basePath, onClose }) {
   const [query, setQuery] = useState('')
   const [contentType, setContentType] = useState('')
   const [destination, setDestination] = useState('')
-  const [limit, setLimit] = useState(10)
   const [retry, setRetry] = useState(0)
   const [state, setState] = useState({ status: 'idle', results: [], total: 0 })
   const resultsRef = useRef(null)
+  const moreButtonRef = useRef(null)
+  const generation = useRef(0)
+  const focusResult = useRef(null)
 
   useEffect(() => {
-    let cancelled = false
+    const currentGeneration = ++generation.current
     const timer = window.setTimeout(async () => {
       if (!query.trim()) {
         setState({ status: 'idle', results: [], total: 0 })
@@ -40,27 +42,70 @@ function SearchContents({ basePath, onClose }) {
         if (destination) filters.destination = destination
         const response = await pagefind.search(query, { filters })
         const results = await Promise.all(
-          response.results.slice(0, limit).map((result) => result.data())
+          response.results.slice(0, 10).map((result) => result.data())
         )
-        if (!cancelled)
+        if (generation.current === currentGeneration)
           setState({
             status: 'ready',
             results,
             total: response.results.length,
           })
       } catch {
-        if (!cancelled) setState({ status: 'error', results: [], total: 0 })
+        if (generation.current === currentGeneration)
+          setState({ status: 'error', results: [], total: 0 })
       }
     }, 150)
     return () => {
-      cancelled = true
+      generation.current += 1
       window.clearTimeout(timer)
     }
-  }, [basePath, query, contentType, destination, limit, retry])
+  }, [basePath, query, contentType, destination, retry])
+
+  useEffect(() => {
+    if (focusResult.current === null) return
+    resultsRef.current
+      ?.querySelectorAll('a')
+      [focusResult.current]?.focus({ preventScroll: true })
+    focusResult.current = null
+  }, [state.results])
+
+  async function loadMore() {
+    if (state.status === 'loading-more') return
+    const currentGeneration = generation.current
+    const loadedCount = state.results.length
+    if (state.status === 'more-error') resetSearch()
+    setState((current) => ({ ...current, status: 'loading-more' }))
+    try {
+      const pagefind = await loadSearch(basePath)
+      const filters = {}
+      if (contentType) filters.content_type = contentType
+      if (destination) filters.destination = destination
+      const response = await pagefind.search(query, { filters })
+      const additionalResults = await Promise.all(
+        response.results
+          .slice(loadedCount, loadedCount + 10)
+          .map((result) => result.data())
+      )
+      if (generation.current !== currentGeneration) return
+      if (
+        document.activeElement === moreButtonRef.current &&
+        additionalResults.length
+      ) {
+        focusResult.current = loadedCount
+      }
+      setState((current) => ({
+        status: 'ready',
+        results: [...current.results, ...additionalResults],
+        total: response.results.length,
+      }))
+    } catch {
+      if (generation.current === currentGeneration)
+        setState((current) => ({ ...current, status: 'more-error' }))
+    }
+  }
 
   function updateQuery(value) {
     setQuery(value)
-    setLimit(10)
     setState({
       status: value.trim() ? 'loading' : 'idle',
       results: [],
@@ -125,7 +170,6 @@ function SearchContents({ basePath, onClose }) {
               value={contentType}
               onChange={(event) => {
                 setContentType(event.target.value)
-                setLimit(10)
                 setState({ status: 'loading', results: [], total: 0 })
               }}
               className="mt-1 w-full rounded-md border bg-white p-2 dark:bg-stone-900"
@@ -143,7 +187,6 @@ function SearchContents({ basePath, onClose }) {
               value={destination}
               onChange={(event) => {
                 setDestination(event.target.value)
-                setLimit(10)
                 setState({ status: 'loading', results: [], total: 0 })
               }}
               className="mt-1 w-full rounded-md border bg-white p-2 dark:bg-stone-900"
@@ -160,7 +203,7 @@ function SearchContents({ basePath, onClose }) {
           {state.status === 'idle' &&
             'Search across guides, references and PostgreSQL courses.'}
           {state.status === 'loading' && 'Searching…'}
-          {state.status === 'ready' &&
+          {['ready', 'loading-more', 'more-error'].includes(state.status) &&
             (state.total
               ? `${state.total} results`
               : 'No results. Try different words or clear the filters.')}
@@ -202,7 +245,7 @@ function SearchContents({ basePath, onClose }) {
                   className="font-semibold text-amber-800 underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-amber-600 dark:text-amber-300"
                 >
                   {result.meta.title}
-                  {section && (
+                  {section?.url.includes('#') && (
                     <span className="block text-sm font-normal">
                       {section.title}
                     </span>
@@ -217,14 +260,29 @@ function SearchContents({ basePath, onClose }) {
             )
           })}
         </ol>
-        {state.status === 'ready' && state.total > state.results.length && (
+        {state.total > state.results.length && (
           <Button
+            ref={moreButtonRef}
             variant="outline"
             className="mt-4"
-            onPress={() => setLimit((current) => current + 10)}
+            aria-disabled={state.status === 'loading-more'}
+            onPress={loadMore}
           >
-            Show more results
+            {state.status === 'more-error'
+              ? 'Retry more results'
+              : 'Show more results'}
           </Button>
+        )}
+        {state.status === 'loading-more' && (
+          <p role="status" className="mt-2 text-sm">
+            Loading more results…
+          </p>
+        )}
+        {state.status === 'more-error' && (
+          <p role="alert" className="mt-2 text-sm">
+            More results could not load. Your loaded results are still
+            available.
+          </p>
         )}
       </div>
     </Dialog>
