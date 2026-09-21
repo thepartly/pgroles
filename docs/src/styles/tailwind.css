@@ -112,3 +112,5 @@
 .crd-reference th:first-child { width: 34%; }
 .crd-reference td { overflow-wrap: anywhere; }
 .crd-reference td code { white-space: normal; overflow-wrap: anywhere; }
+
+.prose :not(pre) > code { overflow-wrap: anywhere; }

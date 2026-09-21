@@ -162,13 +162,13 @@ Use `name: "*"` to grant on all current objects of a type in a schema. pgroles e
 Pair wildcard grants with `default_privileges` when the same role should access future objects created by the migration or owner role. Wildcards cover existing objects at reconcile time; default privileges cover objects created later.
 
 {% callout type="note" title="Managed owners still need declared privileges" %}
-If the role that owns tables or functions is also inside pgroles' managed role set, declare the privileges you want that owner role to keep. PostgreSQL owners effectively have broad privileges on their own objects, and pgroles treats undeclared current privileges as drift in `authoritative` mode.
+pgroles preserves existing owner-held ACL entries during reconciliation. Declare owner privileges when you want missing privileges restored; do not use manifest omission to remove ownership authority.
 {% /callout %}
 
 ## Convergent model
 
 {% callout type="warning" title="pgroles is convergent" %}
-The manifest represents the **entire desired state**. Roles, grants, default privileges, and memberships that exist in the database but are absent from the manifest will be dropped or revoked. Declared schemas are created and their owner may be converged, but schemas are not dropped automatically. Only declare roles and schemas that pgroles should manage.
+The manifest declares desired state within pgroles’ managed scope. Reconciliation mode determines which changes are permitted, while external roles, PUBLIC rules and preservation settings introduce additional boundaries. Review the complete plan before applying.
 {% /callout %}
 
 Next: use the [manifest reference](/docs/manifest-reference) for exact field names, defaults, and bundle-mode details.

@@ -16,10 +16,6 @@ they appear.
 {% callout type="note" title="Not built yet" %}
 These are the only forward-looking items on this page:
 
-- **`pgroles plan ...` and `pgroles candidate ...` CLI subcommands** — the CLI
-  has no such commands. `pgroles plan` is an alias of `pgroles diff` and works
-  against a database directly, not against a cluster. Use `kubectl` for
-  everything on this page, and for candidates too.
 - **Content by reference** — `spec.contentRef` on a candidate, for policies too
   large to embed. Inline content is the only supported form today.
 - **An `approvedChangeDigest` token on the decision** — pinning the digest a
@@ -27,6 +23,10 @@ These are the only forward-looking items on this page:
   object: a decision applies to whatever digest that plan holds, and a
   supersede retires the plan rather than mutating it.
 {% /callout %}
+
+`pgroles plan` previews a policy against PostgreSQL directly. Use `pgroles candidate`
+to create and inspect operator candidates; decisions remain in the authenticated
+Kubernetes approval workflow.
 
 ## Observe mode
 

@@ -152,6 +152,8 @@ semantics.
 
 ## Executor privileges
 
+### Permission denied
+
 `InsufficientPrivileges` means the database credential is valid but cannot
 perform the requested inspection or mutation. The PostgreSQL error in
 `last_error` identifies the failed operation, such as `permission denied to
@@ -218,6 +220,10 @@ Review the generated SQL in observe mode before approving destructive retirement
 steps. Do not remove the safety blocker merely to make the policy green.
 
 ## A plan does not execute
+
+### Approval pending
+
+A plan in `Pending` with manual approval needs a decision before it can execute.
 
 First inspect all three execution gates:
 

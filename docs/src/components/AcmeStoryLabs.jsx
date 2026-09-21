@@ -324,7 +324,7 @@ function AcmeStoryLab({ chapter }) {
   }
 
   return (
-    <div className="not-prose my-6 overflow-hidden rounded-[2rem] border border-stone-300/90 bg-white shadow-[0_30px_80px_-52px_rgba(28,25,23,0.5)] dark:border-stone-700 dark:bg-stone-900 dark:shadow-none sm:my-10">
+    <div data-pagefind-ignore className="not-prose my-6 overflow-hidden rounded-[2rem] border border-stone-300/90 bg-white shadow-[0_30px_80px_-52px_rgba(28,25,23,0.5)] dark:border-stone-700 dark:bg-stone-900 dark:shadow-none sm:my-10">
       <header className="hidden border-b border-stone-300/80 bg-[linear-gradient(135deg,rgba(254,243,199,0.75),rgba(240,253,250,0.8))] px-5 py-5 dark:border-stone-700 dark:bg-[linear-gradient(135deg,rgba(120,53,15,0.2),rgba(19,78,74,0.2))] sm:block sm:px-7 sm:py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="m-0 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-800 dark:text-amber-300">

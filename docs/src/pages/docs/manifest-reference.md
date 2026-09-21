@@ -377,6 +377,8 @@ memberships:
 | `inherit` | `true` | Member inherits the role's privileges; omit for PostgreSQL default behavior |
 | `admin` | `false` | Member can administer the role |
 
+### exclusive
+
 Each stanza also accepts one option beside `role` and `members`:
 
 | Field | Default | Description |

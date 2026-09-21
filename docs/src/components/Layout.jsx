@@ -11,6 +11,7 @@ import { Logo, Logomark } from '@/components/Logo'
 import { MobileNavigation } from '@/components/MobileNavigation'
 import { Navigation } from '@/components/Navigation'
 import { Prose } from '@/components/Prose'
+import { Search } from '@/components/Search'
 import { ThemeSelector } from '@/components/ThemeSelector'
 import {
   DESTINATIONS,
@@ -38,14 +39,14 @@ function Header({
   return (
     <header
       className={clsx(
-        'sticky top-0 z-50 flex min-h-[4.5rem] items-center border-b px-4 py-3 transition duration-300 sm:px-6 lg:px-8',
+        'min-[360px]:px-4 sticky top-0 z-50 flex min-h-[4.5rem] flex-wrap items-center gap-y-2 border-b px-2 py-3 transition duration-300 sm:px-6 lg:px-8',
         isScrolled
           ? 'bg-stone-50/92 dark:bg-stone-950/88 border-stone-300 shadow-[0_10px_30px_-24px_rgba(28,25,23,0.55)] backdrop-blur dark:border-stone-800 dark:shadow-none'
           : 'dark:bg-stone-950 border-transparent bg-stone-100/90'
       )}
     >
       <div className="bg-[linear-gradient(90deg,transparent,rgba(245,158,11,0.6),rgba(20,184,166,0.45),transparent)] pointer-events-none absolute inset-x-0 top-0 h-px" />
-      <div className="mr-3 flex lg:hidden">
+      <div className="min-[360px]:mr-3 mr-1 flex lg:hidden">
         <MobileNavigation
           navigation={navigation}
           destination={destination}
@@ -61,7 +62,7 @@ function Header({
       </Link>
       <nav
         aria-label="Destinations"
-        className="ml-4 flex min-w-0 items-center gap-3 text-sm font-medium sm:ml-7 sm:gap-5"
+        className="min-[360px]:ml-4 min-[360px]:gap-3 ml-2 flex min-w-0 items-center gap-2 text-sm font-medium sm:ml-7 sm:gap-5"
       >
         {DESTINATIONS.map((item) => (
           <Link
@@ -88,7 +89,8 @@ function Header({
           </Link>
         ))}
       </nav>
-      <div className="ml-auto flex items-center gap-3 sm:gap-5">
+      <div className="min-[360px]:gap-3 ml-auto flex items-center gap-1 sm:gap-5">
+        <Search />
         <ThemeSelector className="relative z-10" />
         <Button
           href="https://github.com/thepartly/pgroles"
@@ -142,6 +144,48 @@ function useTableOfContents(tableOfContents) {
   return currentSection
 }
 
+function ContentsLinks({ tableOfContents, isActive }) {
+  return (
+    <ol role="list" className="mt-4 space-y-3 text-sm">
+      {tableOfContents.map((section) => (
+        <li key={section.id}>
+          <Link
+            href={`#${section.id}`}
+            className={
+              isActive(section)
+                ? 'text-amber-700 dark:text-amber-300'
+                : 'font-normal text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-200'
+            }
+          >
+            {section.title}
+          </Link>
+          {section.children.length > 0 && (
+            <ol
+              role="list"
+              className="mt-2 space-y-3 pl-5 text-stone-500 dark:text-stone-500"
+            >
+              {section.children.map((subSection) => (
+                <li key={subSection.id}>
+                  <Link
+                    href={`#${subSection.id}`}
+                    className={
+                      isActive(subSection)
+                        ? 'text-amber-700 dark:text-amber-300'
+                        : 'hover:text-stone-900 dark:hover:text-stone-200'
+                    }
+                  >
+                    {subSection.title}
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          )}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 function navigationWithGeneratedPage(navigation, page) {
   if (!page?.navigationParent) return navigation
   return navigation.map((section) => ({
@@ -180,10 +224,23 @@ export function Layout({ children, title, tableOfContents }) {
         )
         if (stored !== null) choices[key] = stored === 'true'
       } catch {}
+      const links = [
+        ...(section.links ?? []),
+        ...(section.groups ?? []).flatMap((group) => group.links),
+      ]
+      if (
+        links.some(
+          (link) =>
+            link.href === pathname ||
+            link.children?.some((child) => child.href === pathname)
+        )
+      ) {
+        choices[key] = true
+      }
     }
     setReaderChoices(choices)
     setRestoredNavigation(navigation)
-  }, [destination.id, navigation])
+  }, [destination.id, navigation, pathname])
   function onExpandedChange(key, isExpanded) {
     setReaderChoices((current) => ({ ...current, [key]: isExpanded }))
     try {
@@ -196,6 +253,7 @@ export function Layout({ children, title, tableOfContents }) {
   const reading = getReadingLinks(pathname)
   const currentSection = useTableOfContents(tableOfContents)
   const isHomePage = pathname === '/'
+  const isExplorer = destination.id === 'explorer'
   const breadcrumb = page?.section ?? destination.label
 
   function isActive(section) {
@@ -215,33 +273,73 @@ export function Layout({ children, title, tableOfContents }) {
       {isHomePage && <Hero />}
       <div className="dark:bg-stone-950 relative bg-stone-100 text-stone-900 dark:text-stone-100">
         <div className="max-w-8xl relative mx-auto flex justify-center sm:px-2 lg:px-8 xl:px-12">
-          <aside className="hidden lg:relative lg:block lg:flex-none">
-            <div
-              data-navigation-scroll
-              className="sticky top-[4.5rem] -ml-0.5 h-[calc(100vh-4.5rem)] overflow-y-auto overflow-x-hidden py-10 pl-0.5"
+          {!isExplorer && (
+            <aside className="hidden lg:relative lg:block lg:flex-none">
+              <div
+                data-navigation-scroll
+                className="sticky top-[4.5rem] -ml-0.5 h-[calc(100vh-4.5rem)] overflow-y-auto overflow-x-hidden py-10 pl-0.5"
+              >
+                <Navigation
+                  navigation={navigation}
+                  destination={destination}
+                  pathname={pathname}
+                  readerChoices={readerChoices}
+                  restoredNavigation={restoredNavigation}
+                  onExpandedChange={onExpandedChange}
+                  className="dark:bg-stone-950/40 w-64 rounded-r-[2rem] border-r border-stone-300/80 bg-stone-50/70 pr-8 shadow-[8px_0_24px_-24px_rgba(28,25,23,0.3)] dark:border-stone-800 dark:shadow-none xl:w-72 xl:pr-16"
+                />
+              </div>
+            </aside>
+          )}
+          <main
+            className={clsx(
+              'min-w-0 flex-auto px-4 py-12',
+              isExplorer
+                ? 'w-full'
+                : 'max-w-2xl lg:max-w-none lg:pr-0 lg:pl-8 xl:px-16'
+            )}
+          >
+            <article
+              data-pagefind-body={!isExplorer && page ? '' : undefined}
+              data-content-type={page?.contentType}
+              data-destination={destination.label}
+              data-pagefind-meta={
+                !isExplorer && page
+                  ? 'content_type[data-content-type], destination[data-destination]'
+                  : undefined
+              }
+              data-pagefind-filter={
+                !isExplorer && page
+                  ? 'content_type[data-content-type], destination[data-destination]'
+                  : undefined
+              }
             >
-              <Navigation
-                navigation={navigation}
-                destination={destination}
-                pathname={pathname}
-                readerChoices={readerChoices}
-                restoredNavigation={restoredNavigation}
-                onExpandedChange={onExpandedChange}
-                className="dark:bg-stone-950/40 w-64 rounded-r-[2rem] border-r border-stone-300/80 bg-stone-50/70 pr-8 shadow-[8px_0_24px_-24px_rgba(28,25,23,0.3)] dark:border-stone-800 dark:shadow-none xl:w-72 xl:pr-16"
-              />
-            </div>
-          </aside>
-          <main className="min-w-0 max-w-2xl flex-auto px-4 py-16 lg:max-w-none lg:pr-0 lg:pl-8 xl:px-16">
-            <article>
-              {(title || page) && (
+              {!isExplorer && (title || page) && (
                 <header className="mb-8 space-y-2">
                   <nav
                     aria-label="Breadcrumb"
+                    data-pagefind-ignore
                     className="font-display text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300"
                   >
-                    <span>{destination.label}</span>
-                    <span aria-hidden="true"> / </span>
-                    <span>{breadcrumb}</span>
+                    {pathname === destination.href ? (
+                      <span>{destination.label}</span>
+                    ) : (
+                      <Link href={destination.href}>{destination.label}</Link>
+                    )}
+                    {breadcrumb !== destination.label && (
+                      <>
+                        <span aria-hidden="true"> / </span>
+                        <span>{breadcrumb}</span>
+                      </>
+                    )}
+                    {page?.navigationParent && (
+                      <>
+                        <span aria-hidden="true"> / </span>
+                        <Link href={page.navigationParent}>
+                          {resolvePage(page.navigationParent)?.navigationTitle}
+                        </Link>
+                      </>
+                    )}
                     {page && (
                       <>
                         <span aria-hidden="true"> / </span>
@@ -250,11 +348,31 @@ export function Layout({ children, title, tableOfContents }) {
                     )}
                   </nav>
                   {title && (
-                    <h1 className="font-display text-stone-950 text-4xl tracking-[-0.03em] dark:text-stone-100">
+                    <h1
+                      data-pagefind-meta="title"
+                      className="font-display text-stone-950 text-4xl tracking-[-0.03em] [overflow-wrap:anywhere] dark:text-stone-100"
+                    >
                       {title}
                     </h1>
                   )}
                 </header>
+              )}
+              {tableOfContents.length > 0 && (
+                <details
+                  data-pagefind-ignore
+                  key={pathname}
+                  className="mb-8 rounded-xl border bg-white/60 p-4 dark:bg-stone-900/60 xl:hidden"
+                >
+                  <summary className="cursor-pointer font-semibold">
+                    On this page
+                  </summary>
+                  <nav aria-label="On this page" className="mt-3">
+                    <ContentsLinks
+                      tableOfContents={tableOfContents}
+                      isActive={isActive}
+                    />
+                  </nav>
+                </details>
               )}
               <Prose
                 className={
@@ -308,6 +426,21 @@ export function Layout({ children, title, tableOfContents }) {
                 )}
               </dl>
             )}
+            <footer
+              className="text-muted-foreground mt-12 border-t pt-4 text-xs"
+              aria-label="Documentation build"
+            >
+              {process.env.NEXT_PUBLIC_DOCS_BUILD_COMMIT ? (
+                <a
+                  href={`https://github.com/thepartly/pgroles/commit/${process.env.NEXT_PUBLIC_DOCS_BUILD_COMMIT}`}
+                  className="hover:underline"
+                >
+                  {process.env.NEXT_PUBLIC_DOCS_BUILD_LABEL}
+                </a>
+              ) : (
+                process.env.NEXT_PUBLIC_DOCS_BUILD_LABEL
+              )}
+            </footer>
           </main>
           {tableOfContents.length > 0 && (
             <aside className="hidden xl:sticky xl:top-[4.5rem] xl:-mr-6 xl:block xl:h-[calc(100vh-4.5rem)] xl:flex-none xl:overflow-y-auto xl:py-12 xl:pr-6">
@@ -322,45 +455,10 @@ export function Layout({ children, title, tableOfContents }) {
                   >
                     On this page
                   </h2>
-                  <ol role="list" className="mt-4 space-y-3 text-sm">
-                    {tableOfContents.map((section) => (
-                      <li key={section.id}>
-                        <h3>
-                          <Link
-                            href={`#${section.id}`}
-                            className={
-                              isActive(section)
-                                ? 'text-amber-700 dark:text-amber-300'
-                                : 'font-normal text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-200'
-                            }
-                          >
-                            {section.title}
-                          </Link>
-                        </h3>
-                        {section.children.length > 0 && (
-                          <ol
-                            role="list"
-                            className="mt-2 space-y-3 pl-5 text-stone-500 dark:text-stone-500"
-                          >
-                            {section.children.map((subSection) => (
-                              <li key={subSection.id}>
-                                <Link
-                                  href={`#${subSection.id}`}
-                                  className={
-                                    isActive(subSection)
-                                      ? 'text-amber-700 dark:text-amber-300'
-                                      : 'hover:text-stone-900 dark:hover:text-stone-200'
-                                  }
-                                >
-                                  {subSection.title}
-                                </Link>
-                              </li>
-                            ))}
-                          </ol>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
+                  <ContentsLinks
+                    tableOfContents={tableOfContents}
+                    isActive={isActive}
+                  />
                 </>
               </nav>
             </aside>

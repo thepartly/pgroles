@@ -18,7 +18,24 @@ function MarkdocLink({ href, children, ...props }) {
   )
 }
 
+function MarkdocTable({ children }) {
+  return (
+    <div
+      role="region"
+      aria-label="Table"
+      tabIndex={0}
+      className="my-6 max-w-full overflow-x-auto rounded-sm focus-visible:outline-2 focus-visible:outline-amber-600"
+    >
+      <table>{children}</table>
+    </div>
+  )
+}
+
 const nodes = {
+  table: {
+    ...defaultNodes.table,
+    render: MarkdocTable,
+  },
   document: {
     render: undefined,
   },

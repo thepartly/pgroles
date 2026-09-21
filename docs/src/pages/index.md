@@ -1,7 +1,7 @@
 ---
 title: Choose your path
 pageTitle: pgroles - Declarative PostgreSQL role management
-description: One YAML file. Every role, grant, and privilege in your database — defined, diffed, and applied.
+description: "Declarative PostgreSQL role management: define access in YAML, review planned changes, and reconcile the scope you manage."
 ---
 
 ## Try pgroles

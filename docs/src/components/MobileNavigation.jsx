@@ -62,19 +62,21 @@ export function MobileNavigation({
             )
           )}
         </div>
-        <div
-          data-navigation-scroll
-          className="mt-6 max-h-[calc(100vh-12rem)] overflow-y-auto px-1"
-        >
-          <Navigation
-            navigation={navigation}
-            destination={destination}
-            pathname={pathname}
-            readerChoices={readerChoices}
-            restoredNavigation={restoredNavigation}
-            onExpandedChange={onExpandedChange}
-          />
-        </div>
+        {destination.id !== 'explorer' && (
+          <div
+            data-navigation-scroll
+            className="mt-6 max-h-[calc(100vh-12rem)] overflow-y-auto px-1"
+          >
+            <Navigation
+              navigation={navigation}
+              destination={destination}
+              pathname={pathname}
+              readerChoices={readerChoices}
+              restoredNavigation={restoredNavigation}
+              onExpandedChange={onExpandedChange}
+            />
+          </div>
+        )}
       </SheetContent>
     </Sheet>
   )

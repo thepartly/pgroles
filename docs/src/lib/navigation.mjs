@@ -181,7 +181,15 @@ function buildPageRegistry(pages) {
     if (registry[page.href]) {
       throw new Error(`Duplicate canonical page route: ${page.href}`)
     }
-    registry[page.href] = Object.freeze(page)
+    registry[page.href] = Object.freeze({
+      ...page,
+      contentType:
+        page.destination === 'learn'
+          ? 'Course'
+          : page.section === 'Reference'
+          ? 'Reference'
+          : 'Guide',
+    })
   }
 
   return Object.freeze(registry)
