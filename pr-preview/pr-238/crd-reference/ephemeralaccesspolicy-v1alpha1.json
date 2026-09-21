@@ -1,0 +1,211 @@
+{
+  "description": "Auto-generated derived type for EphemeralAccessPolicySpec via `CustomResource`",
+  "properties": {
+    "spec": {
+      "description": "A GitOps-managed bundle of PostgreSQL memberships that may be requested.",
+      "properties": {
+        "approval": {
+          "description": "Whether activation requires a recorded approval decision.",
+          "properties": {
+            "mode": {
+              "description": "Automatic activates without a human decision; Required waits for approval.",
+              "enum": [
+                "Automatic",
+                "Required"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        "defaultDuration": {
+          "description": "Duration used when a request omits requestedDuration; one of the two must be supplied.",
+          "maxLength": 64,
+          "nullable": true,
+          "pattern": "^([0-9]+[smh])+$",
+          "type": "string"
+        },
+        "description": {
+          "description": "Optional explanation of the access this policy provides.",
+          "maxLength": 2048,
+          "nullable": true,
+          "type": "string"
+        },
+        "displayName": {
+          "description": "Optional human-readable policy label.",
+          "maxLength": 128,
+          "nullable": true,
+          "type": "string"
+        },
+        "justification": {
+          "description": "Whether requests must explain why access is needed.",
+          "properties": {
+            "required": {
+              "description": "Whether a request must include a non-empty justification.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required"
+          ],
+          "type": "object"
+        },
+        "maximumDuration": {
+          "description": "Longest permitted access duration, using s, m, and h units.",
+          "maxLength": 64,
+          "pattern": "^([0-9]+[smh])+$",
+          "type": "string"
+        },
+        "memberships": {
+          "description": "Role memberships that this policy permits a subject to request.",
+          "items": {
+            "properties": {
+              "inherit": {
+                "description": "Whether privileges from role memberships are inherited automatically.",
+                "type": "boolean"
+              },
+              "role": {
+                "description": "PostgreSQL role whose membership will be granted to the subject.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "inherit",
+              "role"
+            ],
+            "type": "object"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "pendingRequestTTL": {
+          "default": "15m",
+          "description": "Time allowed for a pending request to receive approval before it expires.",
+          "maxLength": 64,
+          "pattern": "^([0-9]+[smh])+$",
+          "type": "string"
+        },
+        "postgresPolicyRef": {
+          "description": "PostgresPolicy in this namespace that manages the target database.",
+          "properties": {
+            "name": {
+              "description": "Name of the referenced resource in the same namespace.",
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "suspend": {
+          "default": false,
+          "description": "Stops admission of new access through this policy while retaining revocation handling.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "approval",
+        "justification",
+        "maximumDuration",
+        "memberships",
+        "postgresPolicyRef"
+      ],
+      "type": "object"
+    },
+    "status": {
+      "description": "Controller observations for an ephemeral access policy.",
+      "nullable": true,
+      "properties": {
+        "conditions": {
+          "default": [],
+          "description": "Controller observations about acceptance and readiness.",
+          "items": {
+            "properties": {
+              "bundleHash": {
+                "description": "Digest of the membership bundle to which this decision applies.",
+                "maxLength": 71,
+                "nullable": true,
+                "type": "string"
+              },
+              "grantedDuration": {
+                "description": "Access duration to which this decision applies.",
+                "maxLength": 64,
+                "nullable": true,
+                "type": "string"
+              },
+              "lastTransitionTime": {
+                "description": "Timestamp of the last condition-state transition.",
+                "maxLength": 64,
+                "nullable": true,
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable explanation of the condition.",
+                "maxLength": 2048,
+                "nullable": true,
+                "type": "string"
+              },
+              "reason": {
+                "description": "Machine-readable reason for the condition.",
+                "maxLength": 128,
+                "nullable": true,
+                "type": "string"
+              },
+              "status": {
+                "description": "Condition state, conventionally True, False, or Unknown.",
+                "maxLength": 16,
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "description": "Lifecycle or decision condition name.",
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "type"
+            ],
+            "type": "object"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "observedGeneration": {
+          "description": "Policy generation last processed by the controller.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "resolvedRoles": {
+          "default": [],
+          "description": "Validated PostgreSQL roles available through this policy.",
+          "items": {
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "spec"
+  ],
+  "title": "EphemeralAccessPolicy",
+  "type": "object"
+}
