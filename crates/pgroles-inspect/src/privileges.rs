@@ -398,7 +398,7 @@ pub async fn fetch_object_inventory(
             NULL::text AS grantee,
             '' AS privilege_type,
             n.nspname AS schema_name,
-            p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS object_name,
+            p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS object_name,
             'function' AS obj_type,
             NULL::text AS owner_name,
                     NULL::text AS grantor
@@ -536,7 +536,7 @@ async fn fetch_object_inventory_for_wildcards(
             NULL::text AS grantee,
             '' AS privilege_type,
             n.nspname AS schema_name,
-            p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS object_name,
+            p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS object_name,
             'function' AS obj_type,
             NULL::text AS owner_name,
                     NULL::text AS grantor
@@ -657,7 +657,7 @@ pub async fn fetch_owned_relations(
                 'function' AS obj_type,
                 n.nspname AS schema_name,
                 p.proname || '(' ||
-                    pg_catalog.pg_get_function_identity_arguments(p.oid) || ')'
+                    pg_catalog.oidvectortypes(p.proargtypes) || ')'
                     AS object_name,
                 2 AS sort_key
             FROM pg_proc p
@@ -1183,7 +1183,7 @@ pub(crate) async fn read_raw_public_privileges(
                     NULL::text AS grantee,
                     acl.privilege_type,
                     n.nspname::text AS schema_name,
-                    (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')')::text AS object_name,
+                    (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text AS object_name,
                     'function' AS obj_type,
                     pg_get_userbyid(p.proowner) AS owner_name,
                     pg_get_userbyid(acl.grantor) AS grantor
@@ -1571,7 +1571,7 @@ async fn fetch_wildcard_grantability(
 
         SELECT
             n.nspname AS schema_name,
-            p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS object_name,
+            p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS object_name,
             pg_get_userbyid(p.proowner) AS owner_name,
             'function' AS obj_type,
             false AS can_select,
@@ -1949,7 +1949,7 @@ async fn fetch_schema_privileges(
 ///
 /// Uses `pg_proc` joined with `pg_namespace`.
 /// Function names can be overloaded, so we include the OID-derived
-/// identity signature via `pg_catalog.pg_get_function_identity_arguments()`.
+/// input type signature via `pg_catalog.oidvectortypes(proargtypes)`.
 /// Only explicit ACLs are inspected. NULL ACLs produce no rows.
 /// Owner-grantee entries are kept and tagged (see `fetch_relation_privileges`).
 async fn fetch_function_privileges(
@@ -1963,7 +1963,7 @@ async fn fetch_function_privileges(
             grantee.rolname AS grantee,
             acl.privilege_type,
             n.nspname AS schema_name,
-            p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS object_name,
+            p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS object_name,
             'function' AS obj_type,
             pg_get_userbyid(p.proowner) AS owner_name,
             pg_get_userbyid(acl.grantor) AS grantor
@@ -2926,6 +2926,7 @@ mod tests {
 
     fn live_config(schema: &str, role: &str) -> crate::InspectConfig {
         crate::InspectConfig {
+            routine_grants: Vec::new(),
             membership_grantors: Vec::new(),
             managed_roles: vec![role.to_string()],
             managed_schemas: vec![],
@@ -3107,6 +3108,7 @@ mod inherent_tests {
             exec(&pool, "GRANT SELECT ON inh_schema.widgets TO inh_owner").await;
 
             let config = InspectConfig {
+                routine_grants: Vec::new(),
                 managed_roles: vec!["inh_owner".to_string()],
                 managed_schemas: vec!["inh_schema".to_string()],
                 privilege_schemas: vec!["inh_schema".to_string()],

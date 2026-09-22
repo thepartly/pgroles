@@ -462,6 +462,8 @@ pub fn plan_changes(
     expanded: &ExpandedManifest,
     mode: ReconciliationMode,
 ) -> Vec<Change> {
+    let resolved = desired.resolve_routine_aliases(&current.routine_aliases);
+    let desired = resolved.as_ref();
     let changes = apply_role_retirements(diff(current, desired), &manifest.retirements);
     let changes = filter_changes(changes, mode);
     let changes = filter_external_role_changes(changes, &expanded.roles, &expanded.memberships);
@@ -473,6 +475,8 @@ pub fn plan_changes(
 /// inherent. Exact keys are detected directly; wildcard assertions warn when
 /// they overlap any inherently-held entry under their (role, type, schema).
 pub fn unenforceable_absence_warnings(current: &RoleGraph, desired: &RoleGraph) -> Vec<String> {
+    let resolved = desired.resolve_routine_aliases(&current.routine_aliases);
+    let desired = resolved.as_ref();
     let mut out = Vec::new();
     for (key, absent) in &desired.grant_absences {
         if key.name.as_deref() == Some("*") {
@@ -598,6 +602,8 @@ fn is_role_drop_or_retirement(change: &Change) -> bool {
 /// Changes are ordered so that dependencies are respected:
 /// creates before grants, revokes before drops, etc.
 pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
+    let resolved = desired.resolve_routine_aliases(&current.routine_aliases);
+    let desired = resolved.as_ref();
     let mut creates = Vec::new();
     let mut alters = Vec::new();
     let mut schema_changes = Vec::new();

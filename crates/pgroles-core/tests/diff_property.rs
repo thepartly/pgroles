@@ -306,6 +306,7 @@ fn gen_graph(rng: &mut Rng, allow_none: bool, messy: bool) -> RoleGraph {
     }
     let role_names: Vec<String> = roles.keys().cloned().collect();
     RoleGraph {
+        routine_aliases: BTreeMap::new(),
         roles,
         schemas: gen_schemas(rng, allow_none),
         grants: gen_grants(rng, &role_names),

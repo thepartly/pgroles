@@ -70,6 +70,14 @@ For the artifact and CI workflow, read
 
 Never print database URLs, passwords, or rendered Secrets in logs.
 
+## Routine Grants
+
+For named functions/procedures, use input type signatures such as
+`backoff_duration(smallint, smallint)`. Live inspection resolves PostgreSQL type
+aliases and legacy catalog signatures with argument names; offline validation
+does not establish routine identity. Review overloads and PUBLIC access using
+[the grants reference](../../docs/src/pages/docs/grants.md#function-signatures).
+
 ## Reconciliation Modes
 
 The CLI `--mode` and operator `spec.reconciliation_mode` select which computed

@@ -12,6 +12,7 @@ mod preflight;
 mod privileges;
 mod public_grants;
 mod roles;
+mod routines;
 mod safety;
 mod snapshot;
 mod version;
@@ -62,6 +63,18 @@ pub enum InspectError {
     /// this is a hard error, not a narrower answer.
     #[error("inspection scope not covered by the shared snapshot: {0}")]
     ScopeNotCovered(String),
+    #[error("cannot resolve routine {schema}.{name}: {source}")]
+    RoutineTarget {
+        schema: String,
+        name: String,
+        source: sqlx::Error,
+    },
+    #[error("conflicting present and absent EXECUTE rules for {role} on routine {schema}.{name}")]
+    ConflictingRoutineRules {
+        role: String,
+        schema: String,
+        name: String,
+    },
     #[error(
         "database grant target {target:?} does not match connected database {connected:?}; \
          pgroles reconciles database ACLs only for the connected database"
@@ -335,6 +348,8 @@ pub(crate) struct DefaultPrivScopePattern {
 /// don't pull in the entire pg_catalog.
 #[derive(Debug, Clone)]
 pub struct InspectConfig {
+    /// Routine rules to resolve by catalog identity before planning.
+    pub(crate) routine_grants: Vec<pgroles_core::manifest::Grant>,
     /// The role names that the manifest manages (created by pgroles).
     /// Privileges and memberships are filtered to only include these roles.
     pub managed_roles: Vec<String>,
@@ -494,6 +509,12 @@ impl InspectConfig {
         }
 
         Self {
+            routine_grants: expanded
+                .grants
+                .iter()
+                .filter(|grant| grant.object.object_type == ObjectType::Function)
+                .cloned()
+                .collect(),
             managed_roles: managed_roles.into_iter().collect(),
             membership_grantors: membership_grantors.into_iter().collect(),
             managed_schemas: managed_schemas.clone().into_iter().collect(),
@@ -554,6 +575,11 @@ impl InspectConfig {
         };
 
         Self {
+            routine_grants: base
+                .routine_grants
+                .into_iter()
+                .filter(|grant| grant.object.schema.as_deref().is_some_and(has_bindings))
+                .collect(),
             managed_roles: scope.roles.iter().cloned().collect(),
             membership_grantors: base.membership_grantors.clone(),
             managed_schemas: scope.schemas.keys().cloned().collect(),
@@ -624,6 +650,7 @@ impl InspectConfig {
     where
         I: IntoIterator<Item = &'a InspectConfig>,
     {
+        let mut routine_grants = Vec::new();
         let mut managed_roles: BTreeSet<String> = BTreeSet::new();
         let mut managed_schemas: BTreeSet<String> = BTreeSet::new();
         let mut privilege_schemas: BTreeSet<String> = BTreeSet::new();
@@ -645,6 +672,7 @@ impl InspectConfig {
         > = BTreeMap::new();
 
         for config in configs {
+            routine_grants.extend(config.routine_grants.iter().cloned());
             managed_roles.extend(config.managed_roles.iter().cloned());
             membership_grantors.extend(config.membership_grantors.iter().cloned());
             managed_schemas.extend(config.managed_schemas.iter().cloned());
@@ -675,6 +703,7 @@ impl InspectConfig {
         }
 
         Self {
+            routine_grants,
             managed_roles: managed_roles.into_iter().collect(),
             membership_grantors: membership_grantors.into_iter().collect(),
             managed_schemas: managed_schemas.into_iter().collect(),

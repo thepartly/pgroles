@@ -350,6 +350,9 @@ pub struct MembershipEdge {
 /// The diff engine compares two `RoleGraph` instances to compute changes.
 #[derive(Debug, Clone, Default)]
 pub struct RoleGraph {
+    /// Catalog-resolved routine spellings, keyed by (schema, supplied signature).
+    /// Only inspection populates these aliases; plans use input type signatures.
+    pub routine_aliases: BTreeMap<(String, String), String>,
     /// Managed roles, keyed by role name.
     pub roles: BTreeMap<String, RoleState>,
     /// Managed schemas, keyed by schema name.
@@ -401,6 +404,55 @@ pub struct RoleGraph {
 }
 
 impl RoleGraph {
+    /// Resolve catalog-proven equivalent routine targets before comparing grants.
+    pub fn resolve_routine_aliases<'a>(
+        &'a self,
+        aliases: &BTreeMap<(String, String), String>,
+    ) -> std::borrow::Cow<'a, Self> {
+        if aliases.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let resolve = |key: &GrantKey| {
+            let mut resolved = key.clone();
+            if key.object_type == ObjectType::Function
+                && let (Some(schema), Some(name)) = (&key.schema, &key.name)
+                && let Some(canonical) = aliases.get(&(schema.clone(), name.clone()))
+            {
+                resolved.name = Some(canonical.clone());
+            }
+            resolved
+        };
+        if !self
+            .grants
+            .keys()
+            .chain(self.grant_absences.keys())
+            .any(|key| resolve(key) != *key)
+        {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut resolved = self.clone();
+        resolved.grants.clear();
+        for (key, state) in &self.grants {
+            resolved
+                .grants
+                .entry(resolve(key))
+                .or_insert_with(|| GrantState {
+                    privileges: BTreeSet::new(),
+                })
+                .privileges
+                .extend(&state.privileges);
+        }
+        resolved.grant_absences.clear();
+        for (key, privileges) in &self.grant_absences {
+            resolved
+                .grant_absences
+                .entry(resolve(key))
+                .or_default()
+                .extend(privileges);
+        }
+        std::borrow::Cow::Owned(resolved)
+    }
+
     /// Build a `RoleGraph` from an `ExpandedManifest`.
     ///
     /// This converts the manifest's user-facing types into the normalized model
