@@ -798,6 +798,11 @@ pub fn qualified_function_name(schema_name: &str, function_name: &str) -> String
     }
 }
 
+pub fn routine_base_name(function_name: &str) -> &str {
+    function_signature_start(function_name)
+        .map_or(function_name, |paren_idx| &function_name[..paren_idx])
+}
+
 fn function_signature_start(signature: &str) -> Option<usize> {
     if !signature.ends_with(')') {
         return None;
@@ -1505,6 +1510,20 @@ mod tests {
         assert_eq!(
             sql,
             "GRANT EXECUTE ON ROUTINE \"public\".\"refresh_users\"(integer, text) TO \"r1\";"
+        );
+    }
+
+    #[test]
+    fn routine_base_name_strips_only_the_argument_list() {
+        assert_eq!(
+            routine_base_name("backoff_duration(attempt smallint,max_attempts smallint)"),
+            "backoff_duration"
+        );
+        assert_eq!(routine_base_name("returning"), "returning");
+        assert_eq!(routine_base_name("refresh()"), "refresh");
+        assert_eq!(
+            routine_base_name("strange(name)(app.\"state (v1)\", numeric(10,2))"),
+            "strange(name)"
         );
     }
 

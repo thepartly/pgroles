@@ -75,7 +75,9 @@ Never print database URLs, passwords, or rendered Secrets in logs.
 For named functions/procedures, use input type signatures such as
 `backoff_duration(smallint, smallint)`. Live inspection resolves PostgreSQL type
 aliases and legacy catalog signatures with argument names; offline validation
-does not establish routine identity. Review overloads and PUBLIC access using
+does not establish routine identity. An unresolvable target fails inspection and
+lists the input-type signatures to use instead. Review overloads and PUBLIC
+access using
 [the grants reference](../../docs/src/pages/docs/grants.md#function-signatures).
 
 ## Reconciliation Modes

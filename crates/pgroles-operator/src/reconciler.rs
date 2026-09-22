@@ -699,7 +699,8 @@ fn inspect_error_is_non_transient(error: &pgroles_inspect::InspectError) -> bool
         pgroles_inspect::InspectError::RoutineTarget { source, .. } => {
             routine_target_is_invalid(source) || sqlx_error_is_non_transient(source)
         }
-        pgroles_inspect::InspectError::ConflictingRoutineRules { .. } => true,
+        pgroles_inspect::InspectError::ConflictingRoutineRules { .. }
+        | pgroles_inspect::InspectError::UnresolvedRoutine { .. } => true,
         // A scope the shared snapshot never read: a programming error in the
         // caller, not something a retry can fix.
         pgroles_inspect::InspectError::ScopeNotCovered(_)
@@ -3631,6 +3632,7 @@ impl ReconcileError {
             },
             ReconcileError::Inspect(error) => match error {
                 pgroles_inspect::InspectError::ConflictingRoutineRules { .. } => "ValidationFailed",
+                pgroles_inspect::InspectError::UnresolvedRoutine { .. } => "InvalidRoutineTarget",
                 pgroles_inspect::InspectError::RoutineTarget { source, .. }
                     if routine_target_is_invalid(source) =>
                 {
@@ -5409,6 +5411,24 @@ mod tests {
             });
         assert_eq!(conflict.reason(), "ValidationFailed");
         assert_eq!(retry_class_for_reconcile_error(&conflict), RetryClass::Slow);
+        for failure in [
+            pgroles_inspect::RoutineResolutionFailure::Unparseable,
+            pgroles_inspect::RoutineResolutionFailure::Ambiguous,
+            pgroles_inspect::RoutineResolutionFailure::Missing,
+        ] {
+            let unresolved =
+                ReconcileError::Inspect(pgroles_inspect::InspectError::UnresolvedRoutine {
+                    schema: "awa".into(),
+                    name: "backoff_duration(attempt smallint,max_attempts smallint)".into(),
+                    failure,
+                    candidates: vec!["backoff_duration(smallint, smallint)".into()],
+                });
+            assert_eq!(unresolved.reason(), "InvalidRoutineTarget");
+            assert_eq!(
+                retry_class_for_reconcile_error(&unresolved),
+                RetryClass::Slow
+            );
+        }
     }
 
     #[test]

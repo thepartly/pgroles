@@ -41,10 +41,19 @@ of variadic arguments. Schema-qualify custom types when necessary.
 
 Live inspection resolves type aliases through PostgreSQL (`int2` and `smallint`,
 for example) and accepts the catalog's named-argument signatures emitted by
-older `pgroles generate` versions. New exports use input types only. Equivalent
-spellings converge to one target; opposite present/absent rules for that target
-are rejected during inspection, before apply. Offline validation cannot resolve
-catalog identities. Bare names resolve only when the routine is unambiguous.
+older `pgroles generate` versions, spelled exactly as
+`pg_get_function_identity_arguments` formats them. New exports use input types
+only. Equivalent spellings converge to one target; opposite present/absent rules
+for that target are rejected during inspection, before apply. Offline validation
+cannot resolve catalog identities. Bare names resolve only when the routine is
+unambiguous.
+
+A target that PostgreSQL cannot resolve fails inspection for the policy that
+names it and lists the input-type signatures of routines with that name in the
+schema. This covers an ambiguous bare name, a named-argument signature spelled
+differently from the catalog, and an `ensure: present` rule for a routine that
+does not exist. An `ensure: absent` rule for a routine that does not exist is
+already satisfied.
 
 ## Privilege types
 

@@ -2,7 +2,9 @@ use pgroles_core::diff::{Change, diff};
 use pgroles_core::manifest::{expand_manifest, parse_manifest};
 use pgroles_core::model::RoleGraph;
 use pgroles_core::sql::{qualified_function_name, render_statements};
-use pgroles_inspect::{InspectConfig, InspectError, RawInspection, inspect};
+use pgroles_inspect::{
+    InspectConfig, InspectError, RawInspection, RoutineResolutionFailure, inspect,
+};
 use serde_json::json;
 use sqlx::{Executor, PgPool};
 
@@ -203,6 +205,101 @@ async fn routine_aliases_resolve_public_absences_and_reject_conflicts() {
     assert!(matches!(
         inspect(&pool, &conflicting_config).await,
         Err(InspectError::ConflictingRoutineRules { .. })
+    ));
+    cleanup(pool, &schema, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL"]
+async fn unresolved_routine_targets_fail_only_their_own_policy() {
+    let (pool, schema, role) = fixture().await;
+    let single = |name: &str, ensure: &str| {
+        parse_policy(&json!({
+            "grants": [{"role": "PUBLIC", "ensure": ensure, "privileges": ["EXECUTE"],
+                "object": {"type": "function", "schema": schema, "name": name}}]
+        }))
+    };
+    let overloads = vec![
+        "backoff_duration(integer, integer)".to_string(),
+        "backoff_duration(smallint, smallint)".to_string(),
+    ];
+    let near_miss = "backoff_duration(attempt smallint,max_attempts smallint)";
+    for (name, ensure, expected, candidates) in [
+        (
+            near_miss,
+            "present",
+            RoutineResolutionFailure::Unparseable,
+            &overloads[..],
+        ),
+        (
+            near_miss,
+            "absent",
+            RoutineResolutionFailure::Unparseable,
+            &overloads[..],
+        ),
+        (
+            "backoff_duration",
+            "present",
+            RoutineResolutionFailure::Ambiguous,
+            &overloads[..],
+        ),
+        (
+            "backoff_duration",
+            "absent",
+            RoutineResolutionFailure::Ambiguous,
+            &overloads[..],
+        ),
+        (
+            "backoff_duration(text, text)",
+            "present",
+            RoutineResolutionFailure::Missing,
+            &overloads[..],
+        ),
+        (
+            "does_not_exist(integer)",
+            "present",
+            RoutineResolutionFailure::Missing,
+            &[][..],
+        ),
+    ] {
+        let (_, config) = single(name, ensure);
+        match inspect(&pool, &config).await {
+            Err(InspectError::UnresolvedRoutine {
+                name: reported,
+                failure,
+                candidates: found,
+                ..
+            }) => {
+                assert_eq!(reported, name);
+                assert_eq!(failure, expected, "{name} ({ensure})");
+                assert_eq!(found, candidates, "{name} ({ensure})");
+            }
+            other => panic!("{name} ({ensure}): expected an unresolved routine, got {other:?}"),
+        }
+    }
+
+    let (_, config) = single(near_miss, "present");
+    let message = inspect(&pool, &config).await.unwrap_err().to_string();
+    assert!(
+        message.contains(
+            "name the routine by its input types: \
+             backoff_duration(integer, integer), backoff_duration(smallint, smallint)"
+        ),
+        "{message}"
+    );
+
+    let (desired, config) = single("does_not_exist(integer)", "absent");
+    let current = inspect(&pool, &config).await.unwrap();
+    assert!(diff(&current, &desired).is_empty());
+
+    let valid = policy(&role, &schema, &overloads);
+    let (_, broken) = single(near_miss, "present");
+    let union = InspectConfig::union_of([&valid.1, &broken]);
+    let snapshot = RawInspection::read(&pool, &union).await.unwrap();
+    snapshot.derive(&pool, &valid.1).await.unwrap();
+    assert!(matches!(
+        snapshot.derive(&pool, &broken).await,
+        Err(InspectError::UnresolvedRoutine { .. })
     ));
     cleanup(pool, &schema, &role).await;
 }

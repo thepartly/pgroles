@@ -75,11 +75,53 @@ pub enum InspectError {
         schema: String,
         name: String,
     },
+    #[error("{}", describe_unresolved_routine(.schema, .name, *.failure, .candidates))]
+    UnresolvedRoutine {
+        schema: String,
+        name: String,
+        failure: RoutineResolutionFailure,
+        candidates: Vec<String>,
+    },
     #[error(
         "database grant target {target:?} does not match connected database {connected:?}; \
          pgroles reconciles database ACLs only for the connected database"
     )]
     DatabaseTargetMismatch { target: String, connected: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineResolutionFailure {
+    Unparseable,
+    Ambiguous,
+    Missing,
+}
+
+fn describe_unresolved_routine(
+    schema: &str,
+    name: &str,
+    failure: RoutineResolutionFailure,
+    candidates: &[String],
+) -> String {
+    let signatures = candidates.join(", ");
+    match failure {
+        RoutineResolutionFailure::Unparseable if candidates.is_empty() => format!(
+            "cannot resolve routine {schema}.{name}: PostgreSQL cannot parse this signature; \
+             name the routine by its input types"
+        ),
+        RoutineResolutionFailure::Unparseable => format!(
+            "cannot resolve routine {schema}.{name}: PostgreSQL cannot parse this signature; \
+             name the routine by its input types: {signatures}"
+        ),
+        RoutineResolutionFailure::Ambiguous => format!(
+            "routine {schema}.{name} is overloaded; name it by its input types: {signatures}"
+        ),
+        RoutineResolutionFailure::Missing if candidates.is_empty() => {
+            format!("routine {schema}.{name} does not exist")
+        }
+        RoutineResolutionFailure::Missing => {
+            format!("routine {schema}.{name} does not exist; routines with that name: {signatures}")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   planning, export, and revoke preflight. Named arguments no longer cause a grant
   followed by a revoke of the same routine. PostgreSQL type aliases and existing
   generated policies remain supported; conflicting alias rules fail before apply.
+  A routine target PostgreSQL cannot resolve fails inspection of the policy that
+  names it and lists the matching input-type signatures, instead of failing a
+  shared candidate inspection or planning a grant that cannot apply.
 
 ## [0.12.0] - 2026-09-08
 
