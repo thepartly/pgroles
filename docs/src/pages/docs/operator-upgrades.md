@@ -11,10 +11,10 @@ Read the target release's upgrade notes. Save your current chart version, values
 and policy manifests in your deployment repository. Keep database recovery
 procedures separate: rolling back a controller does not reverse committed SQL.
 
-Set the exact release you reviewed, for example `VERSION=0.12.0`. Render and review its resources using your existing values:
+Set the exact release you reviewed, for example `VERSION=0.13.0`. Render and review its resources using your existing values:
 
 ```bash
-VERSION=0.12.0
+VERSION=0.13.0
 helm template pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --include-crds \
   --values values.yaml > operator-rendered.yaml
@@ -44,6 +44,12 @@ kubectl apply --server-side -f operator-crds.yaml
 helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --values values.yaml --wait
 ```
+
+## Moving from 0.12 to 0.13
+
+- CRD schemas are unchanged. Continue using the chart's version-matched CRDs.
+- Operator reconciliation behaviour is unchanged. The operator now plans through `diff::plan_changes`, the planner shared with the CLI and the browser explorer, which applies the same retirement, reconciliation-mode, external-role, and preserved-grant handling in the same order.
+- The rest of this release is CLI and documentation work: `pgroles diff --review-out` recorded reviews, the browser plan explorer, and redacted `diff --format json` output. If CI jobs read comments or `config` values from `diff` JSON, read them from the manifest instead; see the release's upgrade notes.
 
 ## Moving from 0.11 to 0.12
 

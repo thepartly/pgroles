@@ -16,7 +16,7 @@ pgroles diff -f pgroles.yaml --mode adopt --format markdown \
   --no-exit-code > review.md
 ```
 
-`--review-out` requires a pgroles release after 0.12.0 and works with every
+`--review-out` requires pgroles 0.13.0 or later and works with every
 output format. The artifact never reads `password.from_env` variables; only the
 `sql`, `json`, and `summary` formats require them. `--target-label` names the
 environment for reviewers and rejects values containing `://`, so a connection

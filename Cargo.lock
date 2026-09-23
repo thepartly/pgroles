@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "pgroles-cli"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "pgroles-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64",
  "hmac 0.13.0",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "pgroles-inspect"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "pgroles-core",
  "sqlx",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "pgroles-operator"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "pgroles-wasm"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "console_error_panic_hook",
  "pgroles-core",

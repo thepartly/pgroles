@@ -5,8 +5,8 @@ description: >-
   Define roles, memberships, grants, and default privileges in YAML
   and let the operator converge your database to the desired state.
 type: application
-version: 0.12.0
-appVersion: "0.12.0"
+version: 0.13.0
+appVersion: "0.13.0"
 icon: https://raw.githubusercontent.com/thepartly/pgroles/main/docs/public/logo.svg
 sources:
   - https://github.com/thepartly/pgroles
@@ -17,11 +17,13 @@ maintainers:
 annotations:
   artifacthub.io/changes: |
     - kind: added
-      description: 'Shared OTLP resource identity, watch-aware readiness, and tested monitoring examples.'
-    - kind: fixed
-      description: 'Candidate plans honor undeclared-grant preservation; consecutive grantor revokes share role blocks.'
-    - kind: fixed
-      description: 'Default-owner preflight recognizes inherited authority created by PostgreSQL 16+ createrole_self_grant.'
+      description: 'pgroles diff --review-out writes a sanitized recorded review that the documentation explorer opens offline; the Markdown report ends with its review fingerprint.'
+    - kind: added
+      description: 'Browser plan explorer running pgroles-core as WebAssembly, with PostgreSQL version and authority-graph controls.'
+    - kind: changed
+      description: 'diff --format json redacts role comments and configuration values, and diff no longer computes password verifiers.'
+    - kind: changed
+      description: 'The operator plans through diff::plan_changes, the planner shared with the CLI and explorer; reconciliation behaviour is unchanged.'
   artifacthub.io/category: database
   artifacthub.io/operator: "true"
   artifacthub.io/prerelease: "false"
