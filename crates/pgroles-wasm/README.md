@@ -32,6 +32,9 @@ const result = analyze({
   desired_yaml: 'roles:\n  - name: application',
   mode: 'authoritative',
   executor: { role: 'postgres', superuser: true },
+  // Optional; these are the defaults.
+  pg_major_version: 16,
+  authority_graph_complete: true,
 })
 ```
 
@@ -77,28 +80,82 @@ remove sensitive values before importing or sharing a snapshot. Its grants may i
 `grantors` map and memberships a `grantors` list when an exporter knows
 PostgreSQL 16+ attribution. `inherent_grants` records owner-held ACL entries as
 `{ role, object_type, schema, name }`; they are preserved according to the native planner rules.
+Duplicate entries for one target merge the way native inspection aggregates catalog rows:
+grant and default-privilege privileges union, grantor maps union per grantor, and duplicate
+`(role, member)` memberships become one edge whose `inherit` and `admin` apply if any entry
+sets them, with the union of their grantors.
+
 The executor is separate auxiliary context:
 `memberships` records `{ role, member, set_role, inherit, admin_option }`,
 where each authority option is `allowed`, `denied`, or `unknown`. The executor
-also accepts `new_membership_set_role`, `new_role_set_role`, `new_role_inherit`,
-and `new_role_admin_option` with the same tri-state semantics.
+also accepts `createrole`, `new_membership_set_role`, `new_role_set_role`,
+`new_role_inherit`, and `new_role_admin_option` with the same tri-state semantics
+(each defaults to `unknown`), and `superuser` (default `false`).
+
+## Optional analysis context
+
+Both fields are optional and backward compatible; omitting them, or passing `null`, keeps the
+earlier behaviour. The response echoes the effective values as `pg_major_version` (a number)
+and `authority_graph_complete` (a boolean).
+
+| Request field | Default | Effect |
+| --- | --- | --- |
+| `pg_major_version` | `16` | PostgreSQL major version whose membership-authority rules apply. Values below 12 or above 20 are rejected. |
+| `authority_graph_complete` | `true` | Whether absence from the snapshot and executor facts proves absence in PostgreSQL. |
+
+`pg_major_version` changes only the authority check for membership grants and revokes
+(`AddMember`, and `RemoveMember` without a grantor). Before PostgreSQL 16, CREATEROLE on the
+executor authorizes them for any non-superuser role, as does ADMIN OPTION; an `unknown`
+CREATEROLE without proven ADMIN OPTION is reported as not proven. From PostgreSQL 16, ADMIN
+OPTION on the granted role is required, held by the executor or by a role whose privileges it
+inherits, and CREATEROLE alone is not sufficient. In every version, membership in a SUPERUSER
+role can only be granted or revoked by a superuser executor (`superuser_required`). The planned
+changes, SET and INHERIT option modelling, and grantor attribution do not depend on the version.
+
+With `authority_graph_complete: false`, a role without a proven path is `unknown` rather than
+`unreachable`, and missing grantor, owner, ADMIN OPTION, or CREATEROLE authority is a
+`required_role_reachability_unknown` warning instead of a `required_role_unavailable` error.
+This matches the native review-artifact path, which analyzes scoped inspections as incomplete.
+
+## Executor fact precedence
+
+Executor facts describe the starting state; the plan's own `ALTER ROLE` changes to the executor
+role then apply to later steps.
+
+- `superuser: true` wins over the snapshot. `false`, the default, defers to the snapshot's
+  `superuser` attribute when the executor role appears in `current.roles`.
+- `createrole: allowed` or `denied` wins over the snapshot. `unknown` defers to the snapshot's
+  `createrole` attribute for the executor role, and stays unknown when the role is absent.
+- In `memberships`, an explicit `allowed` or `denied` `inherit` or `admin_option` overrides what
+  a snapshot edge for the same `(role, member)` records. `unknown`, including an omitted option,
+  never overrides it. Snapshot edges never prove SET ROLE, so `set_role` comes only from
+  executor facts.
+
+## Analysis response
 
 The `analyze` request strictly decodes `schema_version`, `current`, `desired_yaml`,
-`mode`, and `executor`; unknown fields, explicit credential fields, password fields, and
-password sources in desired YAML are rejected. The response contains ordered
-`changes`, phase `changes`, `executor_reachability` (SET ROLE) and
-`executor_usage` (inherited privileges), findings, a visual graph, and an
-illustrative fingerprint. The fingerprint is not an approval token: browser
-analysis has no verified target identity or execution context. Findings that
-need ownership, grantor, or live privilege evidence remain database preflight
-requirements.
+`mode`, `executor`, `pg_major_version`, and `authority_graph_complete`; unknown fields,
+explicit credential fields, password fields, and password sources in desired YAML are
+rejected. The response contains the effective `pg_major_version` and
+`authority_graph_complete`, ordered `changes`, phase `changes`, `executor_reachability`
+(SET ROLE) and `executor_usage` (inherited privileges), findings, a visual graph, and an
+illustrative fingerprint. Contiguous changes of one phase form one phase entry, so a phase label
+can repeat, for example `create`, `alter`, `create`. The fingerprint binds the mode, version,
+completeness, and executor facts, but it is not an approval token: browser analysis has no
+verified target identity or execution context. Findings that need ownership, grantor, or live
+privilege evidence remain database preflight requirements. `database_preflight_required` is
+reported once per phase and change kind; its `change_indices` lists every affected change and
+`change_index` names the first. A schema owner change also reports
+`ownership_transfer_changes_grantor`, because the new owner becomes the implicit grantor for
+privileges on that schema. Dropping a role is not reported as the executor losing access to it.
 
-The docs explorer can also open `pgroles.review-artifact.v1` files exported by
-native `pgroles diff --review-out review.pgroles.json`. Those files contain
-recorded results and are rendered without initializing WASM or recalculating
-the plan. The first artifact version omits exploration inputs; its SQL preview
-comes from the native planning run and is omitted when changes contain sensitive
-values. See the [recorded review workflow](../../docs/src/pages/docs/ci-cd.md#recorded-reviews).
+The docs explorer can also open `pgroles.review-artifact.v2` files exported by
+native `pgroles diff --review-out review.pgroles.json`; older `v1` files must be
+re-exported. Those files contain recorded results and are rendered without
+initializing WASM or recalculating the plan. Recorded phases store reachability
+as deltas from the previous phase rather than the full per-phase lists that
+`analyze` returns. Artifacts omit exploration inputs; the SQL preview comes from
+the native planning run and is omitted when changes contain sensitive values. See the [recorded review workflow](../../docs/src/pages/docs/ci-cd.md#recorded-reviews).
 
 Run browser-safe checks package-scoped, because workspace feature unification
 can enable `pgroles-core/passwords` through the CLI or operator:
@@ -107,5 +164,11 @@ can enable `pgroles-core/passwords` through the CLI or operator:
 cargo test -p pgroles-core --no-default-features
 cargo check -p pgroles-core --no-default-features --target wasm32-unknown-unknown
 cargo check -p pgroles-wasm --target wasm32-unknown-unknown
+cargo test -p pgroles-wasm --test fixture_expectations
 WASM_PACK_BIN=wasm-pack scripts/check-wasm-parity.sh
 ```
+
+Each file in `tests/fixtures/` is `{ description, request, expected }`. `expected` uses the
+docs scenario assertion format (`changes`, `absentChanges`, `findings`, `absentFindings`,
+`phaseReachability`, and `response` fields), and both the native fixture test and the WASM
+parity script check it in addition to native/WASM equality.

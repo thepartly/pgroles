@@ -35,15 +35,27 @@ try {
   rmSync(scenarioDirectory, { recursive: true, force: true })
 }
 
-for (const fixtureName of readdirSync(fixturesDirectory).filter((name) => name.endsWith('.json')).sort()) {
-  const fixturePath = resolve(fixturesDirectory, fixtureName)
-  const input = JSON.parse(readFileSync(fixturePath, 'utf8'))
-  const native = spawnSync(nativeBinary, ['analyze', fixturePath], { encoding: 'utf8' })
-  assert.equal(native.status, 0, `${fixtureName}: native analyzer failed: ${native.stderr}`)
-  const nativeResponse = JSON.parse(native.stdout)
-  const wasmResponse = wasm.analyze(input)
-  assert.deepEqual(wasmResponse, nativeResponse, `${fixtureName}: WASM response differs from native response`)
-  console.log(`PASS ${fixtureName}`)
+// Each fixture is `{ description, request, expected }`; `expected` uses the
+// scenario assertion format so fixtures check meaning as well as parity.
+const fixtureDirectory = mkdtempSync(resolve(tmpdir(), 'pgroles-fixtures-'))
+try {
+  for (const fixtureName of readdirSync(fixturesDirectory).filter((name) => name.endsWith('.json')).sort()) {
+    const { description, request, expected } = JSON.parse(readFileSync(resolve(fixturesDirectory, fixtureName), 'utf8'))
+    assert(description && request && expected, `${fixtureName}: fixtures need description, request, and expected`)
+    assert(Object.values(expected).some((assertions) => Object.keys(assertions).length > 0), `${fixtureName}: empty expectations`)
+    const requestPath = resolve(fixtureDirectory, 'request.json')
+    writeFileSync(requestPath, JSON.stringify(request))
+    const native = spawnSync(nativeBinary, ['analyze', requestPath], { encoding: 'utf8' })
+    assert.equal(native.status, 0, `${fixtureName}: native analyzer failed: ${native.stderr}`)
+    const nativeResponse = JSON.parse(native.stdout)
+    const wasmResponse = wasm.analyze(request)
+    assertScenarioAnalysis(nativeResponse, expected, `${fixtureName} (native)`)
+    assertScenarioAnalysis(wasmResponse, expected, `${fixtureName} (WASM)`)
+    assert.deepEqual(wasmResponse, nativeResponse, `${fixtureName}: WASM response differs from native response`)
+    console.log(`PASS ${fixtureName}`)
+  }
+} finally {
+  rmSync(fixtureDirectory, { recursive: true, force: true })
 }
 
 const invalidDirectory = resolve(fixturesDirectory, '..', 'invalid')

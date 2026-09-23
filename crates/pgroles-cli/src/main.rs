@@ -26,10 +26,11 @@ use pgroles_core::ownership::validate_changes_against_managed_surface;
 use pgroles_core::review_artifact::{
     EvidenceCheck, EvidenceCoverage, EvidenceCoverageKind, EvidenceStatus,
     ExplorationOmissionReason, PolicyProvenance, PreflightCheck, PreflightEvidence,
-    PreflightFinding, ReviewArtifactInput, ReviewContext, ReviewExploration, ReviewIdentity,
-    ReviewMode, ReviewProvenance, build_review_artifact,
+    PreflightFinding, ReviewArtifact, ReviewArtifactInput, ReviewContext, ReviewExploration,
+    ReviewIdentity, ReviewManagedSchema, ReviewManagedScope, ReviewMode, ReviewProvenance,
+    build_review_artifact,
 };
-use pgroles_core::visual::{self, VisualManagedSchema, VisualManagedScope, VisualSource};
+use pgroles_core::visual::{self, VisualManagedScope, VisualSource};
 use pgroles_inspect::{InspectConfig, inspect_drop_role_safety};
 
 // ---------------------------------------------------------------------------
@@ -855,50 +856,69 @@ fn cmd_render_bundle(
     Ok(ExitCode::SUCCESS)
 }
 
-// Markdown is a review-only artifact: declared password intent is sufficient.
-// Never resolve or hash credential values for this format.
+/// The plan with declared password intent in place of credentials: a redacted
+/// `SetPassword` exactly where password injection would place one.
+///
+/// Every `diff` output redacts password values and the review artifact omits
+/// them, so `diff` never computes verifiers.
+fn password_intent_changes(
+    changes: Vec<pgroles_core::diff::Change>,
+    expanded: &pgroles_core::manifest::ExpandedManifest,
+) -> Vec<pgroles_core::diff::Change> {
+    let mut names: std::collections::BTreeSet<_> = expanded
+        .roles
+        .iter()
+        .filter(|role| !role.external && role.password.is_some())
+        .map(|role| role.name.clone())
+        .collect();
+    let mut review_changes = Vec::with_capacity(changes.len() + names.len());
+    for change in changes {
+        let password_role = match &change {
+            pgroles_core::diff::Change::CreateRole { name, .. } if names.remove(name) => {
+                Some(name.clone())
+            }
+            _ => None,
+        };
+        review_changes.push(change);
+        if let Some(name) = password_role {
+            review_changes.push(pgroles_core::diff::Change::SetPassword {
+                name,
+                password: "[REDACTED]".to_owned(),
+            });
+        }
+    }
+    review_changes.extend(
+        names
+            .into_iter()
+            .map(|name| pgroles_core::diff::Change::SetPassword {
+                name,
+                password: "[REDACTED]".to_owned(),
+            }),
+    );
+    review_changes
+}
+
+/// Add declared password intent to a `diff` plan.
+///
+/// Markdown is review-only and never reads password sources. The `sql`,
+/// `json`, and `summary` formats keep their established requirement that every
+/// `password.from_env` variable is set, but the values are discarded: their
+/// output is redacted too. The review artifact never depends on this check.
 fn diff_password_changes(
     changes: Vec<pgroles_core::diff::Change>,
     expanded: &pgroles_core::manifest::ExpandedManifest,
     format: &OutputFormat,
 ) -> Result<Vec<pgroles_core::diff::Change>> {
-    if matches!(format, OutputFormat::Markdown) {
-        let mut names: std::collections::BTreeSet<_> = expanded
-            .roles
-            .iter()
-            .filter(|role| !role.external && role.password.is_some())
-            .map(|role| role.name.clone())
-            .collect();
-        let mut review_changes = Vec::with_capacity(changes.len() + names.len());
-        for change in changes {
-            let password_role = match &change {
-                pgroles_core::diff::Change::CreateRole { name, .. } if names.remove(name) => {
-                    Some(name.clone())
-                }
-                _ => None,
-            };
-            review_changes.push(change);
-            if let Some(name) = password_role {
-                review_changes.push(pgroles_core::diff::Change::SetPassword {
-                    name,
-                    password: "[REDACTED]".to_owned(),
-                });
-            }
-        }
-        review_changes.extend(names.into_iter().map(|name| {
-            pgroles_core::diff::Change::SetPassword {
-                name,
-                password: "[REDACTED]".to_owned(),
-            }
-        }));
-        Ok(review_changes)
-    } else {
-        let passwords = resolve_passwords(expanded).context("failed to resolve role passwords")?;
-        Ok(inject_password_changes(changes, &passwords))
+    if !matches!(format, OutputFormat::Markdown) {
+        resolve_passwords(expanded).context("failed to resolve role passwords")?;
     }
+    Ok(password_intent_changes(changes, expanded))
 }
 
-fn single_manifest_managed_scope(validated: &pgroles_cli::ValidatedManifest) -> VisualManagedScope {
+/// Managed scope for a single manifest: declared, non-external roles plus
+/// retirements, and declared schemas. `external: true` roles are referenced,
+/// not lifecycle-managed.
+fn single_manifest_managed_scope(validated: &pgroles_cli::ValidatedManifest) -> ReviewManagedScope {
     let mut roles = validated
         .expanded
         .roles
@@ -918,23 +938,50 @@ fn single_manifest_managed_scope(validated: &pgroles_cli::ValidatedManifest) -> 
         .manifest
         .schemas
         .iter()
-        .map(|binding| VisualManagedSchema {
+        .map(|binding| ReviewManagedSchema {
             name: binding.name.clone(),
             owner: binding.owner.is_some() || validated.manifest.default_owner.is_some(),
             bindings: !binding.profiles.is_empty(),
         })
         .collect();
-    VisualManagedScope { roles, schemas }
+    without_external_roles(ReviewManagedScope { roles, schemas }, &validated.expanded)
 }
 
-struct ReviewArtifactWriteInput<'a> {
-    path: &'a Path,
+/// Review artifacts record lifecycle-managed roles. A bundle's ownership
+/// scope also claims the `external: true` roles its documents reference; drop
+/// those so both input shapes record the same meaning.
+fn without_external_roles(
+    mut scope: ReviewManagedScope,
+    expanded: &pgroles_core::manifest::ExpandedManifest,
+) -> ReviewManagedScope {
+    let external: std::collections::BTreeSet<&str> = expanded
+        .roles
+        .iter()
+        .filter(|role| role.external)
+        .map(|role| role.name.as_str())
+        .collect();
+    scope.roles.retain(|role| !external.contains(role.as_str()));
+    scope
+}
+
+/// `--target-label` names an environment for reviewers. A connection URL can
+/// carry credentials, so the label is rejected rather than echoed.
+fn validate_target_label(label: &str) -> Result<()> {
+    if label.contains("://") {
+        anyhow::bail!(
+            "--target-label must be a human-readable name such as \"staging\", not a connection URL (the value contains \"://\")"
+        );
+    }
+    Ok(())
+}
+
+struct ReviewArtifactBuildInput<'a> {
     policy_content: &'a [u8],
     policy_commit: Option<&'a str>,
     target_label: Option<&'a str>,
     intended_executor: Option<&'a str>,
     mode: ReconciliationMode,
-    managed_scope: Option<VisualManagedScope>,
+    managed_scope: Option<ReviewManagedScope>,
     inspector: &'a ExecutionBackendInfo,
     current: pgroles_core::model::RoleGraph,
     changes: &'a [pgroles_core::diff::Change],
@@ -944,8 +991,32 @@ struct ReviewArtifactWriteInput<'a> {
     drop_safety: &'a pgroles_inspect::DropRoleSafetyAssessment,
 }
 
+/// A grantor-less object revoke is checked only for the objects
+/// `preflight_authority_issues` explodes: a named object, or a wildcard whose
+/// scope has inspected per-object grants. A revoke with no object name, or a
+/// wildcard with nothing inspected in its scope, is skipped there.
+fn grantor_less_revoke_is_checked(
+    current: &pgroles_core::model::RoleGraph,
+    role: &pgroles_core::model::Grantee,
+    object_type: pgroles_core::manifest::ObjectType,
+    schema: &Option<String>,
+    name: &Option<String>,
+) -> bool {
+    match name.as_deref() {
+        None => false,
+        Some("*") => current.grants.keys().any(|key| {
+            key.role == *role
+                && key.object_type == object_type
+                && key.schema == *schema
+                && key.name.is_some()
+        }),
+        Some(_) => true,
+    }
+}
+
 fn targeted_authority_coverage(
     changes: &[pgroles_core::diff::Change],
+    current: &pgroles_core::model::RoleGraph,
     inspector_is_superuser: bool,
     pg_major_version: i32,
 ) -> EvidenceCoverage {
@@ -973,13 +1044,26 @@ fn targeted_authority_coverage(
                 }
                 true
             }
-            Change::Revoke { grantor, .. } => {
-                if grantor.is_some() {
-                    checks_performed.insert(EvidenceCheck::GrantorReachability);
-                } else {
+            Change::Revoke {
+                grantor: Some(_), ..
+            } => {
+                checks_performed.insert(EvidenceCheck::GrantorReachability);
+                true
+            }
+            Change::Revoke {
+                role,
+                object_type,
+                schema,
+                name,
+                grantor: None,
+                ..
+            } => {
+                let checked =
+                    grantor_less_revoke_is_checked(current, role, *object_type, schema, name);
+                if checked {
                     checks_performed.insert(EvidenceCheck::RevokeAclOwnership);
                 }
-                true
+                checked
             }
             Change::AddMember { role, .. } => {
                 let checked = pgroles_core::manifest::is_predefined_role(role);
@@ -1017,9 +1101,8 @@ fn targeted_authority_coverage(
     }
 }
 
-fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
-    let ReviewArtifactWriteInput {
-        path,
+fn build_cli_review_artifact(input: ReviewArtifactBuildInput<'_>) -> Result<ReviewArtifact> {
+    let ReviewArtifactBuildInput {
         policy_content,
         policy_commit,
         target_label,
@@ -1036,8 +1119,12 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
     } = input;
     let intended_executor = intended_executor.unwrap_or(&inspector.user_name);
     let intended_is_inspector = intended_executor == inspector.user_name;
-    let authority_coverage =
-        targeted_authority_coverage(changes, inspector.superuser, sql_context.pg_major_version);
+    let authority_coverage = targeted_authority_coverage(
+        changes,
+        &current,
+        inspector.superuser,
+        sql_context.pg_major_version,
+    );
     let unchecked_changes = (0..changes.len()).collect::<Vec<_>>();
     let drop_checked = changes
         .iter()
@@ -1114,7 +1201,7 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
             },
         });
     }
-    let artifact = build_review_artifact(ReviewArtifactInput {
+    build_review_artifact(ReviewArtifactInput {
         provenance: ReviewProvenance {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             captured_at: jiff::Timestamp::now().to_string(),
@@ -1145,6 +1232,7 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
         executor_facts: ExecutorFacts {
             role: intended_executor.to_string(),
             superuser: intended_is_inspector && inspector.superuser,
+            createrole: Default::default(),
             memberships: Vec::new(),
             new_membership_set_role: Default::default(),
             new_role_set_role: Default::default(),
@@ -1156,10 +1244,15 @@ fn write_review_artifact(input: ReviewArtifactWriteInput<'_>) -> Result<()> {
             reason: ExplorationOmissionReason::RecordedOnlyExport,
         },
     })
-    .map_err(|error| anyhow::anyhow!(error))?;
-    let rendered = serde_json::to_vec_pretty(&artifact)?;
+    .map_err(|error| anyhow::anyhow!(error))
+}
+
+/// Write the artifact and return its review fingerprint.
+fn write_review_artifact(path: &Path, artifact: &ReviewArtifact) -> Result<String> {
+    let rendered = serde_json::to_vec_pretty(artifact)?;
     std::fs::write(path, rendered)
-        .with_context(|| format!("failed to write review artifact to {}", path.display()))
+        .with_context(|| format!("failed to write review artifact to {}", path.display()))?;
+    Ok(artifact.recorded.review_fingerprint.clone())
 }
 
 fn authority_preflight_findings(
@@ -1248,6 +1341,102 @@ struct DiffReviewOptions<'a> {
     executor_role: Option<&'a str>,
 }
 
+/// A rendered `diff` report: `stdout` is the requested format, `stderr` the
+/// human-oriented notes that accompany it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DiffReport {
+    stdout: String,
+    stderr: String,
+}
+
+struct DiffReportInput<'a> {
+    format: &'a OutputFormat,
+    changes: &'a [pgroles_core::diff::Change],
+    summary: &'a PlanSummary,
+    drop_safety: &'a pgroles_inspect::DropRoleSafetyAssessment,
+    sql_context: Option<&'a pgroles_core::sql::SqlContext>,
+    /// Fingerprint of the review artifact this run wrote, if any.
+    review_fingerprint: Option<&'a str>,
+}
+
+fn render_diff_report(
+    input: DiffReportInput<'_>,
+    render_markdown: impl FnOnce() -> Result<String>,
+    render_json: impl FnOnce() -> Result<String>,
+) -> Result<DiffReport> {
+    let DiffReportInput {
+        format,
+        changes,
+        summary,
+        drop_safety,
+        sql_context,
+        review_fingerprint,
+    } = input;
+    let mut report = DiffReport::default();
+    let drop_safety_note = if drop_safety.is_empty() {
+        String::new()
+    } else {
+        format!("\n{drop_safety}\n")
+    };
+    match format {
+        OutputFormat::Sql => {
+            if summary.is_empty() {
+                report.stdout = "-- No changes needed. Database is in sync with manifest.\n".into();
+            } else {
+                let sql_context = sql_context.expect("SQL output requested SQL context");
+                report.stdout = format_plan_sql_with_context(changes, sql_context);
+                report.stderr = format!("\n{summary}\n{drop_safety_note}");
+            }
+        }
+        OutputFormat::Summary => {
+            report.stdout = summary.to_string();
+            report.stderr = drop_safety_note;
+        }
+        OutputFormat::Markdown => {
+            report.stdout = render_markdown()?;
+            if let Some(fingerprint) = review_fingerprint {
+                report
+                    .stdout
+                    .push_str(&pgroles_core::review::render_review_artifact_footer(
+                        fingerprint,
+                    ));
+            }
+            report.stderr = drop_safety_note;
+        }
+        OutputFormat::Json => {
+            report.stdout = format!("{}\n", render_json()?);
+        }
+    }
+    Ok(report)
+}
+
+/// Print the report even when the review export failed, then surface the
+/// export failure as the command's error.
+fn finish_diff(
+    report: DiffReport,
+    review_out: Option<&Path>,
+    export: Option<Result<String>>,
+    drift: bool,
+) -> Result<ExitCode> {
+    print!("{}", report.stdout);
+    eprint!("{}", report.stderr);
+    match (review_out, export) {
+        (Some(path), Some(Ok(fingerprint))) => {
+            eprintln!(
+                "Recorded review written to {} (review fingerprint {fingerprint})",
+                path.display()
+            );
+        }
+        (_, Some(Err(error))) => return Err(error),
+        _ => {}
+    }
+    Ok(if drift {
+        ExitCode::from(EXIT_DRIFT)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
 async fn cmd_diff(
     file: Option<&Path>,
     bundle: Option<&Path>,
@@ -1263,6 +1452,9 @@ async fn cmd_diff(
         policy_commit,
         executor_role,
     } = review;
+    if let Some(label) = target_label {
+        validate_target_label(label)?;
+    }
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
         let pool = connect_db(database_url).await?;
@@ -1297,88 +1489,75 @@ async fn cmd_diff(
         } else {
             None
         };
-        if let Some(review_path) = review_out {
-            let inspector = fetch_execution_backend_info(&pool)
-                .await
-                .context("failed to identify review artifact inspector")?;
-            let policy_content = serde_json::to_vec(&validated.composed.manifest)?;
-            let change_sources = pgroles_core::report::build_bundle_plan(
-                &changes,
-                &validated.composed.report_context(),
-                pgroles_core::report::PlanOutputMode::Redacted,
-            )?
-            .changes
-            .into_iter()
-            .map(|entry| entry.owner)
-            .collect::<Vec<_>>();
-            write_review_artifact(ReviewArtifactWriteInput {
-                path: review_path,
-                policy_content: &policy_content,
-                policy_commit,
-                target_label,
-                intended_executor: executor_role,
-                mode,
-                managed_scope: Some(VisualManagedScope::from(&validated.composed.managed_scope)),
-                inspector: &inspector,
-                current: current.clone(),
-                changes: &changes,
-                change_sources: Some(&change_sources),
-                sql_context: sql_context
-                    .as_ref()
-                    .expect("review artifact requested SQL context"),
-                authority_issues: &authority_issues,
-                drop_safety: &drop_safety,
-            })?;
-        }
-
-        match format {
-            OutputFormat::Sql => {
-                let sql_ctx = sql_context
-                    .as_ref()
-                    .expect("SQL output requested SQL context");
-                if summary.is_empty() {
-                    println!("-- No changes needed. Database is in sync with manifest.");
-                } else {
-                    print!("{}", format_plan_sql_with_context(&changes, sql_ctx));
-                    eprintln!("\n{summary}");
-                    if !drop_safety.is_empty() {
-                        eprintln!("\n{drop_safety}");
-                    }
-                }
-            }
-            OutputFormat::Summary => {
-                print!("{summary}");
-                if !drop_safety.is_empty() {
-                    eprintln!("\n{drop_safety}");
-                }
-            }
-            OutputFormat::Markdown => {
-                print!(
-                    "{}",
-                    pgroles_core::review::render_markdown(
+        let export = match review_out {
+            Some(review_path) => Some(
+                async {
+                    let inspector = fetch_execution_backend_info(&pool)
+                        .await
+                        .context("failed to identify review artifact inspector")?;
+                    let policy_content = serde_json::to_vec(&validated.composed.manifest)?;
+                    let change_sources = pgroles_core::report::build_bundle_plan(
                         &changes,
-                        &bundle_path.display().to_string(),
-                        mode,
-                        Some(&validated.composed.report_context())
+                        &validated.composed.report_context(),
+                        pgroles_core::report::PlanOutputMode::Redacted,
                     )?
-                );
-                if !drop_safety.is_empty() {
-                    eprintln!("\n{drop_safety}");
+                    .changes
+                    .into_iter()
+                    .map(|entry| entry.owner)
+                    .collect::<Vec<_>>();
+                    let artifact = build_cli_review_artifact(ReviewArtifactBuildInput {
+                        policy_content: &policy_content,
+                        policy_commit,
+                        target_label,
+                        intended_executor: executor_role,
+                        mode,
+                        managed_scope: Some(without_external_roles(
+                            ReviewManagedScope::from(&validated.composed.managed_scope),
+                            &validated.composed.expanded,
+                        )),
+                        inspector: &inspector,
+                        current: current.clone(),
+                        changes: &changes,
+                        change_sources: Some(&change_sources),
+                        sql_context: sql_context
+                            .as_ref()
+                            .expect("review artifact requested SQL context"),
+                        authority_issues: &authority_issues,
+                        drop_safety: &drop_safety,
+                    })?;
+                    write_review_artifact(review_path, &artifact)
                 }
-            }
-            OutputFormat::Json => {
-                println!(
-                    "{}",
-                    format_bundle_plan_json(&changes, &validated.composed)?
-                );
-            }
-        }
-
-        return if use_exit_code && summary.has_structural_changes() {
-            Ok(ExitCode::from(EXIT_DRIFT))
-        } else {
-            Ok(ExitCode::SUCCESS)
+                .await,
+            ),
+            None => None,
         };
+
+        let report_context = validated.composed.report_context();
+        let report = render_diff_report(
+            DiffReportInput {
+                format,
+                changes: &changes,
+                summary: &summary,
+                drop_safety: &drop_safety,
+                sql_context: sql_context.as_ref(),
+                review_fingerprint: export.as_ref().and_then(|result| result.as_deref().ok()),
+            },
+            || {
+                Ok(pgroles_core::review::render_markdown(
+                    &changes,
+                    &bundle_path.display().to_string(),
+                    mode,
+                    Some(&report_context),
+                )?)
+            },
+            || format_bundle_plan_json(&changes, &validated.composed),
+        )?;
+        return finish_diff(
+            report,
+            review_out,
+            export,
+            use_exit_code && summary.has_structural_changes(),
+        );
     }
 
     let file_path = file.unwrap_or_else(|| Path::new("pgroles.yaml"));
@@ -1412,77 +1591,63 @@ async fn cmd_diff(
     } else {
         None
     };
-    if let Some(review_path) = review_out {
-        let inspector = fetch_execution_backend_info(&pool)
-            .await
-            .context("failed to identify review artifact inspector")?;
-        write_review_artifact(ReviewArtifactWriteInput {
-            path: review_path,
-            policy_content: yaml.as_bytes(),
-            policy_commit,
-            target_label,
-            intended_executor: executor_role,
-            mode,
-            managed_scope: Some(single_manifest_managed_scope(&validated)),
-            inspector: &inspector,
-            current: current.clone(),
-            changes: &changes,
-            change_sources: None,
-            sql_context: sql_context
-                .as_ref()
-                .expect("review artifact requested SQL context"),
-            authority_issues: &authority_issues,
-            drop_safety: &drop_safety,
-        })?;
-    }
-
-    match format {
-        OutputFormat::Sql => {
-            let sql_ctx = sql_context
-                .as_ref()
-                .expect("SQL output requested SQL context");
-            if summary.is_empty() {
-                println!("-- No changes needed. Database is in sync with manifest.");
-            } else {
-                print!("{}", format_plan_sql_with_context(&changes, sql_ctx));
-                eprintln!("\n{summary}");
-                if !drop_safety.is_empty() {
-                    eprintln!("\n{drop_safety}");
-                }
-            }
-        }
-        OutputFormat::Summary => {
-            print!("{summary}");
-            if !drop_safety.is_empty() {
-                eprintln!("\n{drop_safety}");
-            }
-        }
-        OutputFormat::Markdown => {
-            print!(
-                "{}",
-                pgroles_core::review::render_markdown(
-                    &changes,
-                    &file_path.display().to_string(),
+    let export = match review_out {
+        Some(review_path) => Some(
+            async {
+                let inspector = fetch_execution_backend_info(&pool)
+                    .await
+                    .context("failed to identify review artifact inspector")?;
+                let artifact = build_cli_review_artifact(ReviewArtifactBuildInput {
+                    policy_content: yaml.as_bytes(),
+                    policy_commit,
+                    target_label,
+                    intended_executor: executor_role,
                     mode,
-                    None
-                )?
-            );
-            if !drop_safety.is_empty() {
-                eprintln!("\n{drop_safety}");
+                    managed_scope: Some(single_manifest_managed_scope(&validated)),
+                    inspector: &inspector,
+                    current: current.clone(),
+                    changes: &changes,
+                    change_sources: None,
+                    sql_context: sql_context
+                        .as_ref()
+                        .expect("review artifact requested SQL context"),
+                    authority_issues: &authority_issues,
+                    drop_safety: &drop_safety,
+                })?;
+                write_review_artifact(review_path, &artifact)
             }
-        }
-        OutputFormat::Json => {
-            println!("{}", format_plan_json(&changes)?);
-        }
-    }
+            .await,
+        ),
+        None => None,
+    };
 
+    let report = render_diff_report(
+        DiffReportInput {
+            format,
+            changes: &changes,
+            summary: &summary,
+            drop_safety: &drop_safety,
+            sql_context: sql_context.as_ref(),
+            review_fingerprint: export.as_ref().and_then(|result| result.as_deref().ok()),
+        },
+        || {
+            Ok(pgroles_core::review::render_markdown(
+                &changes,
+                &file_path.display().to_string(),
+                mode,
+                None,
+            )?)
+        },
+        || format_plan_json(&changes),
+    )?;
     // Use structural changes for exit code — password-only changes don't
     // constitute drift because passwords can't be read back for comparison.
-    if use_exit_code && summary.has_structural_changes() {
-        Ok(ExitCode::from(EXIT_DRIFT))
-    } else {
-        Ok(ExitCode::SUCCESS)
-    }
+    finish_diff(
+        report,
+        review_out,
+        export,
+        use_exit_code && summary.has_structural_changes(),
+    )
 }
 
 async fn cmd_apply(
@@ -2659,6 +2824,165 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn password_intent_matches_injected_passwords_for_every_format() {
+        use pgroles_core::diff::Change;
+        let validated = validate_manifest("roles:\n  - name: new_role\n    login: true\n    password:\n      from_env: PGROLES_INTENT_TEST_NEW_41907\n  - name: existing_role\n    login: true\n    password:\n      from_env: PGROLES_INTENT_TEST_EXISTING_41907\n").unwrap();
+        let changes = vec![Change::CreateRole {
+            name: "new_role".into(),
+            state: Default::default(),
+        }];
+        let passwords = std::collections::BTreeMap::from([
+            ("new_role".into(), "test-new".into()),
+            ("existing_role".into(), "test-existing".into()),
+        ]);
+        let injected = pgroles_core::report::redact_password_changes(&inject_password_changes(
+            changes.clone(),
+            &passwords,
+        ));
+        // Every format records the same plan; none carries a credential.
+        assert_eq!(
+            password_intent_changes(changes.clone(), &validated.expanded),
+            injected
+        );
+        for format in [OutputFormat::Sql, OutputFormat::Json, OutputFormat::Summary] {
+            let error = diff_password_changes(changes.clone(), &validated.expanded, &format)
+                .expect_err("these formats keep requiring password sources");
+            assert!(format!("{error:#}").contains("PGROLES_INTENT_TEST_NEW_41907"));
+        }
+    }
+
+    #[test]
+    fn target_label_rejects_connection_urls_without_echoing_them() {
+        for label in ["staging", "prod eu-west-1", "db.internal:5432/app"] {
+            validate_target_label(label).unwrap();
+        }
+        for label in [
+            "postgres://admin:hunter2@db/app",
+            "postgresql://db/app",
+            "https://example.com",
+        ] {
+            let message = validate_target_label(label).unwrap_err().to_string();
+            assert!(message.contains("not a connection URL"), "{message}");
+            assert!(!message.contains("hunter2"), "{message}");
+        }
+    }
+
+    #[test]
+    fn single_manifest_scope_excludes_external_roles() {
+        let validated = validate_manifest(
+            "roles:\n  - name: app\n  - name: iam_user\n    external: true\nretirements:\n  - role: legacy\n",
+        )
+        .unwrap();
+        assert_eq!(
+            single_manifest_managed_scope(&validated).roles,
+            vec!["app".to_string(), "legacy".to_string()]
+        );
+    }
+
+    #[test]
+    fn authority_coverage_matches_the_revokes_preflight_checks() {
+        use pgroles_core::diff::Change;
+        use pgroles_core::manifest::{ObjectType, Privilege};
+        use pgroles_core::model::{GrantKey, GrantState, Grantee};
+        let revoke = |name: Option<&str>, schema: &str, grantor: Option<&str>| Change::Revoke {
+            role: Grantee::from("reader"),
+            privileges: std::collections::BTreeSet::from([Privilege::Select]),
+            object_type: ObjectType::Table,
+            schema: Some(schema.into()),
+            name: name.map(Into::into),
+            grantor: grantor.map(Into::into),
+        };
+        let mut current = RoleGraph::default();
+        current.grants.insert(
+            GrantKey {
+                role: Grantee::from("reader"),
+                object_type: ObjectType::Table,
+                schema: Some("inspected".into()),
+                name: Some("orders".into()),
+            },
+            GrantState {
+                privileges: std::collections::BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let changes = vec![
+            revoke(None, "app", None),
+            revoke(Some("*"), "empty", None),
+            revoke(Some("*"), "inspected", None),
+            revoke(Some("orders"), "app", None),
+            revoke(None, "app", Some("grantor")),
+        ];
+        let coverage = targeted_authority_coverage(&changes, &current, false, 16);
+        assert_eq!(coverage.checked_change_indices, vec![2, 3, 4]);
+        assert_eq!(coverage.unchecked_change_indices, vec![0, 1]);
+        assert_eq!(
+            coverage.checks_performed,
+            vec![
+                EvidenceCheck::GrantorReachability,
+                EvidenceCheck::RevokeAclOwnership
+            ]
+        );
+        let unchecked = targeted_authority_coverage(&changes[..2], &current, false, 16);
+        assert!(unchecked.checks_performed.is_empty());
+        assert!(unchecked.checked_change_indices.is_empty());
+    }
+
+    #[test]
+    fn markdown_report_names_the_written_review_fingerprint() {
+        let summary = PlanSummary::from_changes(&[]);
+        let drop_safety = pgroles_inspect::DropRoleSafetyAssessment::default();
+        let render = |format: &OutputFormat, fingerprint: Option<&str>| {
+            render_diff_report(
+                DiffReportInput {
+                    format,
+                    changes: &[],
+                    summary: &summary,
+                    drop_safety: &drop_safety,
+                    sql_context: None,
+                    review_fingerprint: fingerprint,
+                },
+                || Ok("## pgroles review\n".to_string()),
+                || Ok("[]".to_string()),
+            )
+            .unwrap()
+        };
+        let fingerprint = format!("sha256:{}", "a".repeat(64));
+        let with = render(&OutputFormat::Markdown, Some(&fingerprint));
+        assert!(with.stdout.starts_with("## pgroles review\n"));
+        assert!(with.stdout.contains(&format!("`{fingerprint}`")));
+        assert!(
+            !render(&OutputFormat::Markdown, None)
+                .stdout
+                .contains("Recorded review artifact fingerprint")
+        );
+        assert_eq!(
+            render(&OutputFormat::Json, Some(&fingerprint)).stdout,
+            "[]\n"
+        );
+        assert_eq!(
+            render(&OutputFormat::Sql, None).stdout,
+            "-- No changes needed. Database is in sync with manifest.\n"
+        );
+    }
+
+    #[test]
+    fn diff_export_failure_is_the_command_error_after_printing() {
+        let report = DiffReport {
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let error = finish_diff(
+            report,
+            Some(Path::new("review.json")),
+            Some(Err(anyhow::anyhow!("disk full"))),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "disk full");
+        let exit = finish_diff(DiffReport::default(), None, None, true).unwrap();
+        assert_eq!(exit, ExitCode::from(EXIT_DRIFT));
     }
 
     #[test]

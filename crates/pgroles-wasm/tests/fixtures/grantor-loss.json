@@ -1,10 +1,57 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": {
-    "roles": { "deployer": {}, "reader": {} },
-    "grants": [{ "role": "reader", "object_type": "table", "schema": "app", "name": "orders", "privileges": ["SELECT"], "grantors": { "owner": ["SELECT"] } }]
+  "description": "A grantor-attributed revoke needs SET ROLE to the grantor, which the executor cannot reach.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {}
+      },
+      "grants": [
+        {
+          "role": "reader",
+          "object_type": "table",
+          "schema": "app",
+          "name": "orders",
+          "privileges": [
+            "SELECT"
+          ],
+          "grantors": {
+            "owner": [
+              "SELECT"
+            ]
+          }
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    }
   },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
-  "mode": "authoritative",
-  "executor": { "role": "deployer", "superuser": false }
+  "expected": {
+    "changes": [
+      {
+        "kind": "Revoke",
+        "role": "reader",
+        "grantor": "owner"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "required_role_unavailable",
+        "severity": "error",
+        "phase": "revoke",
+        "role": "owner",
+        "change_index": 0
+      },
+      {
+        "kind": "database_preflight_required",
+        "phase": "revoke",
+        "change_index": 0
+      }
+    ]
+  }
 }

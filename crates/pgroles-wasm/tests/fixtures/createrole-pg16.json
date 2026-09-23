@@ -1,0 +1,41 @@
+{
+  "description": "From PostgreSQL 16, CREATEROLE without ADMIN OPTION no longer authorizes the same grant.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "reader": {},
+        "reporting_app": {
+          "login": true
+        }
+      }
+    },
+    "desired_yaml": "roles:\n  - name: reader\n  - name: reporting_app\n    login: true\nmemberships:\n  - role: reader\n    members:\n      - name: reporting_app\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "createrole": "allowed"
+    },
+    "pg_major_version": 16
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "AddMember",
+        "role": "reader",
+        "member": "reporting_app"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "required_role_unavailable",
+        "severity": "error",
+        "phase": "membership_add",
+        "role": "reader"
+      }
+    ],
+    "response": {
+      "pg_major_version": 16
+    }
+  }
+}

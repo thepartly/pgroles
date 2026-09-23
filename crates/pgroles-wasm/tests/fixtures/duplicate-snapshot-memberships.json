@@ -1,0 +1,68 @@
+{
+  "description": "Duplicate snapshot edges for one pair merge like inspection: options OR together and grantors union.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {},
+        "x": {}
+      },
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "deployer",
+          "inherit": false,
+          "admin": true,
+          "grantors": [
+            "a"
+          ]
+        },
+        {
+          "role": "reader",
+          "member": "deployer",
+          "inherit": true,
+          "admin": false,
+          "grantors": [
+            "b"
+          ]
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n  - name: x\nmemberships:\n  - role: reader\n    members:\n      - name: deployer\n        admin: true\n      - name: x\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer"
+    }
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "AddMember",
+        "role": "reader",
+        "member": "x"
+      }
+    ],
+    "absentChanges": [
+      "RemoveMember"
+    ],
+    "absentFindings": [
+      {
+        "kind": "required_role_unavailable",
+        "role": "reader"
+      },
+      {
+        "kind": "required_role_reachability_unknown",
+        "role": "reader"
+      }
+    ],
+    "phaseReachability": [
+      {
+        "phase": "membership_add",
+        "role": "reader",
+        "authority": "usage",
+        "status": "reachable"
+      }
+    ]
+  }
+}

@@ -1,7 +1,44 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": { "roles": { "deployer": {}, "reader": {} } },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\nmemberships:\n  - role: reader\n    members:\n      - name: deployer\n",
-  "mode": "authoritative",
-  "executor": { "role": "deployer", "superuser": false }
+  "description": "Adding a membership without a proven ADMIN OPTION path is an error when the authority graph is complete.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {}
+      }
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\nmemberships:\n  - role: reader\n    members:\n      - name: deployer\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    }
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "AddMember",
+        "role": "reader",
+        "member": "deployer"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "required_role_unavailable",
+        "severity": "error",
+        "phase": "membership_add",
+        "role": "reader"
+      },
+      {
+        "kind": "role_becomes_reachable",
+        "phase": "membership_add",
+        "role": "reader"
+      }
+    ],
+    "response": {
+      "pg_major_version": 16,
+      "authority_graph_complete": true
+    }
+  }
 }
