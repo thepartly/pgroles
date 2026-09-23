@@ -55,7 +55,7 @@ grants:
 
 `USING` filters existing rows that a command may see or change. `WITH CHECK` tests the proposed values of an `INSERT` or `UPDATE`, rejecting a cross-tenant value. PostgreSQL documents the distinctions in [row security policies](https://www.postgresql.org/docs/18/ddl-rowsecurity.html) and [`CREATE POLICY`](https://www.postgresql.org/docs/18/sql-createpolicy.html).
 
-pgroles does not model, inspect, or apply RLS policies. Keep the `ALTER TABLE` and `CREATE POLICY` statements in migrations, and test them in PostgreSQL. The plan explorer can show the role and grant changes from a sanitized snapshot; its graph cannot guarantee which rows an RLS policy will return.
+pgroles does not model, inspect, or apply RLS policies. Keep the `ALTER TABLE` and `CREATE POLICY` statements in migrations, and test them in PostgreSQL. The plan explorer can show the role and grant changes from a [snapshot you prepare and scrub](/docs/explorer-snapshots); its graph cannot guarantee which rows an RLS policy will return.
 
 ## Test the identity, not a supplied tenant value
 

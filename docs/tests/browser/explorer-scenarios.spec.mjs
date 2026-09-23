@@ -23,12 +23,13 @@ test('uses the additive adoption scenario by default and compares authoritative 
 
   await page.getByRole('button', { name: 'Analyze plan' }).click()
   await expect(page.getByText('Execution phases')).toBeVisible()
-  await expect(page.getByText(/Add member.*orders_reader/i)).toBeVisible()
+  await expect(page.getByText('Add member · reporting_app to orders_reader', { exact: true })).toBeVisible()
   await expect(page.getByText(/Drop role.*bob/i)).toBeHidden()
 
   await page.getByLabel('Reconciliation mode').selectOption('authoritative')
   await page.getByRole('button', { name: 'Analyze plan' }).click()
-  await expect(page.getByText('Drop Role · bob', { exact: true })).toBeVisible()
+  await expect(page.getByText('Drop role · bob', { exact: true })).toBeVisible()
+  await expect(page.getByText('Remove member · bob from orders_reader', { exact: true })).toBeVisible()
 })
 
 test('loads bundled deep links and preserves selector transitions in browser history', async ({ page }) => {
@@ -119,24 +120,24 @@ test('compares executor authority facts without changing the planned default pri
   await page.goto('docs/explorer/?scenario=acme-executor-authority')
 
   await page.getByRole('button', { name: 'Analyze plan' }).click()
-  await expect(page.getByText('Set Default Privilege · app_owner', { exact: true })).toBeVisible()
+  await expect(page.getByText('Set default privilege · app_owner tables in app → orders_reader', { exact: true })).toBeVisible()
   await expect(page.locator('[data-severity="warning"]').filter({ hasText: 'app_owner' })).toBeVisible()
 
-  await page.getByLabel('Executor facts variant').selectOption('inherited')
+  await page.getByLabel('Scenario variant').selectOption('inherited')
   await page.getByRole('button', { name: 'Analyze plan' }).click()
-  await expect(page.getByText('Set Default Privilege · app_owner', { exact: true })).toBeVisible()
+  await expect(page.getByText('Set default privilege · app_owner tables in app → orders_reader', { exact: true })).toBeVisible()
   await expect(page.locator('[data-severity]').filter({ hasText: 'app_owner' })).toHaveCount(0)
 
-  await page.getByLabel('Executor facts variant').selectOption('denied')
+  await page.getByLabel('Scenario variant').selectOption('denied')
   await page.getByRole('button', { name: 'Analyze plan' }).click()
-  await expect(page.getByText('Set Default Privilege · app_owner', { exact: true })).toBeVisible()
+  await expect(page.getByText('Set default privilege · app_owner tables in app → orders_reader', { exact: true })).toBeVisible()
   await expect(page.locator('[data-severity="error"]').filter({ hasText: 'app_owner' })).toBeVisible()
 
   await page.getByLabel('Executor role').fill('custom_executor')
-  await expect(page.getByLabel('Executor facts variant')).toHaveValue('custom')
+  await expect(page.getByLabel('Scenario variant')).toHaveValue('custom')
 
-  await page.getByLabel('Executor facts variant').selectOption('inherited')
-  await expect(page.getByLabel('Executor facts variant')).toHaveValue('inherited')
+  await page.getByLabel('Scenario variant').selectOption('inherited')
+  await expect(page.getByLabel('Scenario variant')).toHaveValue('inherited')
   await expect(page.getByLabel('Executor role')).toHaveValue('deploy')
 
   await page.getByLabel('Sanitized snapshot file').setInputFiles({
@@ -147,7 +148,7 @@ test('compares executor authority facts without changing the planned default pri
       executor: { role: 'imported_executor', superuser: false },
     })),
   })
-  await expect(page.getByLabel('Executor facts variant')).toHaveValue('custom')
+  await expect(page.getByLabel('Scenario variant')).toHaveValue('custom')
   await expect(page.getByLabel('Executor role')).toHaveValue('imported_executor')
 })
 
@@ -160,4 +161,37 @@ test('opens the focused membership boundary with lost inherited authority', asyn
   await expect(accessDetails).toHaveAttribute('open', '')
   await expect(accessDetails).toContainText('Inherited usage')
   await expect(accessDetails).toContainText(/app_owner\s*Unreachable/i)
+})
+
+test('compares PostgreSQL 15 and 16 membership authority through scenario variants', async ({ page }) => {
+  await page.goto('docs/explorer/?scenario=acme-postgres-upgrade')
+  const version = page.getByLabel('PostgreSQL major version')
+  const variant = page.getByLabel('Scenario variant')
+  const target = page.getByTestId('analysis-target')
+  const ordersReaderFindings = page.locator('[data-severity]').filter({ hasText: 'orders_reader' })
+  await expect(version).toHaveValue('16')
+  await expect(page.getByLabel('Executor CREATEROLE')).toHaveValue('allowed')
+
+  await page.getByRole('button', { name: 'Analyze plan' }).click()
+  await expect(page.getByText('Add member · reporting_app to orders_reader', { exact: true })).toBeVisible()
+  await expect(target).toContainText('PostgreSQL 16')
+  await expect(page.locator('[data-severity="error"]').filter({ hasText: 'orders_reader' })).toBeVisible()
+
+  await variant.selectOption('pg15')
+  await expect(version).toHaveValue('15')
+  await page.getByRole('button', { name: 'Analyze plan' }).click()
+  await expect(target).toContainText('PostgreSQL 15')
+  await expect(ordersReaderFindings).toHaveCount(0)
+
+  await variant.selectOption('partial-snapshot')
+  await expect(version).toHaveValue('16')
+  await expect(page.getByText(/Authority graph: partial/)).toBeVisible()
+  await page.getByRole('button', { name: 'Analyze plan' }).click()
+  await expect(target).toContainText('Partial authority graph')
+  await expect(page.locator('[data-severity="warning"]').filter({ hasText: 'orders_reader' }).first()).toBeVisible()
+  await expect(page.locator('[data-severity="error"]').filter({ hasText: 'orders_reader' })).toHaveCount(0)
+
+  await version.selectOption('17')
+  await expect(variant).toHaveValue('custom')
+  expectScenarioOnlyUrl(page, 'acme-postgres-upgrade')
 })

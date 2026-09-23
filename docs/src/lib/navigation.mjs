@@ -130,7 +130,10 @@ const learnNavigation = [
 const explorerNavigation = [
   {
     title: 'Explorer',
-    links: [{ title: 'Plan explorer', href: '/docs/explorer' }],
+    links: [
+      { title: 'Plan explorer', href: '/docs/explorer' },
+      { title: 'Snapshot format', href: '/docs/explorer-snapshots' },
+    ],
   },
 ]
 
@@ -230,6 +233,28 @@ export function getNavigation(pathnameOrDestination) {
 
   const page = resolvePage(pathnameOrDestination)
   return navigationByDestination[page?.destination ?? 'docs']
+}
+
+/**
+ * Destination, section, and page labels for the breadcrumb, with a level
+ * dropped when it repeats the one above it (the Explorer destination's only
+ * section is also called Explorer).
+ */
+export function getBreadcrumbs(pathname) {
+  const page = resolvePage(pathname)
+  const destination = DESTINATIONS.find(
+    (item) => item.id === (page?.destination ?? 'docs')
+  )
+  const trail = [
+    { label: destination.label, current: false },
+    { label: page?.section ?? destination.label, current: false },
+    ...(page ? [{ label: page.navigationTitle, current: true }] : []),
+  ]
+  return trail.filter(
+    (crumb, index) =>
+      index === 0 ||
+      crumb.label.toLowerCase() !== trail[index - 1].label.toLowerCase()
+  )
 }
 
 function readingLink(href) {

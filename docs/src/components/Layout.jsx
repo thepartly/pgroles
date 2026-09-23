@@ -14,6 +14,7 @@ import { Prose } from '@/components/Prose'
 import { ThemeSelector } from '@/components/ThemeSelector'
 import {
   DESTINATIONS,
+  getBreadcrumbs,
   getNavigation,
   getReadingLinks,
   resolvePage,
@@ -196,7 +197,7 @@ export function Layout({ children, title, tableOfContents }) {
   const reading = getReadingLinks(pathname)
   const currentSection = useTableOfContents(tableOfContents)
   const isHomePage = pathname === '/'
-  const breadcrumb = page?.section ?? destination.label
+  const breadcrumbs = getBreadcrumbs(pathname)
 
   function isActive(section) {
     return section.id === currentSection || section.children?.some(isActive)
@@ -239,15 +240,14 @@ export function Layout({ children, title, tableOfContents }) {
                     aria-label="Breadcrumb"
                     className="font-display text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300"
                   >
-                    <span>{destination.label}</span>
-                    <span aria-hidden="true"> / </span>
-                    <span>{breadcrumb}</span>
-                    {page && (
-                      <>
-                        <span aria-hidden="true"> / </span>
-                        <span aria-current="page">{page.navigationTitle}</span>
-                      </>
-                    )}
+                    {breadcrumbs.map((crumb, index) => (
+                      <span key={`${crumb.label}-${index}`}>
+                        {index > 0 && <span aria-hidden="true"> / </span>}
+                        <span aria-current={crumb.current ? 'page' : undefined}>
+                          {crumb.label}
+                        </span>
+                      </span>
+                    ))}
                   </nav>
                   {title && (
                     <h1 className="font-display text-stone-950 text-4xl tracking-[-0.03em] dark:text-stone-100">
