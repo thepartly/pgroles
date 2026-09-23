@@ -103,14 +103,18 @@ and `authority_graph_complete` (a boolean).
 | `pg_major_version` | `16` | PostgreSQL major version whose membership-authority rules apply. Values below 12 or above 20 are rejected. |
 | `authority_graph_complete` | `true` | Whether absence from the snapshot and executor facts proves absence in PostgreSQL. |
 
-`pg_major_version` changes only the authority check for membership grants and revokes
-(`AddMember`, and `RemoveMember` without a grantor). Before PostgreSQL 16, CREATEROLE on the
+`pg_major_version` changes the authority check for membership grants and revokes
+(`AddMember`, and `RemoveMember` without a grantor), and what a membership proves about SET
+ROLE. Before PostgreSQL 16, CREATEROLE on the
 executor authorizes them for any non-superuser role, as does ADMIN OPTION; an `unknown`
 CREATEROLE without proven ADMIN OPTION is reported as not proven. From PostgreSQL 16, ADMIN
 OPTION on the granted role is required, held by the executor or by a role whose privileges it
 inherits, and CREATEROLE alone is not sufficient. In every version, membership in a SUPERUSER
-role can only be granted or revoked by a superuser executor (`superuser_required`). The planned
-changes, SET and INHERIT option modelling, and grantor attribution do not depend on the version.
+role can only be granted or revoked by a superuser executor (`superuser_required`). Before
+PostgreSQL 16 there is no membership SET option, so every membership in the snapshot, in executor
+facts, or added by the plan proves SET ROLE to the granted role; from 16, a membership without a
+`set_role` fact is a possible path, not a proven one. The planned changes, INHERIT option
+modelling, and grantor attribution do not depend on the version.
 
 With `authority_graph_complete: false`, a role without a proven path is `unknown` rather than
 `unreachable`, and missing grantor, owner, ADMIN OPTION, or CREATEROLE authority is a
@@ -128,8 +132,9 @@ role then apply to later steps.
   `createrole` attribute for the executor role, and stays unknown when the role is absent.
 - In `memberships`, an explicit `allowed` or `denied` `inherit` or `admin_option` overrides what
   a snapshot edge for the same `(role, member)` records. `unknown`, including an omitted option,
-  never overrides it. Snapshot edges never prove SET ROLE, so `set_role` comes only from
-  executor facts.
+  never overrides it. From PostgreSQL 16, snapshot edges never prove SET ROLE, so `set_role`
+  comes only from executor facts; before 16, every membership proves it, and an `unknown`
+  `set_role` resolves to `allowed`.
 
 ## Analysis response
 
