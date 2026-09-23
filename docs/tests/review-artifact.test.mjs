@@ -75,6 +75,23 @@ test('rejects unknown fields inside every recorded change, using per-kind key se
   rejects((artifact) => { artifact.recorded.visual.nodes[0].comment = 'db pass: hunter2' }, /unknown field "comment" at \$\.recorded\.visual\.nodes\[0\]$/)
 })
 
+test('validates visual metadata, node, and edge types against the schema', { skip: fixtureSkip }, () => {
+  rejects((artifact) => { artifact.recorded.visual.meta.source = 'inspected' }, /visual metadata is malformed/)
+  rejects((artifact) => { artifact.recorded.visual.meta.role_count = -1 }, /visual metadata is malformed/)
+  rejects((artifact) => { artifact.recorded.visual.meta.collapsed = 'yes' }, /visual metadata is malformed/)
+  rejects((artifact) => { artifact.recorded.visual.meta.managed_scope = { roles: 'app', schemas: [] } }, /visual metadata is malformed/)
+  rejects((artifact) => { artifact.recorded.visual.schema_version = 1 }, /visual graph is malformed/)
+  rejects((artifact) => { artifact.recorded.visual.nodes[0].kind = 'bogus' }, /visual graph entries are malformed/)
+  rejects((artifact) => { artifact.recorded.visual.nodes[0].login = 'yes' }, /visual graph entries are malformed/)
+  rejects((artifact) => { artifact.recorded.visual.nodes[0].managed = 1 }, /visual graph entries are malformed/)
+  rejects((artifact) => { artifact.recorded.visual.nodes[0].privileges = { SELECT: true } }, /visual graph entries are malformed/)
+  rejects((artifact) => { artifact.recorded.visual.edges[0].kind = 'ownership' }, /visual graph entries are malformed/)
+  rejects((artifact) => { artifact.recorded.visual.edges[0].label = 7 }, /visual graph entries are malformed/)
+  const artifact = copy()
+  artifact.recorded.visual.nodes[0].privileges = ['SELECT']
+  assert.equal(reviewArtifactImport(artifact), artifact)
+})
+
 test('rejects credential-like field names anywhere in the artifact', { skip: fixtureSkip }, () => {
   const placements = [
     (artifact, key) => { artifact[key] = 'x' },
@@ -292,6 +309,9 @@ test('importer enum lists match the generated review artifact schema', { skip: s
     modes: () => enumValues(at(['context', 'mode']), 'context.mode'),
     privileges: () => enumValues(at([...grant, 'privileges', '[]']), 'grant.privileges'),
     objectTypes: () => enumValues(at([...grant, 'object_type']), 'grant.object_type'),
+    nodeKinds: () => enumValues(at(['recorded', 'visual', 'nodes', '[]', 'kind']), 'visual.nodes.kind'),
+    edgeKinds: () => enumValues(at(['recorded', 'visual', 'edges', '[]', 'kind']), 'visual.edges.kind'),
+    visualSources: () => enumValues(at(['recorded', 'visual', 'meta', 'source']), 'visual.meta.source'),
   }
   assert.deepEqual(sorted(Object.keys(expectations)), sorted(Object.keys(REVIEW_ARTIFACT_ENUMS)))
   for (const [name, derive] of Object.entries(expectations)) {

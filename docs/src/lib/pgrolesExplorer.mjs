@@ -214,6 +214,10 @@ const FINDING_SEVERITIES = ['info', 'warning', 'error']
 const OBJECT_TYPES = ['table', 'view', 'materialized_view', 'sequence', 'function', 'schema', 'database', 'type']
 const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'EXECUTE', 'USAGE', 'CREATE', 'CONNECT', 'TEMPORARY']
 const ROLE_FLAGS = ['login', 'superuser', 'createdb', 'createrole', 'inherit', 'replication', 'bypassrls']
+const NODE_KINDS = ['role', 'external_principal', 'grant_target', 'default_privilege_target']
+const EDGE_KINDS = ['membership', 'grant', 'default_privilege']
+const VISUAL_SOURCES = ['desired', 'current']
+const VISUAL_COUNTS = ['role_count', 'grant_count', 'default_privilege_count', 'membership_count']
 
 // Closed key sets. `fields` maps each permitted key to the shape of its value
 // (null for scalars and scalar lists); `tag` shapes are internally tagged enums.
@@ -305,6 +309,9 @@ export const REVIEW_ARTIFACT_ENUMS = Object.freeze({
   findingSeverities: FINDING_SEVERITIES,
   objectTypes: OBJECT_TYPES,
   privileges: PRIVILEGES,
+  nodeKinds: NODE_KINDS,
+  edgeKinds: EDGE_KINDS,
+  visualSources: VISUAL_SOURCES,
 })
 
 const FORBIDDEN_FIELD_NAMES = new Set(['password', 'database_url', 'url'])
@@ -565,10 +572,20 @@ export function reviewArtifactImport(value) {
   if (!value.recorded.findings.every((finding) => isObject(finding) && isString(finding.kind) && isOneOf(finding.severity, FINDING_SEVERITIES) && isString(finding.message) && (finding.phase == null || isOneOf(finding.phase, PHASES)) && (finding.change_index == null || changeIndices.has(finding.change_index)) && isFindingChanges(finding) && isOptionalString(finding.role))) {
     throw new Error('review artifact findings are malformed')
   }
-  if (!isObject(value.recorded.visual) || !Array.isArray(value.recorded.visual.nodes) || !Array.isArray(value.recorded.visual.edges)) {
+  // The closed-key pass admits only schema keys; the viewer also relies on
+  // the kinds, flags, and counts having the schema's types.
+  const visual = value.recorded.visual
+  if (!isObject(visual) || !isString(visual.schema_version) || !isObject(visual.meta) || !Array.isArray(visual.nodes) || !Array.isArray(visual.edges)) {
     throw new Error('review artifact visual graph is malformed')
   }
-  if (!value.recorded.visual.nodes.every((node) => isObject(node) && isString(node.id) && isString(node.kind) && isString(node.label)) || !value.recorded.visual.edges.every((edge) => isObject(edge) && isString(edge.source) && isString(edge.target) && isString(edge.kind) && isString(edge.label))) {
+  const isCount = (candidate) => Number.isSafeInteger(candidate) && candidate >= 0
+  const isOptionalBoolean = (candidate) => candidate == null || isBoolean(candidate)
+  if (!isOneOf(visual.meta.source, VISUAL_SOURCES) || !VISUAL_COUNTS.every((field) => isCount(visual.meta[field])) || !isBoolean(visual.meta.collapsed) || (visual.meta.managed_scope != null && !isManagedScope(visual.meta.managed_scope))) {
+    throw new Error('review artifact visual metadata is malformed')
+  }
+  const isVisualNode = (node) => isObject(node) && isString(node.id) && isOneOf(node.kind, NODE_KINDS) && isString(node.label) && isOptionalBoolean(node.managed) && isOptionalBoolean(node.login) && (node.privileges == null || isStringList(node.privileges))
+  const isVisualEdge = (edge) => isObject(edge) && isString(edge.source) && isString(edge.target) && isOneOf(edge.kind, EDGE_KINDS) && isString(edge.label)
+  if (!visual.nodes.every(isVisualNode) || !visual.edges.every(isVisualEdge)) {
     throw new Error('review artifact visual graph entries are malformed')
   }
   if (!hashPattern.test(value.recorded.review_fingerprint)) {

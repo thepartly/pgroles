@@ -261,7 +261,11 @@ export function PgrolesExplorer() {
 
   const snapshotRoles = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot.roles) && snapshot.roles && typeof snapshot.roles === 'object' ? snapshot.roles : null
   const executorInSnapshot = snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, executorRole)
-  const effectiveExecutorSuperuser = executorInSnapshot ? snapshotRoles[executorRole]?.superuser === true : executorSuperuser
+  const snapshotExecutorSuperuser = executorInSnapshot && snapshotRoles[executorRole]?.superuser === true
+  // Mirrors the analyzer: a snapshot SUPERUSER cannot be asserted away, while an
+  // explicit superuser fact wins over a snapshot entry without the flag.
+  const effectiveExecutorSuperuser = snapshotExecutorSuperuser || executorSuperuser
+  const executorSuperuserOverridesSnapshot = executorInSnapshot && !snapshotExecutorSuperuser && executorSuperuser
   const findingsBySeverity = useMemo(() => result?.findings ?? [], [result])
   const errorCount = useMemo(() => findingsBySeverity.filter((finding) => finding.severity === 'error').length, [findingsBySeverity])
   const activeScenario = getExplorerScenario(activeScenarioId) ?? initial
@@ -273,6 +277,15 @@ export function PgrolesExplorer() {
     setResult(null)
     setSelectedNode(null)
     setLoading(false)
+  }
+
+  // A superuser assertion made for another role does not carry over to a role
+  // the snapshot describes; the box can be ticked again to override the snapshot.
+  function editExecutorRole(role) {
+    setExecutorRole(role)
+    if (snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, role)) setExecutorSuperuser(false)
+    setActiveCaseId('custom')
+    clearAnalysis()
   }
 
   function applyExecutor(executor = {}) {
@@ -484,8 +497,8 @@ export function PgrolesExplorer() {
                 {activeCaseId && activeCaseId !== 'custom' && <p className="mt-2 text-xs leading-5 text-muted-foreground">{activeScenario.cases.find((scenarioCase) => scenarioCase.id === activeCaseId)?.description}</p>}
               </div>
             )}
-            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={executorInSnapshot} onChange={(event) => { setExecutorSuperuser(event.target.checked); setActiveCaseId('custom'); clearAnalysis() }} /> Executor is a superuser {executorInSnapshot && <span className="text-xs text-muted-foreground">From snapshot</span>}</label>
+            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => editExecutorRole(event.target.value)} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={snapshotExecutorSuperuser} onChange={(event) => { setExecutorSuperuser(event.target.checked); setActiveCaseId('custom'); clearAnalysis() }} /> Executor is a superuser {snapshotExecutorSuperuser && <span className="text-xs text-muted-foreground">From snapshot</span>}{executorSuperuserOverridesSnapshot && <span className="text-xs text-muted-foreground">Overrides snapshot</span>}</label>
             <label className="block text-sm font-medium">Executor CREATEROLE<select aria-label="Executor CREATEROLE" value={executorCreaterole} onChange={(event) => { setExecutorCreaterole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="unknown">Unknown (use the snapshot role)</option><option value="allowed">Allowed</option><option value="denied">Denied</option></select><span className="mt-1 block text-xs font-normal text-muted-foreground">Consulted for membership grants on PostgreSQL 15 and earlier.</span></label>
             <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
             <label className="block text-sm font-medium">PostgreSQL version<select aria-label="PostgreSQL major version" value={pgMajorVersion} onChange={(event) => { setPgMajorVersion(Number(event.target.value)); setPgVersionFromSnapshot(false); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm">{pgVersionChoices.map((version) => <option key={version} value={version}>PostgreSQL {version}{version === DEFAULT_PG_MAJOR_VERSION ? ' (default)' : ''}</option>)}</select>{pgVersionFromSnapshot && <span className="mt-1 block text-xs font-normal text-muted-foreground">From snapshot</span>}</label>

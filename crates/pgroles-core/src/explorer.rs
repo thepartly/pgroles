@@ -491,7 +491,8 @@ fn simulate(
     recompute: Recompute,
 ) -> (PlanAnalysis, usize) {
     let complete = options.authority_graph_complete;
-    let (mut set_role, mut usage, mut admin_options) = initial_edge_facts(&graph, executor);
+    let (mut set_role, mut usage, mut admin_options) =
+        initial_edge_facts(&graph, executor, options.pg_major_version);
     let mut attributes = ExecutorAttributes::initial(&graph, executor);
     let mut computations = 2;
     let mut current_reachability = reachability(
@@ -539,6 +540,7 @@ fn simulate(
                 &mut usage,
                 &mut admin_options,
                 executor,
+                options.pg_major_version,
                 change,
             );
             attributes.apply(change, executor);
@@ -610,6 +612,18 @@ fn capability(value: bool) -> SetRoleCapability {
     }
 }
 
+/// The SET ROLE fact of a membership edge that carries no per-edge option.
+/// Before PostgreSQL 16 there is no membership `SET` option, so membership
+/// itself proves SET ROLE authority; from 16 on, an edge without the option
+/// fact is a possible path but never a proven one.
+fn membership_set_role_default(pg_major_version: u16) -> SetRoleCapability {
+    if pg_major_version >= 16 {
+        SetRoleCapability::Unknown
+    } else {
+        SetRoleCapability::Allowed
+    }
+}
+
 /// Record `value` for `key` unless it is `Unknown` and something is already
 /// known: an explicit fact overrides snapshot evidence, but an omitted one
 /// never erases it.
@@ -626,15 +640,16 @@ fn merge_fact(facts: &mut EdgeFacts, key: (String, String), value: SetRoleCapabi
 fn initial_edge_facts(
     graph: &RoleGraph,
     executor: &ExecutorFacts,
+    pg_major_version: u16,
 ) -> (EdgeFacts, EdgeFacts, EdgeFacts) {
     let mut set_role = EdgeFacts::new();
     let mut usage = EdgeFacts::new();
     let mut admin_options = EdgeFacts::new();
+    let default_set_role = membership_set_role_default(pg_major_version);
     for edge in &graph.memberships {
         let key = (edge.role.clone(), edge.member.clone());
-        // Memberships imported without PG16 option facts are possible SET
-        // paths, but never proven ones.
-        set_role.insert(key.clone(), SetRoleCapability::Unknown);
+        // Snapshot memberships carry no PG16 SET option fact.
+        set_role.insert(key.clone(), default_set_role);
         // Duplicate edges for one pair aggregate like inspection does: an
         // option applies if any edge carries it.
         let inherit = usage
@@ -652,7 +667,14 @@ fn initial_edge_facts(
     }
     for fact in &executor.memberships {
         let key = (fact.role.clone(), fact.member.clone());
-        merge_fact(&mut set_role, key.clone(), fact.set_role);
+        // A fact asserts that the membership exists, so a SET option left
+        // unknown resolves to what a membership proves on this version.
+        let set_role_fact = if fact.set_role == SetRoleCapability::Unknown {
+            default_set_role
+        } else {
+            fact.set_role
+        };
+        merge_fact(&mut set_role, key.clone(), set_role_fact);
         merge_fact(&mut usage, key.clone(), fact.inherit);
         merge_fact(&mut admin_options, key, fact.admin_option);
     }
@@ -1427,6 +1449,7 @@ fn apply_change(
     usage: &mut BTreeMap<(String, String), SetRoleCapability>,
     admin_options: &mut BTreeMap<(String, String), SetRoleCapability>,
     executor: &ExecutorFacts,
+    pg_major_version: u16,
     change: &Change,
 ) {
     match change {
@@ -1613,9 +1636,16 @@ fn apply_change(
                 inherit: *inherit,
                 admin: *admin,
             });
+            // pgroles grants membership without a SET option; before
+            // PostgreSQL 16 that option does not exist and every membership
+            // permits SET ROLE.
             set_role.insert(
                 (role.clone(), member.clone()),
-                executor.new_membership_set_role,
+                if pg_major_version >= 16 {
+                    executor.new_membership_set_role
+                } else {
+                    SetRoleCapability::Allowed
+                },
             );
             usage.insert(
                 (role.clone(), member.clone()),
@@ -1651,7 +1681,7 @@ fn apply_change(
                     .unwrap_or(false)
             });
             if preserve_edge {
-                set_role.insert(key.clone(), SetRoleCapability::Unknown);
+                set_role.insert(key.clone(), membership_set_role_default(pg_major_version));
                 usage.insert(key.clone(), SetRoleCapability::Unknown);
                 admin_options.insert(key, SetRoleCapability::Unknown);
                 return;
@@ -1838,25 +1868,137 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn added_membership_has_unknown_set_role_semantics() {
-        let mut input = request(ReconciliationMode::Authoritative);
-        input.current.roles.insert("deployer".into(), role());
-        input.current.roles.insert("owner".into(), role());
-        input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
-
-        let response = analyze(input).unwrap();
-        let membership_phase = response
-            .phases
+    fn set_role_status(phase: &PhaseAnalysis, role: &str) -> Option<ReachabilityStatus> {
+        phase
+            .executor_reachability
             .iter()
-            .find(|phase| phase.phase == PlanPhase::MembershipAdd)
-            .unwrap();
-        assert!(
-            membership_phase
-                .executor_reachability
+            .find(|entry| entry.role == role)
+            .map(|entry| entry.status)
+    }
+
+    #[test]
+    fn added_membership_proves_set_role_only_before_postgres_16() {
+        for (version, expected) in [
+            (15, ReachabilityStatus::Reachable),
+            (16, ReachabilityStatus::Unknown),
+        ] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            input.current.roles.insert("deployer".into(), role());
+            input.current.roles.insert("owner".into(), role());
+            input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
+
+            let response = analyze(input).unwrap();
+            let membership_phase = response
+                .phases
                 .iter()
-                .any(|role| { role.role == "owner" && role.status == ReachabilityStatus::Unknown })
+                .find(|phase| phase.phase == PlanPhase::MembershipAdd)
+                .unwrap();
+            assert_eq!(
+                set_role_status(membership_phase, "owner"),
+                Some(expected),
+                "PG{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_memberships_prove_set_role_only_before_postgres_16() {
+        for (version, expected, grantor_finding) in [
+            (15, ReachabilityStatus::Reachable, None),
+            (
+                16,
+                ReachabilityStatus::Unknown,
+                Some(FindingKind::RequiredRoleReachabilityUnknown),
+            ),
+        ] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            for name in ["deployer", "owner", "auditor", "reader"] {
+                input.current.roles.insert(name.into(), role());
+            }
+            // A snapshot membership without SET facts, and an executor fact
+            // whose SET option is unknown for an edge the snapshot lacks.
+            input.current.memberships.push(SnapshotMembership {
+                role: "owner".into(),
+                member: "deployer".into(),
+                inherit: true,
+                admin: false,
+                grantors: BTreeSet::new(),
+            });
+            input.executor.memberships.push(ExecutorMembershipFact {
+                role: "auditor".into(),
+                member: "deployer".into(),
+                set_role: SetRoleCapability::Unknown,
+                inherit: SetRoleCapability::Unknown,
+                admin_option: SetRoleCapability::Unknown,
+            });
+            // Revoking a grant made by `owner` needs SET ROLE to `owner`.
+            input.current.grants.push(SnapshotGrant {
+                role: "reader".into(),
+                object_type: ObjectType::Table,
+                schema: Some("app".into()),
+                name: Some("orders".into()),
+                privileges: BTreeSet::from([Privilege::Select]),
+                grantors: BTreeMap::from([("owner".into(), BTreeSet::from([Privilege::Select]))]),
+            });
+            input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\n  - name: auditor\n  - name: reader\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
+
+            let response = analyze(input).unwrap();
+            let revoke_phase = response
+                .phases
+                .iter()
+                .find(|phase| phase.phase == PlanPhase::Revoke)
+                .unwrap();
+            for role in ["owner", "auditor"] {
+                assert_eq!(
+                    set_role_status(revoke_phase, role),
+                    Some(expected),
+                    "PG{version} {role}"
+                );
+            }
+            let owner_finding = response
+                .findings
+                .iter()
+                .find(|finding| finding.role.as_deref() == Some("owner"))
+                .map(|finding| finding.kind);
+            assert_eq!(owner_finding, grantor_finding, "PG{version}");
+        }
+    }
+
+    #[test]
+    fn preserved_legacy_membership_edge_still_proves_set_role() {
+        let key = ("owner".to_string(), "deployer".to_string());
+        let mut graph = RoleGraph::default();
+        graph.memberships.insert(MembershipEdge {
+            role: key.0.clone(),
+            member: key.1.clone(),
+            inherit: true,
+            admin: false,
+        });
+        graph
+            .membership_edge_grantors
+            .insert(key.clone(), BTreeSet::from(["a".into(), "b".into()]));
+        let mut set = BTreeMap::from([(key.clone(), SetRoleCapability::Allowed)]);
+        let mut usage = set.clone();
+        let mut admin = BTreeMap::new();
+        let executor = request(ReconciliationMode::Authoritative).executor;
+
+        apply_change(
+            &mut graph,
+            &mut set,
+            &mut usage,
+            &mut admin,
+            &executor,
+            15,
+            &Change::RemoveMember {
+                role: key.0.clone(),
+                member: key.1.clone(),
+                grantor: Some("a".into()),
+            },
         );
+        assert_eq!(set[&key], SetRoleCapability::Allowed);
+        assert_eq!(usage[&key], SetRoleCapability::Unknown);
     }
 
     #[test]
@@ -2198,6 +2340,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &remove("a"),
         );
         assert_eq!(graph.memberships.len(), 1);
@@ -2212,6 +2355,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &remove("b"),
         );
         assert!(graph.memberships.is_empty());
@@ -2259,6 +2403,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &revoke("a"),
         );
         assert_eq!(
@@ -2271,6 +2416,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &revoke("b"),
         );
         assert!(!graph.grants.contains_key(&key));
@@ -2297,6 +2443,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::ReassignOwned {
                 from_role: "old_owner".into(),
                 to_role: "new_owner".into(),
@@ -2309,6 +2456,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::DropOwned {
                 role: "old_owner".into(),
             },
@@ -2320,6 +2468,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::DropOwned {
                 role: "new_owner".into(),
             },

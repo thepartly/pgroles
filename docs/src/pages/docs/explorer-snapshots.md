@@ -35,7 +35,12 @@ envelope:
 The explorer uses `pg_major_version`, `authority_graph_complete`, and the
 `executor` facts from an envelope, and shows **From snapshot** beside the
 PostgreSQL version when the envelope sets it. A bare snapshot keeps the version
-selected in the explorer and is treated as a complete authority graph.
+selected in the explorer and is treated as a complete authority graph. An
+envelope's `executor.superuser: true` is kept even when `current.roles` lists
+the executor without the flag, and the explorer shows **Overrides snapshot**
+beside the control; a snapshot `superuser: true` cannot be unset. Typing a role
+the snapshot describes starts from that role's flag; tick the box to assert
+otherwise.
 
 ## No exporter yet
 
@@ -75,8 +80,9 @@ when omitted. The explorer offers 15 to 18; the analyzer accepts 12 to 20 and
 rejects anything else. The results header shows the version the analyzer
 used.
 
-The version changes only the authority needed to grant or revoke role
-membership (adding a member, or removing one without `GRANTED BY`):
+The version changes the authority needed to grant or revoke role membership
+(adding a member, or removing one without `GRANTED BY`), and what a membership
+proves about `SET ROLE`:
 
 - **Before PostgreSQL 16**, an executor with `CREATEROLE` may grant and
   revoke membership in any non-superuser role without `ADMIN OPTION`. When
@@ -87,9 +93,13 @@ membership (adding a member, or removing one without `GRANTED BY`):
   alone is not enough.
 - **In every version**, only a superuser executor can grant or revoke
   membership in a superuser role (`superuser_required`).
+- **Before PostgreSQL 16**, there is no per-membership `SET` option, so every
+  membership in the snapshot, in executor facts, or added by the plan proves
+  `SET ROLE` to the granted role. **From PostgreSQL 16**, a membership without
+  a `set_role` executor fact is a possible path but not a proven one.
 
-It does not change how `SET` and `INHERIT` options are modelled, grantor
-attribution, or which changes are planned.
+It does not change how the `INHERIT` option is modelled, grantor attribution,
+or which changes are planned.
 
 `executor.createrole` (`allowed`, `denied`, or `unknown`, the default) is
 consulted only below PostgreSQL 16. `allowed` or `denied` overrides the

@@ -17,6 +17,15 @@ import {
   wasmModuleUrl,
 } from '../src/lib/pgrolesExplorer.mjs'
 
+// The smallest visual graph the importer accepts: the schema requires the
+// version and counts even when nothing was recorded.
+const emptyVisual = () => ({
+  schema_version: 'pgroles.visual_graph.v1',
+  meta: { source: 'desired', role_count: 0, grant_count: 0, default_privilege_count: 0, membership_count: 0, collapsed: true },
+  nodes: [],
+  edges: [],
+})
+
 test('initializes the web module once and exposes analyze', async () => {
   resetAnalyzerForTests()
   let imports = 0
@@ -101,7 +110,7 @@ test('accepts only structurally valid recorded review artifacts', () => {
     provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
     preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: [], phases: [], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: [], phases: [], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
   assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [] } }] }))
@@ -126,7 +135,7 @@ test('rejects falsy nested review fields, malformed change variants, and incompl
     recorded: {
       changes: [{ index: 0, priority: 'Review', change: { kind: 'drop_role', name: 'obsolete' } }],
       phases: [{ phase: 'retire', change_indices: [0], executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }],
-      findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}`,
+      findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}`,
     },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
@@ -156,7 +165,7 @@ test('accepts every sanitized ReviewChange variant', () => {
   const artifact = {
     schema_version: 'pgroles.review-artifact.v2', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: changes.map((change, index) => ({ index, priority: 'Review', change })), phases: [{ phase: 'create', change_indices: changes.map((_, index) => index), executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: changes.map((change, index) => ({ index, priority: 'Review', change })), phases: [{ phase: 'create', change_indices: changes.map((_, index) => index), executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
 })
@@ -165,7 +174,7 @@ test('rejects authority overclaims, contradictory coverage, and invented source 
   const artifact = {
     schema_version: 'pgroles.review-artifact.v2', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: [{ index: 0, priority: 'Review', source: { document: 'roles.yaml', managed_key: { kind: 'role', name: 'app' } }, change: { kind: 'drop_role', name: 'app' } }], phases: [{ phase: 'retire', change_indices: [0], executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: [{ index: 0, priority: 'Review', source: { document: 'roles.yaml', managed_key: { kind: 'role', name: 'app' } }, change: { kind: 'drop_role', name: 'app' } }], phases: [{ phase: 'retire', change_indices: [0], executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
     preflight: [{ check: 'executor_authority', status: 'unknown', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [0] } }],
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
