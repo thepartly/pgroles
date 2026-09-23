@@ -21,15 +21,24 @@ export function PolicyAuthoring({ desiredYaml, basePath }) {
     setPending(operation)
     setResponse(null)
     setError('')
+    let engine
     try {
-      const engine = await loadPolicyEngine(basePath)
-      if (requestNumber.current !== request) return
+      engine = await loadPolicyEngine(basePath)
+    } catch (failure) {
+      if (requestNumber.current === request) {
+        setError(`Could not load policy tools: ${readableWasmError(failure)}`)
+        setPending('')
+      }
+      return
+    }
+    if (requestNumber.current !== request) return
+    try {
       const result = engine[operation](policyRequest(desiredYaml))
       setResponse({ result, source: desiredYaml })
     } catch (failure) {
-      if (requestNumber.current === request) setError(readableWasmError(failure))
+      setError(`Policy ${operation === 'compile' ? 'expansion' : 'validation'} failed: ${readableWasmError(failure)}`)
     } finally {
-      if (requestNumber.current === request) setPending('')
+      setPending('')
     }
   }
 
@@ -41,7 +50,7 @@ export function PolicyAuthoring({ desiredYaml, basePath }) {
         <button type="button" onClick={() => run('compile')} disabled={Boolean(pending)} className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-stone-50 disabled:opacity-50 dark:hover:bg-stone-800">{pending === 'compile' ? 'Compiling…' : 'Inspect expansion'}</button>
       </div>
       <p className="text-xs leading-5 text-muted-foreground">Validate and expand without a snapshot or executor. Password-source declarations are checked without reading environment variables or generating passwords; plan analysis excludes them.</p>
-      {error && <p role="alert" className="break-words text-sm text-red-700 dark:text-red-300">Could not load policy tools: {error}</p>}
+      {error && <p role="alert" className="break-words text-sm text-red-700 dark:text-red-300">{error}</p>}
       {result && <div aria-live="polite" className="min-w-0 space-y-3">
         <h3 className="font-semibold">{result.policy ? 'Compiled policy' : 'Policy validation'}</h3>
         {result.diagnostics.length === 0

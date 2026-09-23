@@ -60,16 +60,26 @@ assert!(sql.contains("CREATE ROLE"));
 ```
 
 `authoring::prepare_policy` shares parsing, expansion, and graph construction
-between the CLI and browser tools. `authoring::validate_policy` and
-`authoring::compile_policy` accept a versioned `PolicyRequest` containing only
-YAML and return diagnostics for invalid input. Compilation exposes expanded
-policy data and a normalized desired graph through serializable DTOs. Neither
-operation resolves password-source declarations or checks live database authority.
+between the CLI and browser tools. It applies manifest entry bounds but no byte
+limit. `authoring::validate_policy` and `authoring::compile_policy` are the
+browser entry points: they accept a versioned `PolicyRequest` containing only
+YAML, reject YAML over `authoring::MAX_POLICY_YAML_BYTES` (1 MiB), and return
+diagnostics for invalid input. Compilation exposes expanded policy data and a
+normalized desired graph through serializable DTOs. Neither operation resolves
+password-source declarations or checks live database authority.
 
-Manifest metadata and authoring TypeScript contracts are generated from Rust
-schemas by `scripts/generate-manifest-metadata.sh`; CI checks them with
-`scripts/check-manifest-metadata.sh`. The docs use this metadata for static field
-highlighting and load WASM only for interactive authoring or plan analysis.
+`review_artifact::build_review_artifact` turns an already-produced plan into a
+sanitized recorded review (`pgroles.review-artifact.v2`), and
+`review_artifact::parse_review_artifact` reads one back, checking its size,
+schema version, index partition, reachability deltas, and fingerprint.
+
+Manifest metadata, the review artifact JSON Schema, and authoring TypeScript
+contracts are generated from Rust schemas by
+`scripts/generate-manifest-metadata.sh` (see the `manifest_metadata` and
+`review_artifact_schema` examples); CI checks them with
+`scripts/check-manifest-metadata.sh`. The docs use this metadata for static
+field highlighting and load WASM only for interactive authoring or plan
+analysis.
 
 ## Related Crates
 

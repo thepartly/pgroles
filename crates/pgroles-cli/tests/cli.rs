@@ -934,6 +934,40 @@ fn diff_rejects_invalid_mode() {
 }
 
 #[test]
+fn diff_rejects_connection_url_target_label_before_connecting() {
+    let manifest_file = write_temp_manifest(VALID_MINIMAL);
+    let review = tempfile::tempdir().expect("temporary directory");
+    let review_path = review.path().join("review.pgroles.json");
+
+    // An unroutable URL proves validation happens before any connection.
+    let output = pgroles_cmd()
+        .env_remove("DATABASE_URL")
+        .args([
+            "diff",
+            "--file",
+            manifest_file.path().to_str().unwrap(),
+            "--database-url",
+            "postgres://pgroles.invalid:1/test",
+            "--format",
+            "markdown",
+            "--review-out",
+            review_path.to_str().unwrap(),
+            "--target-label",
+            "postgres://admin:hunter2@db/app",
+        ])
+        .assert()
+        // A normal error exit, never the drift code a CI gate may accept.
+        .code(1)
+        .stderr(predicate::str::contains("not a connection URL"))
+        .stderr(predicate::str::contains("hunter2").not())
+        .stderr(predicate::str::contains("failed to connect").not())
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    assert!(!review_path.exists());
+}
+
+#[test]
 fn apply_accepts_mode_additive() {
     let manifest_file = write_temp_manifest(VALID_MINIMAL);
 
@@ -3001,7 +3035,7 @@ roles:
             .clone();
 
         let rendered = std::fs::read_to_string(artifact.path()).expect("read review artifact");
-        assert!(rendered.contains("pgroles.review-artifact.v1"));
+        assert!(rendered.contains("pgroles.review-artifact.v2"));
         assert!(rendered.contains("recorded_only_export"));
         assert!(rendered.contains("test-pg16"));
         assert!(rendered.contains("intended_executor"));
@@ -3046,6 +3080,20 @@ roles:
         ] {
             assert!(!stdout.contains(canary), "Markdown leaked {canary}");
         }
+        let fingerprint = artifact_json["recorded"]["review_fingerprint"]
+            .as_str()
+            .expect("review fingerprint");
+        assert!(
+            stdout.contains(&format!("`{fingerprint}`")),
+            "Markdown footer names the artifact fingerprint:\n{stdout}"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr");
+        assert!(
+            stderr.contains(&format!("(review fingerprint {fingerprint})")),
+            "stderr names the artifact fingerprint:\n{stderr}"
+        );
+        pgroles_core::review_artifact::parse_review_artifact(rendered.as_bytes())
+            .expect("CLI output satisfies the Rust artifact contract");
         assert!(
             !query_role_exists(&role),
             "diff must not create the planned role"
@@ -3054,8 +3102,64 @@ roles:
 
     #[test]
     #[ignore]
+    fn diff_review_out_fits_many_login_roles_with_passwords() {
+        // Each role plans CreateRole then SetPassword, alternating phases.
+        // Version 1 artifacts repeated every role per phase and exceeded the
+        // 4 MiB import limit at 150 roles.
+        let prefix = unique_name("review_bulk");
+        let roles = (0..150)
+            .map(|index| format!("{prefix}_{index:03}"))
+            .collect::<Vec<_>>();
+        let manifest = write_temp_manifest(&format!(
+            "roles:\n{}",
+            roles
+                .iter()
+                .map(|role| format!(
+                    "  - name: {role}\n    login: true\n    password:\n      from_env: REVIEW_BULK_UNSET_PASSWORD\n"
+                ))
+                .collect::<String>()
+        ));
+        let artifact = NamedTempFile::new().expect("failed to create review artifact");
+        let output = pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--format",
+                "markdown",
+                "--review-out",
+                artifact.path().to_str().unwrap(),
+                "--no-exit-code",
+            ])
+            .env_remove("REVIEW_BULK_UNSET_PASSWORD")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let rendered = std::fs::read(artifact.path()).expect("read review artifact");
+        assert!(
+            rendered.len() < pgroles_core::review_artifact::MAX_REVIEW_ARTIFACT_BYTES / 4,
+            "artifact has {} bytes",
+            rendered.len()
+        );
+        let parsed = pgroles_core::review_artifact::parse_review_artifact(&rendered)
+            .expect("valid review artifact");
+        assert_eq!(parsed.recorded.changes.len(), 300);
+        let stdout = String::from_utf8(output.stdout).expect("markdown stdout");
+        assert!(stdout.contains(&parsed.recorded.review_fingerprint));
+        for role in &roles {
+            assert!(!query_role_exists(role), "diff must not create {role}");
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn diff_bundle_review_out_matches_json_change_sources() {
         let role = unique_name("review_bundle_role");
+        // Sorts before `role`, so the bundle scope order below is stable.
+        let external = unique_name("review_bundle_external");
         let _cleanup = TestDbCleanup::new(format!(r#"DROP ROLE IF EXISTS "{role}";"#));
         execute_sql(&format!(r#"DROP ROLE IF EXISTS "{role}";"#));
         let (bundle_dir, bundle_path) = write_temp_bundle(
@@ -3070,9 +3174,11 @@ sources:
 policy:
   name: app
 scope:
-  roles: [{role}]
+  roles: [{role}, {external}]
 roles:
   - name: {role}
+  - name: {external}
+    external: true
 "#,
                 ),
             )],
@@ -3115,6 +3221,16 @@ roles:
             bundle_changes[0]["change"]["CreateRole"]["name"]
         );
         assert_eq!(recorded_changes[0]["source"]["document"], "app");
+        // The bundle's ownership scope claims the external role; the artifact
+        // records only lifecycle-managed roles, as for a single manifest.
+        assert_eq!(
+            bundle_json["managed_scope"]["roles"],
+            serde_json::json!([external, role])
+        );
+        assert_eq!(
+            artifact_json["context"]["managed_scope"]["roles"],
+            serde_json::json!([role])
+        );
         assert!(
             !query_role_exists(&role),
             "diff must not create the planned role"
@@ -3243,6 +3359,11 @@ default_privileges:
             serde_json::from_slice(&std::fs::read(artifact.path()).expect("read review artifact"))
                 .expect("review artifact JSON");
         assert_eq!(value["context"]["authority_graph_complete"], false);
+        assert_eq!(
+            value["context"]["managed_scope"]["roles"],
+            serde_json::json!([]),
+            "external roles are referenced, not managed"
+        );
         assert!(
             value["recorded"]["changes"]
                 .as_array()
@@ -3323,20 +3444,34 @@ roles:
             .expect("temporary directory")
             .path()
             .join("missing/review.json");
-        pgroles_cmd()
-            .args([
-                "diff",
-                "--file",
-                manifest.path().to_str().unwrap(),
-                "--database-url",
-                &database_url(),
-                "--review-out",
-                missing.to_str().unwrap(),
-                "--no-exit-code",
-            ])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("failed to write review artifact"));
+        for (format, expected_stdout) in [("sql", "CREATE ROLE"), ("markdown", "## pgroles review")]
+        {
+            let output = pgroles_cmd()
+                .args([
+                    "diff",
+                    "--file",
+                    manifest.path().to_str().unwrap(),
+                    "--database-url",
+                    &database_url(),
+                    "--format",
+                    format,
+                    "--review-out",
+                    missing.to_str().unwrap(),
+                    "--no-exit-code",
+                ])
+                .assert()
+                .code(1)
+                .stderr(predicate::str::contains("failed to write review artifact"))
+                .get_output()
+                .clone();
+            // The report is not lost when only the export fails.
+            let stdout = String::from_utf8(output.stdout).expect("stdout");
+            assert!(
+                stdout.contains(expected_stdout),
+                "{format} stdout:\n{stdout}"
+            );
+            assert!(!stdout.contains("Recorded review artifact fingerprint"));
+        }
     }
 
     #[test]

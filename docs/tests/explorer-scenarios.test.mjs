@@ -55,4 +55,38 @@ test('semantic assertions reject incorrect effects and phase authority', () => {
   assert.throws(() => assertScenarioAnalysis(response, {
     phaseReachability: [{ phase: 'membership_remove', role: 'analyst', authority: 'usage', status: 'unreachable' }],
   }, 'example'))
+  assert.throws(() => assertScenarioAnalysis({ ...response, pg_major_version: 16 }, { response: { pg_major_version: 15 } }, 'example'))
+})
+
+test('phase assertions require an occurrence when a phase label repeats', () => {
+  const boundary = (status) => ({ executor_reachability: [], executor_usage: [{ role: 'app', status }] })
+  const response = {
+    changes: [],
+    findings: [],
+    phases: [
+      { phase: 'create', ...boundary('unknown') },
+      { phase: 'alter', ...boundary('unknown') },
+      { phase: 'create', ...boundary('reachable') },
+    ],
+  }
+  const assertion = { phase: 'create', role: 'app', authority: 'usage' }
+  assert.throws(() => assertScenarioAnalysis(response, { phaseReachability: [{ ...assertion, status: 'reachable' }] }, 'example'), /occurs 2 times/)
+  assert.doesNotThrow(() => assertScenarioAnalysis(response, { phaseReachability: [{ ...assertion, occurrence: 0, status: 'unknown' }] }, 'example'))
+  assert.doesNotThrow(() => assertScenarioAnalysis(response, { phaseReachability: [{ ...assertion, occurrence: 1, status: 'reachable' }] }, 'example'))
+  assert.throws(() => assertScenarioAnalysis(response, { phaseReachability: [{ ...assertion, occurrence: 2, status: 'reachable' }] }, 'example'), /no occurrence 2/)
+})
+
+test('scenario requests use supported optional analysis fields', () => {
+  for (const scenario of explorerScenarios) {
+    for (const { id, request } of scenarioCases(scenario)) {
+      if (request.pg_major_version !== undefined) {
+        assert(Number.isInteger(request.pg_major_version) && request.pg_major_version >= 12 && request.pg_major_version <= 20, `${id}: pg_major_version`)
+      }
+      if (request.authority_graph_complete !== undefined) assert.equal(typeof request.authority_graph_complete, 'boolean', `${id}: authority_graph_complete`)
+      if (request.executor.createrole !== undefined) assert(['allowed', 'denied', 'unknown'].includes(request.executor.createrole), `${id}: executor.createrole`)
+    }
+  }
+  const versions = new Set(explorerScenarios.flatMap((scenario) => scenarioCases(scenario).map(({ request }) => request.pg_major_version ?? 16)))
+  assert(versions.has(15) && versions.has(16), 'scenarios cover PostgreSQL 15 and 16 authority rules')
+  assert(explorerScenarios.some((scenario) => scenarioCases(scenario).some(({ request }) => request.authority_graph_complete === false)), 'a scenario covers a partial authority graph')
 })

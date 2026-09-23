@@ -1,0 +1,45 @@
+{
+  "description": "Only a superuser can grant membership in a SUPERUSER role, even with ADMIN OPTION.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "root_like": {
+          "superuser": true
+        },
+        "x": {}
+      },
+      "memberships": [
+        {
+          "role": "root_like",
+          "member": "deployer",
+          "inherit": false,
+          "admin": true
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: root_like\n    superuser: true\n  - name: x\nmemberships:\n  - role: root_like\n    members:\n      - name: deployer\n        inherit: false\n        admin: true\n      - name: x\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer"
+    }
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "AddMember",
+        "role": "root_like",
+        "member": "x"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "superuser_required",
+        "severity": "error",
+        "phase": "membership_add",
+        "role": "root_like"
+      }
+    ]
+  }
+}

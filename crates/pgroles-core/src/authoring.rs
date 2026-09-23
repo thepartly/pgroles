@@ -70,13 +70,14 @@ pub struct PreparedPolicy {
     pub desired: RoleGraph,
 }
 
+/// Parse, expand, and normalize policy YAML.
+///
+/// This applies the manifest entry bounds shared by every caller but no byte
+/// limit: native CLI validation, planning, and apply accept manifests of any
+/// size, as bundles and the operator do. The browser entry points
+/// [`validate_policy`] and [`compile_policy`] enforce
+/// [`MAX_POLICY_YAML_BYTES`] before calling this.
 pub fn prepare_policy(yaml: &str) -> Result<PreparedPolicy, ManifestError> {
-    if yaml.len() > MAX_POLICY_YAML_BYTES {
-        return Err(ManifestError::YamlTooLarge {
-            actual: yaml.len(),
-            limit: MAX_POLICY_YAML_BYTES,
-        });
-    }
     let manifest = parse_manifest(yaml)?;
     let expanded = expand_manifest(&manifest)?;
     let desired = RoleGraph::from_expanded(&expanded, manifest.default_owner.as_deref())?;
@@ -129,6 +130,17 @@ fn validate_request(request: &PolicyRequest) -> Result<PreparedPolicy, PolicyDia
             path: Some("schema_version".to_string()),
             range: None,
         });
+    }
+    // The byte limit bounds browser (WASM) work only; native callers of
+    // `prepare_policy` are unbounded.
+    if request.desired_yaml.len() > MAX_POLICY_YAML_BYTES {
+        return Err(diagnostic_from_manifest_error(
+            &request.desired_yaml,
+            ManifestError::YamlTooLarge {
+                actual: request.desired_yaml.len(),
+                limit: MAX_POLICY_YAML_BYTES,
+            },
+        ));
     }
     prepare_policy(&request.desired_yaml)
         .map_err(|error| diagnostic_from_manifest_error(&request.desired_yaml, error))
@@ -735,9 +747,40 @@ mod tests {
     fn oversized_yaml_is_rejected_before_parsing() {
         let yaml = " ".repeat(MAX_POLICY_YAML_BYTES + 1);
         let response = validate_policy(request(&yaml));
+        assert!(!response.valid);
         assert_eq!(response.diagnostics[0].code, "policy_too_large");
         assert!(response.diagnostics[0].path.is_none());
         assert!(response.diagnostics[0].range.is_none());
+
+        let compiled = compile_policy(request(&yaml));
+        assert!(compiled.policy.is_none());
+        assert_eq!(compiled.diagnostics[0].code, "policy_too_large");
+    }
+
+    /// A valid manifest just over the browser byte limit.
+    fn oversized_valid_manifest() -> String {
+        let padding = "#".repeat(MAX_POLICY_YAML_BYTES);
+        let yaml = format!("{padding}\nroles:\n  - name: app\n    login: true\n");
+        assert!(yaml.len() > MAX_POLICY_YAML_BYTES);
+        yaml
+    }
+
+    #[test]
+    fn browser_entry_points_reject_valid_manifests_over_the_byte_limit() {
+        let yaml = oversized_valid_manifest();
+        let validated = validate_policy(request(&yaml));
+        assert!(!validated.valid);
+        assert_eq!(validated.diagnostics[0].code, "policy_too_large");
+        let compiled = compile_policy(request(&yaml));
+        assert!(compiled.policy.is_none());
+        assert_eq!(compiled.diagnostics[0].code, "policy_too_large");
+    }
+
+    #[test]
+    fn native_preparation_has_no_byte_limit() {
+        let prepared = prepare_policy(&oversized_valid_manifest())
+            .expect("native preparation accepts manifests over the browser limit");
+        assert!(prepared.desired.roles.contains_key("app"));
     }
 
     #[test]

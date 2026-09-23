@@ -1,0 +1,44 @@
+{
+  "description": "Dropping a role is not reported as the executor losing access to it.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "postgres": {
+          "superuser": true
+        },
+        "bob": {
+          "login": true
+        }
+      }
+    },
+    "desired_yaml": "roles:\n  - name: postgres\n    superuser: true\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "postgres",
+      "superuser": true
+    }
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "DropRole",
+        "name": "bob"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "database_preflight_required",
+        "phase": "retire"
+      }
+    ],
+    "absentFindings": [
+      {
+        "kind": "executor_loses_access"
+      },
+      {
+        "kind": "membership_disconnects_role"
+      }
+    ]
+  }
+}

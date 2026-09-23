@@ -1,14 +1,61 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": {
-    "roles": { "deployer": {}, "reader": {} },
-    "memberships": [{ "role": "reader", "member": "deployer", "inherit": true, "admin": false }]
+  "description": "An executor fact that omits inherit does not erase the INHERIT the snapshot proves, so removal is a proven loss.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {}
+      },
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "deployer",
+          "inherit": true,
+          "admin": false
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "superuser": false,
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "deployer",
+          "set_role": "allowed",
+          "admin_option": "unknown"
+        }
+      ]
+    }
   },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
-  "mode": "authoritative",
-  "executor": {
-    "role": "deployer",
-    "superuser": false,
-    "memberships": [{ "role": "reader", "member": "deployer", "set_role": "allowed", "admin_option": "unknown" }]
+  "expected": {
+    "changes": [
+      {
+        "kind": "RemoveMember",
+        "role": "reader",
+        "member": "deployer"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "executor_loses_access",
+        "phase": "membership_remove",
+        "role": "reader"
+      },
+      {
+        "kind": "required_role_unavailable",
+        "severity": "error",
+        "phase": "membership_remove",
+        "role": "reader"
+      }
+    ],
+    "absentFindings": [
+      {
+        "kind": "membership_disconnects_role"
+      }
+    ]
   }
 }

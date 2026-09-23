@@ -1,5 +1,6 @@
 //! Redacted, deterministic review output; never an execution approval token.
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::diff::{Change, ReconciliationMode};
@@ -7,7 +8,7 @@ use crate::ownership::describe_change;
 use crate::report::{BundleReportContext, PlanOutputMode, build_bundle_plan, shape_plan_changes};
 
 /// Conservative review priority based on change kind, not an environment-aware risk assessment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ReviewPriority {
     High,
     Review,
@@ -147,9 +148,36 @@ pub fn render_markdown(
     Ok(output)
 }
 
+/// Markdown footer that ties a report to the recorded review artifact written
+/// by the same planning run.
+///
+/// `fingerprint` is the artifact's `recorded.review_fingerprint`. Reviewers
+/// match a report to its file by comparing the two values; neither is an
+/// approval token.
+pub fn render_review_artifact_footer(fingerprint: &str) -> String {
+    // Code spans do not decode entities, so keep only the digest alphabet
+    // instead of escaping.
+    let fingerprint: String = fingerprint
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == ':')
+        .collect();
+    format!(
+        "\nRecorded review artifact fingerprint ({}): `{fingerprint}`\n\nThe recorded review file written by this run has the same `recorded.review_fingerprint`; the explorer displays it after import. It identifies the recorded content and is not an approval token.\n",
+        crate::review_artifact::REVIEW_ARTIFACT_SCHEMA_VERSION,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_artifact_footer_names_the_fingerprint() {
+        let footer = render_review_artifact_footer("sha256:0123abcd");
+        assert!(footer.contains("pgroles.review-artifact.v2"));
+        assert!(footer.contains("`sha256:0123abcd`"));
+        let hostile = render_review_artifact_footer("sha256:`x`<b>\n| y");
+        assert!(hostile.contains("`sha256:xby`"));
+    }
     #[test]
     fn bundle_uses_real_document_ownership_and_rejects_missing_attribution() {
         let mut ownership = crate::ownership::OwnershipIndex::default();

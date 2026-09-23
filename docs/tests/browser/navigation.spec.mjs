@@ -18,6 +18,19 @@ test('product navigation reaches the operator quick start once and gives a delib
   await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Get started')
 })
 
+test('explorer breadcrumbs name the destination once and reach the snapshot format page', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('docs/explorer/')
+  const breadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
+  await expect(breadcrumb).toHaveText('Explorer / Plan explorer')
+  await expect(breadcrumb.locator('[aria-current="page"]')).toHaveText('Plan explorer')
+  await page.getByRole('navigation', { name: 'Explorer navigation', exact: true }).getByRole('link', { name: 'Snapshot format', exact: true }).click()
+  await expect(page).toHaveURL(/\/docs\/explorer-snapshots\/$/)
+  await expect(breadcrumb).toHaveText('Explorer / Snapshot format')
+  await expect(page.locator('article').getByRole('heading', { name: 'Scrub credentials by hand', level: 2 })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'pgroles-wasm README' })).toHaveAttribute('href', /crates\/pgroles-wasm\/README\.md$/)
+})
+
 test('reference discovery finds exclusive without treating reference order as a course', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('docs/operator-install/')

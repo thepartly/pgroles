@@ -1,5 +1,5 @@
 {
-  "description": "ALTER DEFAULT PRIVILEGES FOR ROLE owner needs the owner privileges through INHERIT.",
+  "description": "With a partial snapshot, a missing owner path is unproven rather than disproved.",
   "request": {
     "schema_version": "pgroles.explorer.v1",
     "current": {
@@ -13,21 +13,21 @@
     "executor": {
       "role": "deployer",
       "superuser": false
-    }
+    },
+    "authority_graph_complete": false
   },
   "expected": {
-    "changes": [
-      {
-        "kind": "SetDefaultPrivilege",
-        "owner": "owner"
-      }
-    ],
     "findings": [
       {
-        "kind": "required_role_unavailable",
-        "severity": "error",
+        "kind": "required_role_reachability_unknown",
+        "severity": "warning",
         "phase": "grant",
         "role": "owner"
+      }
+    ],
+    "absentFindings": [
+      {
+        "kind": "required_role_unavailable"
       }
     ],
     "phaseReachability": [
@@ -35,8 +35,12 @@
         "phase": "grant",
         "role": "owner",
         "authority": "usage",
-        "status": "unreachable"
+        "status": "unknown"
       }
-    ]
+    ],
+    "response": {
+      "authority_graph_complete": false,
+      "pg_major_version": 16
+    }
   }
 }
