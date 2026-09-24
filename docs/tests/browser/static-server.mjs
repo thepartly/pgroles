@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve, relative } from 'node:path'
 
 const root = resolve('out')
-const basePath = process.env.DOCS_TEST_BASE_PATH || '/pgroles/pr-preview/pr-236'
+const basePath = process.env.DOCS_TEST_BASE_PATH ?? '/pgroles/pr-preview/pr-236'
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',

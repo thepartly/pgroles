@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- The documentation site has full-text search across Docs and Learn PostgreSQL, a mobile "On this page" menu, linked breadcrumbs, and a footer naming the source commit and latest release. (#238)
 - The PR-comment CI recipe pins an image version that supports `--review-out`, runs the container as the runner user so it can write into the workspace, removes stale review files, and accepts exit code 2 as drift only when the review file exists. It reads the report as data rather than interpolating it into JavaScript, uploads both files, and bounds comment size. A documentation test runs the recipe against a stubbed container. (#236, #241)
 - Correct the Acme course's reset-sensitive instructions, evidence cards, membership direction and options, `ADMIN` self-grant implications, creator-specific default privileges, and multi-database retirement guidance. Capstone repairs are optional challenges. (#236)
 - The `pgroles-policy` skill documents the recorded-review workflow and links to the published documentation instead of repository paths, which are absent from release archives. (#236, #241)

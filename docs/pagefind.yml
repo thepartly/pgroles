@@ -1,0 +1,7 @@
+site: out
+exclude_selectors:
+  - nav
+  - button
+  - input
+  - select
+  - textarea

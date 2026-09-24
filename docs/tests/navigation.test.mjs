@@ -160,3 +160,16 @@ test('breadcrumbs drop a level that repeats its parent', () => {
   assert.deepEqual(getBreadcrumbs('/docs/explorer').at(-1), { label: 'Plan explorer', current: true })
   assert.ok(getBreadcrumbs('/docs/explorer').slice(0, -1).every((crumb) => !crumb.current))
 })
+
+test('breadcrumbs link the destination and a generated page parent', () => {
+  const links = (pathname) =>
+    getBreadcrumbs(pathname).map(({ label, href }) => (href ? `${label} -> ${href}` : label))
+  assert.deepEqual(links('/docs/explorer'), ['Explorer', 'Plan explorer'])
+  assert.deepEqual(links('/docs/explorer-snapshots'), ['Explorer -> /docs/explorer', 'Snapshot format'])
+  assert.deepEqual(links('/docs/reference/postgrespolicyplan-v1alpha1'), [
+    'Docs -> /',
+    'Reference',
+    'CRD API -> /docs/operator-api-reference',
+    'PostgresPolicyPlan',
+  ])
+})

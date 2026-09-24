@@ -92,9 +92,7 @@ function NavSection({
   const readerChoice = readerChoices[storageKey]
 
   const isExpanded =
-    containsCurrent ||
-    readerChoice === true ||
-    (destination.id === 'learn' && readerChoice !== false)
+    readerChoice ?? (containsCurrent || destination.id === 'learn')
   function setExpanded(expanded) {
     onExpandedChange(storageKey, expanded)
   }

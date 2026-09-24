@@ -184,7 +184,15 @@ function buildPageRegistry(pages) {
     if (registry[page.href]) {
       throw new Error(`Duplicate canonical page route: ${page.href}`)
     }
-    registry[page.href] = Object.freeze(page)
+    registry[page.href] = Object.freeze({
+      ...page,
+      contentType:
+        page.destination === 'learn'
+          ? 'Course'
+          : page.section === 'Reference'
+          ? 'Reference'
+          : 'Guide',
+    })
   }
 
   return Object.freeze(registry)
@@ -245,9 +253,17 @@ export function getBreadcrumbs(pathname) {
   const destination = DESTINATIONS.find(
     (item) => item.id === (page?.destination ?? 'docs')
   )
+  const parent = page?.navigationParent && resolvePage(page.navigationParent)
   const trail = [
-    { label: destination.label, current: false },
+    {
+      label: destination.label,
+      current: false,
+      ...(page?.href !== destination.href && { href: destination.href }),
+    },
     { label: page?.section ?? destination.label, current: false },
+    ...(parent
+      ? [{ label: parent.navigationTitle, current: false, href: parent.href }]
+      : []),
     ...(page ? [{ label: page.navigationTitle, current: true }] : []),
   ]
   return trail.filter(

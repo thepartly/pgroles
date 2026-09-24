@@ -62,6 +62,16 @@ jobs:
         working-directory: docs
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Identify the latest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')
+          echo "DOCS_PUBLISHED_RELEASE=$tag" >> "$GITHUB_ENV"
 
       - name: Configure Pages
         id: pages
