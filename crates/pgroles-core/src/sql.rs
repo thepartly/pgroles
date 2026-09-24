@@ -771,25 +771,58 @@ fn format_object_target(
 }
 
 fn format_function_target(schema: Option<&str>, function_name: &str) -> String {
-    let schema_name = schema.unwrap_or("public");
+    format!(
+        "ROUTINE {}",
+        qualified_function_name(schema.unwrap_or("public"), function_name)
+    )
+}
 
-    match function_name.rfind('(') {
+/// Quote a routine name while preserving its PostgreSQL argument type syntax.
+pub fn qualified_function_name(schema_name: &str, function_name: &str) -> String {
+    match function_signature_start(function_name) {
         Some(paren_idx) if function_name.ends_with(')') => {
             let base_name = &function_name[..paren_idx];
             let args = &function_name[paren_idx..];
             format!(
-                "ROUTINE {}.{}{}",
+                "{}.{}{}",
                 quote_ident(schema_name),
                 quote_ident(base_name),
                 args
             )
         }
         _ => format!(
-            "ROUTINE {}.{}",
+            "{}.{}",
             quote_ident(schema_name),
             quote_ident(function_name)
         ),
     }
+}
+
+pub fn routine_base_name(function_name: &str) -> &str {
+    function_signature_start(function_name)
+        .map_or(function_name, |paren_idx| &function_name[..paren_idx])
+}
+
+fn function_signature_start(signature: &str) -> Option<usize> {
+    if !signature.ends_with(')') {
+        return None;
+    }
+    let mut depth: usize = 0;
+    let mut quoted = false;
+    for (position, character) in signature.char_indices().rev() {
+        match character {
+            '"' => quoted = !quoted,
+            ')' if !quoted => depth += 1,
+            '(' if !quoted => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(position);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Map ObjectType to the SQL keyword used in GRANT/REVOKE.
@@ -1477,6 +1510,20 @@ mod tests {
         assert_eq!(
             sql,
             "GRANT EXECUTE ON ROUTINE \"public\".\"refresh_users\"(integer, text) TO \"r1\";"
+        );
+    }
+
+    #[test]
+    fn routine_base_name_strips_only_the_argument_list() {
+        assert_eq!(
+            routine_base_name("backoff_duration(attempt smallint,max_attempts smallint)"),
+            "backoff_duration"
+        );
+        assert_eq!(routine_base_name("returning"), "returning");
+        assert_eq!(routine_base_name("refresh()"), "refresh");
+        assert_eq!(
+            routine_base_name("strange(name)(app.\"state (v1)\", numeric(10,2))"),
+            "strange(name)"
         );
     }
 

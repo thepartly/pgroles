@@ -79,6 +79,7 @@ async fn bounded_cpu<T: Send + 'static>(
 /// caller asked for.
 pub struct RawInspection {
     scope: InspectConfig,
+    routines: crate::routines::RoutineCatalog,
     roles: Vec<RoleRow>,
     memberships: Vec<MembershipRow>,
     schemas: Vec<SchemaRow>,
@@ -121,6 +122,11 @@ impl RawInspection {
                 });
             }
         }
+
+        let started = Instant::now();
+        let routines = crate::routines::RoutineCatalog::read(pool, scope).await?;
+        record("routine_targets", started);
+        let resolved_scope = routines.resolve_public_scopes(scope);
 
         let role_refs: Vec<&str> = scope.managed_roles.iter().map(String::as_str).collect();
         let schema_refs: Vec<&str> = scope.managed_schemas.iter().map(String::as_str).collect();
@@ -180,7 +186,7 @@ impl RawInspection {
                     &privilege_schema_refs,
                     &role_refs,
                     &wildcard_scopes,
-                    &scope.public_object_scopes,
+                    &resolved_scope.public_object_scopes,
                 )
                 .await?;
                 record("object_privileges", started);
@@ -227,6 +233,7 @@ impl RawInspection {
 
         Ok(Self {
             scope: scope.clone(),
+            routines,
             roles,
             memberships,
             schemas,
@@ -263,6 +270,9 @@ impl RawInspection {
     /// a permanent inspection failure and no way to tell which role, schema or
     /// wildcard caused it.
     fn uncovered_axis(&self, config: &InspectConfig) -> Option<String> {
+        if let Some((schema, name)) = self.routines.missing_target(config) {
+            return Some(format!("routine {schema}.{name} was not resolved"));
+        }
         let roles: BTreeSet<&str> = self
             .scope
             .managed_roles
@@ -420,13 +430,26 @@ impl RawInspection {
             return Err(InspectError::ScopeNotCovered(axis));
         }
 
+        self.routines.validate(config)?;
+        let resolved_config = self.routines.resolve_public_scopes(config);
+        let config = &resolved_config;
+
         let started = Instant::now();
         let managed_roles: BTreeSet<String> = config.managed_roles.iter().cloned().collect();
         let managed_schemas: BTreeSet<String> = config.managed_schemas.iter().cloned().collect();
         let privilege_schemas: BTreeSet<String> =
             config.privilege_schemas.iter().cloned().collect();
 
-        let mut graph = RoleGraph::default();
+        let mut graph = RoleGraph {
+            routine_aliases: self
+                .routines
+                .aliases
+                .iter()
+                .filter(|((schema, _), _)| privilege_schemas.contains(schema))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            ..RoleGraph::default()
+        };
         let mut diagnostics = InspectionDiagnostics::default();
         let mut stats = InspectionStats {
             phase_durations: self.phase_durations.clone(),
@@ -829,6 +852,7 @@ mod tests {
         wildcards: Vec<WildcardGrantPattern>,
     ) -> InspectConfig {
         InspectConfig {
+            routine_grants: Vec::new(),
             managed_roles: roles.iter().map(|r| r.to_string()).collect(),
             membership_grantors: Vec::new(),
             managed_schemas: schemas.iter().map(|s| s.to_string()).collect(),
@@ -922,6 +946,7 @@ mod tests {
         )];
 
         RawInspection {
+            routines: crate::routines::RoutineCatalog::default(),
             scope,
             roles: vec![role_row("alice"), role_row("bob")],
             memberships: vec![
@@ -1328,6 +1353,7 @@ mod tests {
         // A snapshot is only ever as wide as the scope it was read over, so
         // proving the union config contains both members proves coverage.
         let snapshot = RawInspection {
+            routines: crate::routines::RoutineCatalog::default(),
             scope: union,
             roles: Vec::new(),
             memberships: Vec::new(),
