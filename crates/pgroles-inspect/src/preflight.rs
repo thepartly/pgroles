@@ -1150,7 +1150,7 @@ async fn fetch_object_authority(
                 r#"
                 SELECT
                     n.nspname::text AS schema_name,
-                    (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')')::text
+                    (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text
                         AS object_name,
                     o.rolname::text AS owner_name,
                     pg_has_role(current_user, p.proowner, 'USAGE') AS can_act
@@ -1297,7 +1297,7 @@ async fn fetch_revoke_grantor_authority(
                 r#"
                 SELECT DISTINCT
                     n.nspname::text AS schema_name,
-                    (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')')::text
+                    (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text
                         AS object_name,
                     gr.rolname::text AS grantor_name,
                     acl.privilege_type::text AS privilege_type,

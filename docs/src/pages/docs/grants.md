@@ -21,6 +21,40 @@ grants:
 
 The preferred key is `object`. pgroles still accepts a quoted legacy `"on"` key when parsing older manifests, but new manifests should use `object` to avoid YAML 1.1 boolean coercion.
 
+## Function signatures
+
+Name individual functions and procedures by their input argument types:
+
+```yaml
+grants:
+  - role: app_runtime
+    privileges: [EXECUTE]
+    object:
+      type: function
+      schema: app
+      name: "backoff_duration(smallint, smallint)"
+```
+
+Parameter names, defaults, and output-only arguments are not part of PostgreSQL's
+routine identity. Include the input type of `INOUT` arguments and the array type
+of variadic arguments. Schema-qualify custom types when necessary.
+
+Live inspection resolves type aliases through PostgreSQL (`int2` and `smallint`,
+for example) and accepts the catalog's named-argument signatures emitted by
+older `pgroles generate` versions, spelled exactly as
+`pg_get_function_identity_arguments` formats them. New exports use input types
+only. Equivalent spellings converge to one target; opposite present/absent rules
+for that target are rejected during inspection, before apply. Offline validation
+cannot resolve catalog identities. Bare names resolve only when the routine is
+unambiguous.
+
+A target that PostgreSQL cannot resolve fails inspection for the policy that
+names it and lists the input-type signatures of routines with that name in the
+schema. This covers an ambiguous bare name, a named-argument signature spelled
+differently from the catalog, and an `ensure: present` rule for a routine that
+does not exist. An `ensure: absent` rule for a routine that does not exist is
+already satisfied.
+
 ## Privilege types
 
 | Privilege | Applies to |

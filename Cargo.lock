@@ -2254,6 +2254,7 @@ name = "pgroles-inspect"
 version = "0.13.0"
 dependencies = [
  "pgroles-core",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",

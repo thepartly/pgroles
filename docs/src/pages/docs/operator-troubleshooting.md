@@ -60,6 +60,7 @@ release or namespace names.
 | `InvalidSpec` | The object passed admission but is not a valid pgroles policy. [Check policy validation](#policy-validation). |
 | `AbsenceAssertionsIgnored=True` | The policy uses `ensure: absent` with additive reconciliation, which never revokes. Switch to `adopt` or `authoritative` to enforce it. |
 | `InvalidDatabaseTarget` | A database grant names a database other than the one the connection reaches. Set `object.name` to `current_database()`. [Check database objects](#missing-database-objects). |
+| `InvalidRoutineTarget` | A function or procedure grant names a routine PostgreSQL cannot resolve. The message lists the input-type signatures to use. [Check database objects](#missing-database-objects). |
 | `InsufficientPrivileges` | The executor can connect but cannot inspect or apply an operation. [Check executor privileges](#executor-privileges). |
 | `MissingDatabaseObject` | An external object referenced by the policy is absent. [Check database objects](#missing-database-objects). |
 | `UnsatisfiableWildcardGrant` | A wildcard matched objects the executor cannot grant on. [Check wildcard grants](#wildcard-grants). |
@@ -169,6 +170,14 @@ bootstrap SQL are in [executor privileges](/docs/executor-privileges).
 grant explicitly names a database other than `current_database()`. Change the
 grant target or the connection so those names agree; the operator will not
 inspect one database and render ACL changes for another.
+
+`InvalidRoutineTarget` means a function or procedure grant names a routine
+that PostgreSQL cannot resolve: an `ensure: present` rule for a routine that
+does not exist, a bare name shared by several overloads, or a named-argument
+signature spelled differently from the catalog. The condition message lists
+the input-type signatures of routines with that name in the schema. Name the
+routine by one of them, such as `process(integer)`. See
+[function signatures](/docs/grants#function-signatures).
 
 Before issuing DDL, the operator checks external schema references. Schemas
 declared in `spec.schemas` are excluded because the operator can create them;

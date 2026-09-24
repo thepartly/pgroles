@@ -4191,10 +4191,11 @@ grants:
             DROP SCHEMA IF EXISTS "{schema}" CASCADE;
             DROP ROLE IF EXISTS "{role}";
             CREATE SCHEMA "{schema}";
-            CREATE FUNCTION "{schema}"."{function_name}"(integer, text)
+            CREATE FUNCTION "{schema}"."{function_name}"(user_id integer, user_name text)
             RETURNS integer
             LANGUAGE SQL
             AS $$ SELECT $1; $$;
+            REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA "{schema}" FROM PUBLIC;
             "#
         ));
 
@@ -6049,30 +6050,24 @@ retirements:
     }
 
     /// Regression for the wildcard EXECUTE flap on schemas containing functions
-    /// whose `proname || '(' || identity_args || ')'` signature exceeds 63
-    /// bytes.
+    /// whose `proname || '(' || input types || ')'` signature exceeds 63 bytes.
     ///
     /// The inventory query UNION-ALLs `c.relname` / `t.typname` (PostgreSQL
-    /// `name`, 63-byte cap) with the text-typed function signature. PostgreSQL
-    /// resolves the result column to the common type — `name` — which silently
-    /// truncates long function signatures. The per-type privilege query
-    /// returns the full signature unaffected, so inventory's truncated key
-    /// fails to match the grant key in `normalize_wildcard_grants` and the
-    /// wildcard is treated as unsatisfied on every reconcile.
-    ///
-    /// This test creates a function with a long signature, applies a wildcard
-    /// EXECUTE grant, and asserts a follow-up diff converges to zero changes.
-    /// Before the inventory-column casts, the second diff would re-emit
-    /// `GRANT EXECUTE ON ALL ROUTINES IN SCHEMA ... TO ...` forever.
+    /// `name`, 63-byte cap) with the text-typed function signature. Without
+    /// the inventory-column casts PostgreSQL resolves the result column to
+    /// `name` and silently truncates long signatures, so the inventory key no
+    /// longer matches the full key from the per-type privilege query and
+    /// `normalize_wildcard_grants` re-emits the wildcard GRANT on every
+    /// reconcile. Signatures carry input types only, so the function needs
+    /// enough arguments, not long parameter names, to pass the cap.
     #[test]
     #[ignore]
     fn wildcard_function_grant_converges_with_signature_longer_than_63_bytes() {
         let schema = unique_name("wildfn_longsig");
         let role = unique_name("wildfn_longsig_role");
-        // `proname || '(' || identity_args || ')'` is 74+ bytes; well past
-        // PostgreSQL's 63-byte `name` cap.
+        // `compute_thing(integer, ... x8)` is 85 bytes.
         let function_body = format!(
-            r#"CREATE FUNCTION "{schema}".compute_thing(parameter_with_a_deliberately_long_identifier integer) RETURNS int LANGUAGE sql AS 'SELECT $1'"#
+            r#"CREATE FUNCTION "{schema}".compute_thing(integer, integer, integer, integer, integer, integer, integer, integer) RETURNS int LANGUAGE sql AS 'SELECT $1'"#
         );
 
         execute_sql(&format!(
@@ -6081,7 +6076,7 @@ retirements:
             DROP ROLE IF EXISTS "{role}";
             CREATE SCHEMA "{schema}";
             {function_body};
-            REVOKE EXECUTE ON FUNCTION "{schema}".compute_thing(integer) FROM PUBLIC;
+            REVOKE EXECUTE ON FUNCTION "{schema}".compute_thing(integer, integer, integer, integer, integer, integer, integer, integer) FROM PUBLIC;
             "#
         ));
 
@@ -6110,15 +6105,15 @@ grants:
             .success();
 
         assert!(
-            query_has_function_privilege(&role, &format!(r#""{schema}"."compute_thing"(integer)"#)),
+            query_has_function_privilege(
+                &role,
+                &format!(
+                    r#""{schema}"."compute_thing"(integer, integer, integer, integer, integer, integer, integer, integer)"#
+                )
+            ),
             "function should have EXECUTE after initial apply"
         );
 
-        // The bug: before the inventory-column casts, the wildcard satisfaction
-        // check looks up the grant under a 63-byte-truncated function key that
-        // doesn't match the full key in the grant map, so the diff re-emits
-        // the wildcard GRANT on every reconcile. With the fix, the diff
-        // converges to zero changes.
         pgroles_cmd()
             .args([
                 "diff",
@@ -6354,7 +6349,7 @@ default_privileges:
         .to_string();
         assert!(
             plan.contains(&format!(
-                r#"REVOKE EXECUTE ON ROUTINE "{}"."secret"(x integer) FROM PUBLIC;"#,
+                r#"REVOKE EXECUTE ON ROUTINE "{}"."secret"(integer) FROM PUBLIC;"#,
                 fixture.schema
             )),
             "plan should revoke PUBLIC EXECUTE on existing routines:\n{plan}"

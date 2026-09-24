@@ -683,9 +683,24 @@ fn retry_class_for_reconcile_error(error: &ReconcileError) -> RetryClass {
     }
 }
 
+fn routine_target_is_invalid(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| {
+            code.starts_with("22")
+                || (code.starts_with("42") && code != SQLSTATE_INSUFFICIENT_PRIVILEGE)
+        })
+}
+
 fn inspect_error_is_non_transient(error: &pgroles_inspect::InspectError) -> bool {
     match error {
         pgroles_inspect::InspectError::Database(error) => sqlx_error_is_non_transient(error),
+        pgroles_inspect::InspectError::RoutineTarget { source, .. } => {
+            routine_target_is_invalid(source) || sqlx_error_is_non_transient(source)
+        }
+        pgroles_inspect::InspectError::ConflictingRoutineRules { .. }
+        | pgroles_inspect::InspectError::UnresolvedRoutine { .. } => true,
         // A scope the shared snapshot never read: a programming error in the
         // caller, not something a retry can fix.
         pgroles_inspect::InspectError::ScopeNotCovered(_)
@@ -3616,13 +3631,21 @@ impl ReconcileError {
                 ContextError::InvalidResolvedSslMode { .. } => "InvalidConnectionParams",
             },
             ReconcileError::Inspect(error) => match error {
-                pgroles_inspect::InspectError::Database(sql_err) => {
-                    match classify_sqlx_error(sql_err) {
-                        SqlErrorKind::InsufficientPrivileges => "InsufficientPrivileges",
-                        SqlErrorKind::MissingDatabaseObject => "MissingDatabaseObject",
-                        SqlErrorKind::Transient => "DatabaseInspectionFailed",
-                    }
+                pgroles_inspect::InspectError::ConflictingRoutineRules { .. } => "ValidationFailed",
+                pgroles_inspect::InspectError::UnresolvedRoutine { .. } => "InvalidRoutineTarget",
+                pgroles_inspect::InspectError::RoutineTarget { source, .. }
+                    if routine_target_is_invalid(source) =>
+                {
+                    "InvalidRoutineTarget"
                 }
+                pgroles_inspect::InspectError::Database(sql_err)
+                | pgroles_inspect::InspectError::RoutineTarget {
+                    source: sql_err, ..
+                } => match classify_sqlx_error(sql_err) {
+                    SqlErrorKind::InsufficientPrivileges => "InsufficientPrivileges",
+                    SqlErrorKind::MissingDatabaseObject => "MissingDatabaseObject",
+                    SqlErrorKind::Transient => "DatabaseInspectionFailed",
+                },
                 pgroles_inspect::InspectError::ScopeNotCovered(_)
                 | pgroles_inspect::InspectError::DerivationTask(_) => "DatabaseInspectionFailed",
                 pgroles_inspect::InspectError::DatabaseTargetMismatch { .. } => {
@@ -5351,6 +5374,61 @@ mod tests {
             pgroles_inspect::InspectError::Database(insufficient_privilege_sqlx_error()),
         ));
         assert_eq!(retry_class(&error), RetryClass::Slow);
+    }
+
+    #[test]
+    fn routine_inspection_errors_preserve_status_and_retry_semantics() {
+        for (source, reason, retry) in [
+            (
+                insufficient_privilege_sqlx_error(),
+                "InsufficientPrivileges",
+                RetryClass::Slow,
+            ),
+            (
+                missing_function_sqlx_error(),
+                "InvalidRoutineTarget",
+                RetryClass::Slow,
+            ),
+            (
+                transient_sqlx_error(),
+                "DatabaseInspectionFailed",
+                RetryClass::Transient,
+            ),
+        ] {
+            let error = ReconcileError::Inspect(pgroles_inspect::InspectError::RoutineTarget {
+                schema: "awa".into(),
+                name: "backoff_duration(int2, int2)".into(),
+                source,
+            });
+            assert_eq!(error.reason(), reason);
+            assert_eq!(retry_class_for_reconcile_error(&error), retry);
+        }
+        let conflict =
+            ReconcileError::Inspect(pgroles_inspect::InspectError::ConflictingRoutineRules {
+                role: "runtime".into(),
+                schema: "awa".into(),
+                name: "backoff_duration(smallint, smallint)".into(),
+            });
+        assert_eq!(conflict.reason(), "ValidationFailed");
+        assert_eq!(retry_class_for_reconcile_error(&conflict), RetryClass::Slow);
+        for failure in [
+            pgroles_inspect::RoutineResolutionFailure::Unparseable,
+            pgroles_inspect::RoutineResolutionFailure::Ambiguous,
+            pgroles_inspect::RoutineResolutionFailure::Missing,
+        ] {
+            let unresolved =
+                ReconcileError::Inspect(pgroles_inspect::InspectError::UnresolvedRoutine {
+                    schema: "awa".into(),
+                    name: "backoff_duration(attempt smallint,max_attempts smallint)".into(),
+                    failure,
+                    candidates: vec!["backoff_duration(smallint, smallint)".into()],
+                });
+            assert_eq!(unresolved.reason(), "InvalidRoutineTarget");
+            assert_eq!(
+                retry_class_for_reconcile_error(&unresolved),
+                RetryClass::Slow
+            );
+        }
     }
 
     #[test]
