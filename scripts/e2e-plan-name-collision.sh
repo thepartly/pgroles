@@ -4,13 +4,12 @@ source "$(dirname "$0")/e2e-helpers.sh"
 policy=plan-name-collision
 role=plan_name_collision_user
 cleanup() {
-  kubectl -n pgroles-system set env deployment/pgroles-operator PGROLES_E2E_FREEZE_PLAN_NAME_FOR- >/dev/null || true
+  set_operator_env PGROLES_E2E_FREEZE_PLAN_NAME_FOR- || true
   kubectl delete pgr "$policy" --ignore-not-found --wait=true >/dev/null || true
   pg_query "DROP ROLE IF EXISTS $role" >/dev/null || true
 }
 trap cleanup EXIT
-kubectl -n pgroles-system set env deployment/pgroles-operator PGROLES_E2E_FREEZE_PLAN_NAME_FOR="$policy"
-kubectl -n pgroles-system rollout status deployment/pgroles-operator --timeout=120s
+set_operator_env PGROLES_E2E_FREEZE_PLAN_NAME_FOR="$policy"
 kubectl apply -f - <<YAML
 apiVersion: pgroles.io/v1alpha1
 kind: PostgresPolicy
@@ -39,8 +38,7 @@ reference=$(kubectl get pgr "$policy" -o jsonpath='{.status.current_plan_ref.nam
 test -z "$reference"
 wait_for_plan_phase "$first" Rejected
 assert_role_absent "$role"
-kubectl -n pgroles-system set env deployment/pgroles-operator PGROLES_E2E_FREEZE_PLAN_NAME_FOR-
-kubectl -n pgroles-system rollout status deployment/pgroles-operator --timeout=120s
+set_operator_env PGROLES_E2E_FREEZE_PLAN_NAME_FOR-
 wait_for_ready_status_reason "$policy" True Planned
 fresh=$(wait_for_current_plan_ref "$policy")
 test "$fresh" != "$first"

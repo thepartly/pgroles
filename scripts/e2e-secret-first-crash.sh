@@ -6,13 +6,12 @@ policy=secret-first-crash
 secret=secret-first-credential
 role=secret_first_user
 cleanup() {
-  kubectl -n pgroles-system set env deployment/pgroles-operator PGROLES_E2E_CRASH_AFTER_GENERATED_SECRET- >/dev/null || true
+  set_operator_env PGROLES_E2E_CRASH_AFTER_GENERATED_SECRET- || true
   kubectl delete pgr "$policy" --ignore-not-found --wait=true >/dev/null || true
   pg_query "DROP ROLE IF EXISTS $role" >/dev/null || true
 }
 trap cleanup EXIT
-kubectl -n pgroles-system set env deployment/pgroles-operator PGROLES_E2E_CRASH_AFTER_GENERATED_SECRET="default/$policy"
-kubectl -n pgroles-system rollout status deployment/pgroles-operator --timeout=120s
+set_operator_env PGROLES_E2E_CRASH_AFTER_GENERATED_SECRET="default/$policy"
 pod=$(kubectl -n pgroles-system get pods -l app.kubernetes.io/name=pgroles-operator -o json | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' | head -1)
 test -n "$pod"
 restart_before=$(kubectl -n pgroles-system get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
