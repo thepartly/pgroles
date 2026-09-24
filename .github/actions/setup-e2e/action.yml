@@ -25,7 +25,21 @@ runs:
 
     - name: Create kind cluster
       shell: bash
-      run: kind create cluster --name ${{ inputs.cluster-name }} --wait 60s
+      run: |
+        # The dev OTLP collector prints every export at detailed verbosity, so
+        # at the kubelet's default 10Mi limit its log rotates every few
+        # minutes. `kubectl logs` reads only the current file, and the E2E
+        # audit check looks for records written minutes earlier.
+        cat > "$RUNNER_TEMP/kind-config.yaml" <<'EOF'
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        kubeadmConfigPatches:
+          - |
+            kind: KubeletConfiguration
+            containerLogMaxSize: 200Mi
+        EOF
+        kind create cluster --name ${{ inputs.cluster-name }} \
+          --config "$RUNNER_TEMP/kind-config.yaml" --wait 60s
 
     # Ship gate for ADR-001 Decision 1. PostgresPolicyCandidate carries a
     # whole-spec `self == oldSelf` CEL rule, and the API server refuses a CRD

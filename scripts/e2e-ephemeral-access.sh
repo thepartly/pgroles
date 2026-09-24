@@ -748,4 +748,7 @@ done
 
 kubectl -n pgroles-system logs deployment/pgroles-operator --tail=300 || true
 kubectl -n pgroles-system logs deployment/otel-collector --tail=500 || true
+# Rotated files here mean `kubectl logs` could no longer see earlier records.
+node="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+[ -n "$node" ] && docker exec "$node" sh -c 'ls -la /var/log/pods/pgroles-system_otel-collector-*/*/' || true
 exit 1
