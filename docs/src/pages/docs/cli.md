@@ -52,7 +52,7 @@ pgroles diff --bundle path/to/pgroles.bundle.yaml --database-url postgres://loca
 | `--exit-code` | Exit with code 2 when drift is detected (default: `true`) |
 | `--no-exit-code` | Suppress drift exit code 2; command failures still exit nonzero |
 | `--review-out` | Write a sanitized recorded review artifact alongside normal output |
-| `--target-label` | Human-readable target label for `--review-out`; never a connection URL |
+| `--target-label` | Human-readable target label for `--review-out`, such as `staging`; a value containing `://` is rejected |
 | `--policy-commit` | Source revision to record with `--review-out` |
 | `--executor-role` | Intended applying identity for `--review-out`; does not switch roles or verify that identity |
 
@@ -62,8 +62,20 @@ Use `--review-out review.pgroles.json` with any output format to save the same
 planning run for the [explorer](/docs/explorer). Recorded reviews include
 provenance and structured preflight evidence; importing them does not replan.
 See [recorded reviews](/docs/recorded-reviews) for sanitization and
-identity boundaries. Export failures fail the command, including with
-`--no-exit-code`.
+identity boundaries.
+
+- The artifact is built from declared password intent and never reads
+  `password.from_env` variables. The output format decides that separately:
+  `sql`, `json`, and `summary` still require every declared password variable
+  to be set, with or without `--review-out`; `markdown` does not.
+- After writing the artifact, `diff` prints its path and review fingerprint
+  to stderr, and the `markdown` report ends with the same fingerprint, so a
+  posted report can be matched to its file:
+  `Recorded review written to review.pgroles.json (review fingerprint sha256:…)`.
+- `--target-label` rejects any value containing `://` before connecting, so a
+  connection URL is never recorded. Without it, the label is `unspecified`.
+- Export failures fail the command with exit code 1, including with
+  `--no-exit-code`. The report is still printed first.
 
 For single-manifest mode, the `json` format outputs the change list as a JSON array. For bundle mode, the `json` format returns a typed object with:
 
@@ -73,7 +85,7 @@ For single-manifest mode, the `json` format outputs the change list as a JSON ar
 
 ### CI drift detection
 
-By default, `diff` exits with code **2** when structural changes are detected and **0** when the database is in sync. Password-only changes are excluded from drift detection because PostgreSQL does not expose password hashes for comparison — they always appear in the plan but will not trigger a non-zero exit. Command failures still use a normal error exit code. This makes it suitable for CI gates and SRE runbooks:
+By default, `diff` exits with code **2** when structural changes are detected and **0** when the database is in sync. Password-only changes are excluded from drift detection because PostgreSQL does not expose password hashes for comparison — they always appear in the plan but will not trigger a non-zero exit. Command failures, including review-export failures, exit with **1**. Command-line usage errors, such as an unknown flag or a flag an older release does not support, also exit with **2** before anything is planned, so a gate that accepts `2` should confirm the run produced its output (see the [PR-comment recipe](/docs/ci-cd#diff-as-a-pr-comment)). This makes it suitable for CI gates and SRE runbooks:
 
 ```shell
 if pgroles diff --database-url postgres://localhost/mydb; then

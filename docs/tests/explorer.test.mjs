@@ -12,8 +12,19 @@ import {
   reviewArtifactImport,
   validateReviewArtifactFileSize,
   validateSnapshotFileSize,
+  describeChange,
+  wasmAssetUrls,
   wasmModuleUrl,
 } from '../src/lib/pgrolesExplorer.mjs'
+
+// The smallest visual graph the importer accepts: the schema requires the
+// version and counts even when nothing was recorded.
+const emptyVisual = () => ({
+  schema_version: 'pgroles.visual_graph.v1',
+  meta: { source: 'desired', role_count: 0, grant_count: 0, default_privilege_count: 0, membership_count: 0, collapsed: true },
+  nodes: [],
+  edges: [],
+})
 
 test('initializes the web module once and exposes analyze', async () => {
   resetAnalyzerForTests()
@@ -33,8 +44,14 @@ test('initializes the web module once and exposes analyze', async () => {
 
 test('builds the versioned request expected by the Rust boundary', () => {
   assert.deepEqual(analyzeRequest({ current: { roles: {} }, desiredYaml: 'roles: []', mode: 'additive', executorRole: 'deployer' }), {
-    schema_version: 'pgroles.explorer.v1', current: { roles: {} }, desired_yaml: 'roles: []', mode: 'additive', executor: { role: 'deployer', superuser: false, memberships: [], new_membership_set_role: 'unknown', new_role_set_role: 'unknown', new_role_inherit: 'unknown', new_role_admin_option: 'unknown' },
+    schema_version: 'pgroles.explorer.v1', current: { roles: {} }, desired_yaml: 'roles: []', mode: 'additive',
+    pg_major_version: 16, authority_graph_complete: true,
+    executor: { role: 'deployer', superuser: false, createrole: 'unknown', memberships: [], new_membership_set_role: 'unknown', new_role_set_role: 'unknown', new_role_inherit: 'unknown', new_role_admin_option: 'unknown' },
   })
+  const request = analyzeRequest({ current: {}, desiredYaml: '', mode: 'adopt', executorRole: 'deployer', pgMajorVersion: 15, authorityGraphComplete: false, executorCreaterole: 'allowed' })
+  assert.equal(request.pg_major_version, 15)
+  assert.equal(request.authority_graph_complete, false)
+  assert.equal(request.executor.createrole, 'allowed')
 })
 
 test('authoring needs only YAML and shares initialization with analysis', async () => {
@@ -56,7 +73,7 @@ test('preserves every imported executor authority fact in the request', () => {
     newMembershipSetRole: 'allowed', newRoleSetRole: 'denied', newRoleInherit: 'allowed', newRoleAdminOption: 'unknown',
   })
   assert.deepEqual(request.executor, {
-    role: 'deployer', superuser: true, memberships,
+    role: 'deployer', superuser: true, createrole: 'unknown', memberships,
     new_membership_set_role: 'allowed', new_role_set_role: 'denied', new_role_inherit: 'allowed', new_role_admin_option: 'unknown',
   })
 })
@@ -69,6 +86,18 @@ test('validates an imported envelope version and preserves its executor facts', 
   assert.throws(() => explorerImport({ schema_version: 'pgroles.explorer.v2', current: {} }), /unsupported explorer schema version/)
 })
 
+test('honours imported PostgreSQL version and authority graph completeness only from an envelope', () => {
+  assert.deepEqual(explorerImport({ current: { roles: {} }, pg_major_version: 15, authority_graph_complete: false }), {
+    current: { roles: {} }, executor: undefined, pgMajorVersion: 15, authorityGraphComplete: false,
+  })
+  assert.deepEqual(explorerImport({ current: {}, pg_major_version: null }), { current: {}, executor: undefined })
+  const bare = { roles: {} }
+  assert.deepEqual(explorerImport(bare), { current: bare, executor: undefined })
+  assert.throws(() => explorerImport({ current: {}, pg_major_version: '16' }), /pg_major_version must be an integer/)
+  assert.throws(() => explorerImport({ current: {}, pg_major_version: 16.5 }), /pg_major_version must be an integer/)
+  assert.throws(() => explorerImport({ current: {}, authority_graph_complete: 'yes' }), /authority_graph_complete must be true or false/)
+})
+
 test('rejects oversized snapshot files before reading them', () => {
   assert.doesNotThrow(() => validateSnapshotFileSize(4_194_304))
   assert.throws(() => validateSnapshotFileSize(4_194_305), /4194305 bytes; limit is 4194304 bytes/)
@@ -77,15 +106,16 @@ test('rejects oversized snapshot files before reading them', () => {
 
 test('accepts only structurally valid recorded review artifacts', () => {
   const artifact = {
-    schema_version: 'pgroles.review-artifact.v1',
+    schema_version: 'pgroles.review-artifact.v2',
     provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
     preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: [], phases: [], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: [], phases: [], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
   assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [] } }] }))
-  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v2' }), /unsupported review artifact schema version/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v3' }), /unsupported review artifact schema version/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v1' }), /no longer supported; re-export the review with the current pgroles CLI/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: {} } }), /recorded collections are malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'invented' } } }), /SQL preview is malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [null] }), /preflight evidence is malformed/)
@@ -98,14 +128,14 @@ test('accepts only structurally valid recorded review artifacts', () => {
 
 test('rejects falsy nested review fields, malformed change variants, and incomplete phases', () => {
   const artifact = {
-    schema_version: 'pgroles.review-artifact.v1',
+    schema_version: 'pgroles.review-artifact.v2',
     provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } },
     preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
     recorded: {
       changes: [{ index: 0, priority: 'Review', change: { kind: 'drop_role', name: 'obsolete' } }],
-      phases: [{ phase: 'retire', change_indices: [0], executor_reachability: [], executor_usage: [] }],
-      findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}`,
+      phases: [{ phase: 'retire', change_indices: [0], executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }],
+      findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}`,
     },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
@@ -133,23 +163,25 @@ test('accepts every sanitized ReviewChange variant', () => {
     { kind: 'reassign_owned', from_role: 'old', to_role: 'new' }, { kind: 'drop_owned', role: 'old' }, { kind: 'terminate_sessions', role: 'old' }, { kind: 'set_password', name: 'role' }, { kind: 'drop_role', name: 'old' },
   ]
   const artifact = {
-    schema_version: 'pgroles.review-artifact.v1', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    schema_version: 'pgroles.review-artifact.v2', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, preflight: [], exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: changes.map((change, index) => ({ index, priority: 'Review', change })), phases: [{ phase: 'create', change_indices: changes.map((_, index) => index), executor_reachability: [], executor_usage: [] }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: changes.map((change, index) => ({ index, priority: 'Review', change })), phases: [{ phase: 'create', change_indices: changes.map((_, index) => index), executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
 })
 
 test('rejects authority overclaims, contradictory coverage, and invented source keys', () => {
   const artifact = {
-    schema_version: 'pgroles.review-artifact.v1', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
+    schema_version: 'pgroles.review-artifact.v2', provenance: { tool_version: 'test', captured_at: '2026-01-01T00:00:00Z', target_label: 'test', pg_major_version: 16, policy: { content_digest: `sha256:${'0'.repeat(64)}` } },
     context: { mode: 'additive', authority_graph_complete: false, inspector: { role: 'inspector' }, intended_executor: { role: 'executor' } }, exploration: { status: 'omitted', reason: 'recorded_only_export' },
-    recorded: { changes: [{ index: 0, priority: 'Review', source: { document: 'roles.yaml', managed_key: { kind: 'role', name: 'app' } }, change: { kind: 'drop_role', name: 'app' } }], phases: [{ phase: 'retire', change_indices: [0], executor_reachability: [], executor_usage: [] }], findings: [], visual: { nodes: [], edges: [] }, sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
+    recorded: { changes: [{ index: 0, priority: 'Review', source: { document: 'roles.yaml', managed_key: { kind: 'role', name: 'app' } }, change: { kind: 'drop_role', name: 'app' } }], phases: [{ phase: 'retire', change_indices: [0], executor_reachability_delta: { changed: [], removed: [] }, executor_usage_delta: { changed: [], removed: [] } }], findings: [], visual: emptyVisual(), sql_preview: { status: 'available', sql: '' }, review_fingerprint: `sha256:${'1'.repeat(64)}` },
     preflight: [{ check: 'executor_authority', status: 'unknown', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [0] } }],
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
   assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], status: 'passed' }] }), /preflight evidence is malformed/)
-  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], coverage: { ...artifact.preflight[0].coverage, kind: 'complete' } }] }), /preflight coverage is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], coverage: { ...artifact.preflight[0].coverage, kind: 'complete', checks_performed: ['plan_order_authority'] } }] }), /preflight coverage is malformed/)
+  assert.throws(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], coverage: { kind: 'complete', checks_performed: [], checked_change_indices: [0], unchecked_change_indices: [] } }] }), /complete executor authority coverage without any recorded checks/)
+  assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ ...artifact.preflight[0], status: 'passed', coverage: { kind: 'complete', checks_performed: ['plan_order_authority'], checked_change_indices: [0], unchecked_change_indices: [] } }] }))
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: [{ ...artifact.recorded.changes[0], source: { document: 'roles.yaml', managed_key: { kind: 'invented' } } }] } }), /changes are malformed/)
 })
 
@@ -161,6 +193,47 @@ test('preserves malformed-input errors from wasm-bindgen', () => {
 test('uses the deployment base path for wasm assets', () => {
   assert.equal(wasmModuleUrl(''), '/wasm/pgroles_wasm.js')
   assert.equal(wasmModuleUrl('/pgroles'), '/pgroles/wasm/pgroles_wasm.js')
+  assert.deepEqual(wasmAssetUrls('/pgroles/pr-preview/pr-9', 'abc123'), {
+    module: '/pgroles/pr-preview/pr-9/wasm/pgroles_wasm.js?v=abc123',
+    binary: '/pgroles/pr-preview/pr-9/wasm/pgroles_wasm_bg.wasm?v=abc123',
+  })
+})
+
+test('versions the glue import and passes the versioned binary to wasm-bindgen', async () => {
+  resetAnalyzerForTests()
+  const calls = []
+  const importer = async (url) => {
+    calls.push(['import', url])
+    return { default: async (options) => { calls.push(['init', options]) }, analyze: () => 'ok' }
+  }
+  await loadPolicyEngine('/pgroles', importer, 'build-7')
+  assert.deepEqual(calls, [
+    ['import', '/pgroles/wasm/pgroles_wasm.js?v=build-7'],
+    ['init', { module_or_path: '/pgroles/wasm/pgroles_wasm_bg.wasm?v=build-7' }],
+  ])
+})
+
+test('next config derives the wasm build id from the wasm asset contents', async () => {
+  const { createRequire } = await import('node:module')
+  const { createHash } = await import('node:crypto')
+  const { existsSync, readFileSync } = await import('node:fs')
+  const require = createRequire(import.meta.url)
+  const saved = process.env.NEXT_PUBLIC_PGROLES_BUILD_ID
+  delete process.env.NEXT_PUBLIC_PGROLES_BUILD_ID
+  try {
+    const config = require('../next.config.js')('phase-production-build')
+    const wasm = new URL('../public/wasm/', import.meta.url)
+    const files = ['pgroles_wasm.js', 'pgroles_wasm_bg.wasm'].map((file) => new URL(file, wasm))
+    const id = config.env.NEXT_PUBLIC_PGROLES_BUILD_ID
+    assert.match(id, /^[0-9a-z-]{1,40}$/)
+    if (files.every((file) => existsSync(file))) {
+      const hash = createHash('sha256')
+      for (const file of files) hash.update(readFileSync(file)).update('\0')
+      assert.equal(id, hash.digest('hex').slice(0, 16))
+    }
+  } finally {
+    if (saved !== undefined) process.env.NEXT_PUBLIC_PGROLES_BUILD_ID = saved
+  }
 })
 
 test('allows retry after wasm initialization fails', async () => {
@@ -175,4 +248,36 @@ test('allows retry after wasm initialization fails', async () => {
   const analyze = await loadAnalyzer('', importer)
   assert.equal(analyze(), 'ok')
   assert.equal(attempts, 2)
+})
+
+test('retries a failed glue import under a distinct module URL', async () => {
+  resetAnalyzerForTests()
+  const urls = []
+  const importer = async (url) => {
+    urls.push(url)
+    if (urls.length === 1) throw new Error('500')
+    return { default: async () => {}, analyze: () => 'ok' }
+  }
+  await assert.rejects(loadAnalyzer('/p', importer, 'b1'), /500/)
+  await loadAnalyzer('/p', importer, 'b1')
+  assert.deepEqual(urls, ['/p/wasm/pgroles_wasm.js?v=b1', '/p/wasm/pgroles_wasm.js?v=b1&retry=1'])
+})
+
+test('labels changes by who is affected for live and recorded shapes', () => {
+  const cases = [
+    [{ Revoke: { role: 'reporting', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'orders' } }, 'Revoke · table app.orders → reporting'],
+    [{ kind: 'revoke', role: 'reporting', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'orders', grantor: null }, 'Revoke · table app.orders → reporting'],
+    [{ Grant: { role: 'orders_reader', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: '*' } }, 'Grant · all tables in app → orders_reader'],
+    [{ Grant: { role: 'orders_reader', privileges: ['USAGE'], object_type: 'schema', schema: null, name: 'app' } }, 'Grant · schema app → orders_reader'],
+    [{ RemoveMember: { role: 'reporting', member: 'analyst' } }, 'Remove member · analyst from reporting'],
+    [{ kind: 'add_member', role: 'reporting', member: 'analyst', inherit: true, admin: false }, 'Add member · analyst to reporting'],
+    [{ SetDefaultPrivilege: { owner: 'app_owner', scope: { type: 'schema', schema: 'app' }, on_type: 'table', grantee: 'orders_reader', privileges: ['SELECT'] } }, 'Set default privilege · app_owner tables in app → orders_reader'],
+    [{ kind: 'revoke_default_privilege', owner: 'app_owner', scope: { type: 'global' }, on_type: 'materialized_view', grantee: 'PUBLIC', privileges: ['SELECT'] }, 'Revoke default privilege · app_owner materialized views → PUBLIC'],
+    [{ ReassignOwned: { from_role: 'old', to_role: 'new' } }, 'Reassign owned · old → new'],
+    [{ DropRole: { name: 'bob' } }, 'Drop role · bob'],
+    [{ kind: 'create_schema', name: 'app', owner: 'app_owner' }, 'Create schema · app owned by app_owner'],
+    [{ AlterSchemaOwner: { name: 'app', owner: 'app_owner' } }, 'Alter schema owner · app → app_owner'],
+    [{ TerminateSessions: { role: 'bob' } }, 'Terminate sessions · bob'],
+  ]
+  for (const [change, label] of cases) assert.equal(describeChange(change), label)
 })

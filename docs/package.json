@@ -10,7 +10,7 @@
     "test:reference": "node --test tests/crd-reference.test.mjs tests/policy-highlight.test.mjs tests/manifest-types.test.mjs tests/ci-review-recipe.test.mjs",
     "test:routing": "node --test tests/routing.test.mjs tests/navigation.test.mjs",
     "test:labs": "node tests/labs.test.mjs && node --test tests/explorer-database.test.mjs tests/access-boundaries.test.mjs tests/lab-evidence.test.mjs",
-    "test:explorer": "node --test tests/explorer.test.mjs tests/explorer-scenarios.test.mjs",
+    "test:explorer": "node --test tests/explorer.test.mjs tests/review-artifact.test.mjs tests/explorer-scenarios.test.mjs",
     "test:browser": "playwright test"
   },
   "browserslist": "defaults, not ie <= 11",

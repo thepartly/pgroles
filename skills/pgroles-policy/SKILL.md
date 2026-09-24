@@ -58,15 +58,21 @@ password changes without reading their environment variables. Review the SQL and
 privileges as well as the conservative change priorities.
 
 For offline review, add `--review-out review.pgroles.json` to that same `diff`
-run and import the file into the explorer. Preserve its recorded changes,
-preflight evidence, and provenance; opening a recorded review does not replan.
-The first exporter omits exploration inputs, sensitive values, and any SQL
-preview affected by those omissions. Treat omissions as unavailable information,
-not absent policy state. Use `--executor-role` only as an intended-identity
-label: checks performed by the inspecting connection do not establish another
-executor's authority. Inspect again and run live preflight before deployment.
-For the artifact and CI workflow, read
-[the CI guide](../../docs/src/pages/docs/ci-cd.md#recorded-reviews).
+run and import the file into the explorer. `--review-out` needs a release after
+0.12.0 and works with any `--format`; the artifact never reads password
+variables. Preserve its recorded changes, preflight evidence, and provenance;
+opening a recorded review does not replan. The exporter omits exploration
+inputs, sensitive values, and any SQL preview affected by those omissions.
+Treat omissions as unavailable information, not absent policy state. Pass an
+environment name to `--target-label`; values containing `://` are rejected. The
+Markdown report and stderr name the artifact's review fingerprint, which matches
+the file. Use `--executor-role` only as an intended-identity label: checks
+performed by the inspecting connection do not establish another executor's
+authority. Inspect again and run live preflight before deployment. In CI, exit
+code 2 means drift only if the review file was written, because usage errors
+also exit 2. For the artifact and CI workflow, read
+[recorded reviews](https://thepartly.github.io/pgroles/docs/recorded-reviews/)
+and [the CI recipe](https://thepartly.github.io/pgroles/docs/ci-cd/#diff-as-a-pr-comment).
 
 Never print database URLs, passwords, or rendered Secrets in logs.
 

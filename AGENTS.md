@@ -36,6 +36,20 @@ cp charts/pgroles-operator/crds/postgrespolicyplans.pgroles.io.yaml k8s/postgres
 cp charts/pgroles-operator/crds/postgrespolicycandidates.pgroles.io.yaml k8s/postgrespolicycandidate-crd.yaml
 cp charts/pgroles-operator/crds/ephemeralaccesspolicies.pgroles.io.yaml k8s/ephemeralaccesspolicy-crd.yaml
 cp charts/pgroles-operator/crds/ephemeralaccessrequests.pgroles.io.yaml k8s/ephemeralaccessrequest-crd.yaml
+
+# Generated browser contracts: manifest metadata, the recorded review artifact
+# JSON Schema, and the WASM authoring TypeScript types. CI fails when any drifts.
+scripts/check-manifest-metadata.sh
+# Regenerate after changing manifest, authoring, or review_artifact types. It
+# writes docs/public/generated/manifest-metadata.json,
+# docs/public/generated/review-artifact.schema.json, and
+# crates/pgroles-wasm/policy-authoring.d.ts (needs node).
+scripts/generate-manifest-metadata.sh
+
+# Native vs WASM explorer parity (needs wasm-pack and node; honours
+# CARGO_TARGET_DIR). Update crates/pgroles-wasm/tests/fixtures when analysis
+# output changes intentionally.
+scripts/check-wasm-parity.sh
 ```
 
 ### Local PostgreSQL for integration tests
@@ -70,6 +84,7 @@ diff(current, effective desired) → Vec<Change> → sql::render_all_with_contex
 - **pgroles-core** — Pure library, no IO. Manifest parsing, profile expansion, diff engine, SQL rendering, manifest export. All collections use `BTreeMap`/`BTreeSet` for deterministic output.
 - **pgroles-inspect** — Async database introspection via `sqlx`/`pg_catalog`. Version detection, cloud provider detection (RDS, Cloud SQL, AlloyDB, Azure), drop-role safety preflight.
 - **pgroles-cli** — Binary crate. Thin orchestration over core + inspect. Subcommands: `validate`, `diff`/`plan`, `apply`, `inspect`, `generate`.
+- **pgroles-wasm** — Unpublished browser adapter (`wasm-bindgen`) over `pgroles-core` built without the default `passwords` feature: exposes `validate`, `compile`, and `analyze` to the docs explorer. It never connects to a database or resolves passwords.
 - **pgroles-operator** — Kubernetes operator. Reconciles `PostgresPolicy` CRDs (`pgroles.io/v1alpha1`). Has a `crdgen` binary for generating the CRD YAML.
   - Kubernetes identifiers: every name and label value derived from user input goes through `k8s_names`. Do not hand-roll truncation or character filtering elsewhere — a cut that lands on a separator yields a value the API server rejects, which surfaces as a policy that silently stops reconciling. Invariants are enforced by property tests in `tests/identifier_properties.rs`.
   - Health endpoints: `/livez`, `/readyz`
@@ -86,11 +101,23 @@ diff(current, effective desired) → Vec<Change> → sql::render_all_with_contex
 
 - **Lint** — `cargo fmt --check`, `clippy -D warnings`, CRD drift check, helm-docs drift check
 - **Unit Tests** — `cargo test --workspace`
+- **WASM compatibility** (`wasm-check`) — generated-metadata drift (`scripts/check-manifest-metadata.sh`), `pgroles-core` tests and a `wasm32-unknown-unknown` check without default features, a `pgroles-wasm` target check, and native/WASM fixture parity (`scripts/check-wasm-parity.sh`)
 - **Integration Tests** — PG 16/17/18 matrix, `cargo test --workspace -- --include-ignored`
 - **Docker and example smoke tests** — verifies the documented container and example flows work end-to-end
 - **Operator E2E** — kind cluster, deploys the operator plus an OpenTelemetry Collector, runs happy-path plus conflict/invalid/missing-secret/insufficient-privilege/secret-rotation scenarios, verifies roles in the database, and verifies OTLP metrics export
 - **Plan lifecycle and load E2E** — plan approval flows, plus generated-policy convergence at higher object counts and ephemeral-request load
 - **Ephemeral access E2E** — runs twice: once for the trusted-writer posture, once for the Kyverno secure-admission profile in `k8s/security/`
+
+`.github/workflows/docs-pages.yml` builds the documentation site on docs, core,
+and WASM changes. It runs the docs Node tests (`npm run test:labs`,
+`test:explorer`, `test:reference`, `test:routing` in `docs/`), which cover the
+explorer, recorded-review import against `docs/tests/fixtures/`, and the
+documented CI recipe, then builds the static export and runs the Playwright
+browser suite (`npm run test:browser`). The build needs the restricted
+`@partly/pitstop` npm package, so pull requests from forks cannot build it.
+`pgroles-core` also deserializes `docs/tests/fixtures/recorded-review.json`, so
+regenerate that fixture with `pgroles diff --review-out` when the review
+artifact changes.
 
 The heavier fairness/load coverage lives in `.github/workflows/operator-fairness-load.yml` and runs on a nightly schedule when `main` has changed. It carries two scenarios — fairness/load, and an ACL inspection burst that measures whether the operator's peak working set tracks the concurrency bound or the policy count — and files a `nightly-failure` issue when either fails, appending to the open one rather than opening a new issue per night.
 

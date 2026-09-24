@@ -1,0 +1,75 @@
+{
+  "description": "Before PostgreSQL 16 a membership has no SET option, so it proves SET ROLE to the granted role.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "owner": {},
+        "reader": {}
+      },
+      "grants": [
+        {
+          "role": "reader",
+          "object_type": "table",
+          "schema": "app",
+          "name": "orders",
+          "privileges": [
+            "SELECT"
+          ],
+          "grantors": {
+            "owner": [
+              "SELECT"
+            ]
+          }
+        }
+      ],
+      "memberships": [
+        {
+          "role": "owner",
+          "member": "deployer",
+          "inherit": true,
+          "admin": false
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: owner\n  - name: reader\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    },
+    "pg_major_version": 15
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "Revoke",
+        "role": "reader",
+        "grantor": "owner"
+      }
+    ],
+    "absentFindings": [
+      {
+        "kind": "required_role_unavailable",
+        "role": "owner"
+      },
+      {
+        "kind": "required_role_reachability_unknown",
+        "role": "owner"
+      }
+    ],
+    "phaseReachability": [
+      {
+        "phase": "revoke",
+        "role": "owner",
+        "authority": "set_role",
+        "status": "reachable"
+      }
+    ],
+    "response": {
+      "pg_major_version": 15,
+      "authority_graph_complete": true
+    }
+  }
+}

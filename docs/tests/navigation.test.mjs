@@ -7,6 +7,7 @@ import {
   COURSE_READING_SEQUENCE,
   DESTINATIONS,
   QUICK_START_NEXT_STEPS,
+  getBreadcrumbs,
   getNavigation,
   getReadingLinks,
   navigationByDestination,
@@ -147,4 +148,15 @@ test('the course uses clear navigation labels and excludes the explorer', () => 
     'Open the playground'
   )
   assert.ok(!learnLinks.some((link) => link.href === '/docs/explorer'))
+})
+
+test('breadcrumbs drop a level that repeats its parent', () => {
+  const labels = (pathname) => getBreadcrumbs(pathname).map((crumb) => crumb.label)
+  assert.deepEqual(labels('/docs/explorer'), ['Explorer', 'Plan explorer'])
+  assert.deepEqual(labels('/docs/explorer-snapshots/'), ['Explorer', 'Snapshot format'])
+  assert.deepEqual(labels('/docs/operator-install'), ['Docs', 'Kubernetes operator', 'Install the operator'])
+  assert.deepEqual(labels('/docs/postgresql-row-security'), ['Learn PostgreSQL', 'Advanced', '8. Row-level security'])
+  assert.deepEqual(labels('/docs/not-a-page'), ['Docs'])
+  assert.deepEqual(getBreadcrumbs('/docs/explorer').at(-1), { label: 'Plan explorer', current: true })
+  assert.ok(getBreadcrumbs('/docs/explorer').slice(0, -1).every((crumb) => !crumb.current))
 })

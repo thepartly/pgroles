@@ -19,6 +19,11 @@ For Cloud SQL or RDS connectivity setup (auth proxies, VPC access, IAM authentic
 | `2` | Drift detected — roles, grants, or memberships differ |
 | Other | Command or connectivity failure |
 
+Command-line usage errors, such as an unknown or misspelled flag, also exit
+with `2` before anything is planned. A gate that treats `2` as acceptable drift
+must also confirm the run produced its output; the
+[PR-comment recipe](#diff-as-a-pr-comment) checks for the review file.
+
 ## GitHub Actions
 
 These examples use the published Docker image, which requires no toolchain installation. Your runner needs network access to the database — see the platform guides linked above if you need to set up a proxy or VPN.
@@ -86,17 +91,21 @@ jobs:
 Generate the Markdown report and recorded review artifact from one planning run.
 The CLI exit code controls the CI decision; the explorer is a review interface.
 This example accepts both an unchanged plan and detected drift, while failing on
-connection, validation, inspection, or export errors:
+usage, connection, validation, inspection, or export errors:
 
 ```yaml
       - name: Generate diff
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Pin a release that supports --review-out (any release after 0.12.0).
+          PGROLES_IMAGE: ghcr.io/thepartly/pgroles:<version>
         run: |
+          rm -f review.md "$GITHUB_WORKSPACE/review.pgroles.json"
           if docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -e DATABASE_URL \
             -v "$GITHUB_WORKSPACE:/work" \
-            ghcr.io/thepartly/pgroles:latest \
+            "$PGROLES_IMAGE" \
             diff -f /work/pgroles.yaml --mode adopt --format markdown \
             --target-label staging \
             --policy-commit "$(git rev-parse HEAD)" \
@@ -106,7 +115,13 @@ connection, validation, inspection, or export errors:
             status=$?
           fi
           case "$status" in
-            0|2) ;;
+            0|2)
+              # Usage errors also exit 2, but never write the review file.
+              if [ ! -s "$GITHUB_WORKSPACE/review.pgroles.json" ]; then
+                echo "pgroles exited $status without writing review.pgroles.json" >&2
+                exit 1
+              fi
+              ;;
             *) exit "$status" ;;
           esac
 
@@ -136,6 +151,19 @@ connection, validation, inspection, or export errors:
               });
             }
 ```
+
+Replace `<version>` with a released version. `--review-out` is not available in
+0.12.0 or earlier, where it is a usage error, so do not use a floating tag such
+as `latest` for this job. The image runs as an unprivileged user by default;
+`--user "$(id -u):$(id -g)"` lets it write the review file into the
+runner-owned workspace. The job removes any previous review file first, so a
+usage error that exits `2` cannot be mistaken for drift.
+
+The Markdown report ends with the artifact's review fingerprint, and stderr
+repeats it with the file path; the explorer shows the same value after import,
+so a PR comment can be matched to its uploaded file. If the export fails,
+pgroles still prints the report and then exits with an error, which fails the
+step.
 
 The comment step needs `pull-requests: write` permission. Treat uploaded reports
 as database metadata and choose access and retention accordingly. Report text is

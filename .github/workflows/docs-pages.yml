@@ -7,6 +7,8 @@ on:
       - "docs/**"
       - "crates/pgroles-core/**"
       - "crates/pgroles-wasm/**"
+      # The recorded-review fixture and browser tests follow CLI export output.
+      - "crates/pgroles-cli/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/check-manifest-metadata.sh"
@@ -19,6 +21,8 @@ on:
       - "docs/**"
       - "crates/pgroles-core/**"
       - "crates/pgroles-wasm/**"
+      # The recorded-review fixture and browser tests follow CLI export output.
+      - "crates/pgroles-cli/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/check-manifest-metadata.sh"
@@ -65,19 +69,23 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: docs/package-lock.json
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
-      - name: Verify generated manifest metadata
-        run: scripts/check-manifest-metadata.sh
-        working-directory: ${{ github.workspace }}
-
       - name: Install active toolchain WASM target
         run: rustup target add wasm32-unknown-unknown
+        working-directory: ${{ github.workspace }}
+
+      # Caches ~/.cargo/bin as well as build output, so the pinned wasm-pack
+      # install below is a no-op on a warm cache.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify generated manifest metadata
+        run: scripts/check-manifest-metadata.sh
         working-directory: ${{ github.workspace }}
 
       - name: Install wasm-pack
@@ -99,6 +107,9 @@ jobs:
         run: npm ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Lint docs sources and tests
+        run: npm run lint
 
       - name: Run lab exercises against PGlite
         run: npm run test:labs
@@ -150,6 +161,17 @@ jobs:
               || steps.pages.outputs.base_path
             }}
         run: npm run test:browser
+
+      - name: Upload browser test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgroles-docs-browser-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            docs/test-results
+            docs/playwright-report
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Disable Jekyll
         run: touch out/.nojekyll

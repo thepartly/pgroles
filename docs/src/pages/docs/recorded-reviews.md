@@ -16,6 +16,19 @@ pgroles diff -f pgroles.yaml --mode adopt --format markdown \
   --no-exit-code > review.md
 ```
 
+`--review-out` requires a pgroles release after 0.12.0 and works with every
+output format. The artifact never reads `password.from_env` variables; only the
+`sql`, `json`, and `summary` formats require them. `--target-label` names the
+environment for reviewers and rejects values containing `://`, so a connection
+URL is never recorded.
+
+The command prints `Recorded review written to review.pgroles.json (review
+fingerprint sha256:…)` to stderr, and the Markdown report ends with the same
+fingerprint. Compare it with the fingerprint the explorer shows after import to
+confirm a report and a file come from the same run. If the file cannot be
+written, the report is still printed and the command exits with code 1, even
+with `--no-exit-code`.
+
 ## Open the recorded plan
 
 Open the [explorer](/docs/explorer), choose **Open recorded review**, and select
@@ -32,8 +45,8 @@ the file; obtain review artifacts from a trusted source, such as your CI run.
 The exporter creates recorded reviews without exploration inputs. It
 omits password values, role configuration values, and comments, and records
 the omissions. Redacted values do not mean absent values. These files cannot
-be replanned exactly; use a separately sanitized snapshot to explore a new,
-hypothetical variation. If any change contains sensitive values, the
+be replanned exactly; use a separately [sanitized snapshot](/docs/explorer-snapshots)
+to explore a new, hypothetical variation. If any change contains sensitive values, the
 exporter omits the entire SQL preview rather than inserting executable
 placeholder values.
 
@@ -49,6 +62,14 @@ changes. Finding no issue in those checks does not establish authority for the
 whole plan. Native phase analysis marks its scoped authority graph as incomplete:
 a missing path is unknown, rather than proof that the executor cannot reach a
 role. Live preflight failures remain separate from that modelled uncertainty.
+
+## File format
+
+Recorded reviews use schema `pgroles.review-artifact.v2`, described by the
+generated [JSON Schema](/generated/review-artifact.schema.json). Version 2
+records each phase's executor reachability as changes from the previous phase,
+so large plans stay within the 4 MiB import limit. Re-export files written by
+earlier development builds (`pgroles.review-artifact.v1`).
 
 ## Before deployment
 

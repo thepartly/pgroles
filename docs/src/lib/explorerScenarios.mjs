@@ -68,7 +68,16 @@ memberships:
     expected: { changes: [{ kind: 'AddMember', role: 'orders_reader', member: 'reporting_app' }], absentChanges: ['Revoke', 'RemoveMember', 'DropRole', 'AlterRole'] },
     cases: [
       { id: 'adopt', requestOverrides: { mode: 'adopt' }, expected: { changes: [{ kind: 'Revoke', role: 'alice' }, { kind: 'RemoveMember', role: 'orders_reader', member: 'bob' }], absentChanges: ['DropRole'] } },
-      { id: 'authoritative', requestOverrides: { mode: 'authoritative' }, expected: { changes: [{ kind: 'Revoke', role: 'alice' }, { kind: 'RemoveMember', role: 'orders_reader', member: 'bob' }, { kind: 'DropRole', name: 'bob' }] } },
+      {
+        id: 'authoritative',
+        requestOverrides: { mode: 'authoritative' },
+        expected: {
+          changes: [{ kind: 'Revoke', role: 'alice' }, { kind: 'RemoveMember', role: 'orders_reader', member: 'bob' }, { kind: 'DropRole', name: 'bob' }],
+          findings: [{ kind: 'database_preflight_required', phase: 'retire' }],
+          // Dropping bob is not a loss of access to bob.
+          absentFindings: [{ kind: 'executor_loses_access', role: 'bob' }, { kind: 'membership_disconnects_role', role: 'bob' }],
+        },
+      },
     ],
   },
   {
@@ -115,7 +124,10 @@ memberships:
     focusPhase: 'membership_remove',
     expected: {
       changes: [{ kind: 'RemoveMember', role: 'analyst', member: 'bob', grantor: 'team_lead' }],
-      findings: [{ kind: 'required_role_unavailable', phase: 'membership_remove', role: 'team_lead' }],
+      findings: [
+        { kind: 'required_role_unavailable', phase: 'membership_remove', role: 'team_lead' },
+        { kind: 'required_role_unavailable', severity: 'error', phase: 'membership_add', role: 'analyst' },
+      ],
     },
   },
   {
@@ -162,7 +174,7 @@ default_privileges:
       {
         id: 'denied',
         title: 'INHERIT denied, SET ROLE allowed',
-        description: 'SET ROLE reachability alone does not authorize ALTER DEFAULT PRIVILEGES, because that statement runs without switching roles.',
+        description: 'pgroles emits ALTER DEFAULT PRIVILEGES FOR ROLE app_owner, which requires deploy to hold app_owner’s privileges through INHERIT. SET ROLE alone does not satisfy that form.',
         requestOverrides: { executor: executor('deploy', { memberships: [{ role: 'app_owner', member: 'deploy', set_role: 'allowed', inherit: 'denied', admin_option: 'denied' }] }) },
         expected: { findings: [{ kind: 'required_role_unavailable', phase: 'grant', role: 'app_owner' }] },
       },
@@ -209,6 +221,69 @@ default_privileges:
       absentFindings: [{ kind: 'required_role_unavailable', phase: 'membership_remove', role: 'team_lead' }],
       phaseReachability: [{ phase: 'membership_remove', role: 'app_owner', authority: 'usage', status: 'unreachable' }],
     },
+  },
+  {
+    id: 'acme-postgres-upgrade',
+    title: 'Upgrade past PostgreSQL 15',
+    description: 'Grant Acme’s reader role with a CREATEROLE executor, then compare PostgreSQL 15 and 16 authority rules.',
+    explanation: 'Before PostgreSQL 16, CREATEROLE let deploy grant membership in any non-superuser role. PostgreSQL 16 requires ADMIN OPTION on the granted role, so the same plan loses its authority after an upgrade unless deploy holds orders_reader WITH ADMIN OPTION. A partial snapshot turns the disproved path into an unproven one that needs database preflight.',
+    relatedDocs: [
+      { href: '/docs/executor-privileges', label: 'Executor privileges' },
+      { href: '/docs/memberships', label: 'Memberships reference' },
+    ],
+    request: {
+      schema_version: schemaVersion,
+      current: { roles: { orders_reader: {}, reporting_app: { login: true } } },
+      desired_yaml: `roles:
+  - name: orders_reader
+  - name: reporting_app
+    login: true
+
+memberships:
+  - role: orders_reader
+    members:
+      - name: reporting_app
+`,
+      mode: 'authoritative',
+      pg_major_version: 16,
+      executor: executor('deploy', { createrole: 'allowed' }),
+    },
+    focusPhase: 'membership_add',
+    expected: {
+      changes: [{ kind: 'AddMember', role: 'orders_reader', member: 'reporting_app' }],
+      findings: [{ kind: 'required_role_unavailable', severity: 'error', phase: 'membership_add', role: 'orders_reader' }],
+      response: { pg_major_version: 16, authority_graph_complete: true },
+    },
+    cases: [
+      {
+        id: 'pg15',
+        title: 'PostgreSQL 15',
+        description: 'Before PostgreSQL 16, CREATEROLE alone authorizes granting a non-superuser role.',
+        requestOverrides: { pg_major_version: 15 },
+        expected: {
+          absentFindings: [{ kind: 'required_role_unavailable', role: 'orders_reader' }, { kind: 'required_role_reachability_unknown', role: 'orders_reader' }],
+          response: { pg_major_version: 15 },
+        },
+      },
+      {
+        id: 'partial-snapshot',
+        title: 'Partial snapshot',
+        description: 'When the snapshot may omit memberships, a missing ADMIN OPTION path is unproven rather than disproved.',
+        requestOverrides: { authority_graph_complete: false },
+        expected: {
+          findings: [{ kind: 'required_role_reachability_unknown', severity: 'warning', phase: 'membership_add', role: 'orders_reader' }],
+          absentFindings: [{ kind: 'required_role_unavailable', role: 'orders_reader' }],
+          response: { authority_graph_complete: false },
+        },
+      },
+      {
+        id: 'admin-option',
+        title: 'ADMIN OPTION granted',
+        description: 'deploy holds orders_reader WITH ADMIN OPTION, which authorizes the grant on PostgreSQL 16 and later.',
+        requestOverrides: { executor: executor('deploy', { createrole: 'allowed', memberships: [{ role: 'orders_reader', member: 'deploy', set_role: 'denied', inherit: 'denied', admin_option: 'allowed' }] }) },
+        expected: { absentFindings: [{ kind: 'required_role_unavailable', role: 'orders_reader' }, { kind: 'required_role_reachability_unknown', role: 'orders_reader' }] },
+      },
+    ],
   },
   {
     id: 'acme-profile-binding',
