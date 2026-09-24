@@ -16,8 +16,10 @@ maintainers:
     url: https://hardbyte.nz
 annotations:
   artifacthub.io/changes: |
+    - kind: fixed
+      description: 'Function and procedure grants are matched by input types, so a routine with named arguments no longer gets a grant and a revoke on every reconcile.'
     - kind: changed
-      description: 'Operator image 0.13.0. Reconciliation behaviour, CRDs, and chart values are unchanged from 0.12.0.'
+      description: 'A routine grant that PostgreSQL cannot resolve fails inspection with reason InvalidRoutineTarget instead of planning a grant that fails on apply. CRDs and chart values are unchanged from 0.12.0.'
   artifacthub.io/category: database
   artifacthub.io/operator: "true"
   artifacthub.io/prerelease: "false"
