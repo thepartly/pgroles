@@ -631,6 +631,28 @@ wait_for_pending_plan_ref() {
 
 # -- Operator health helpers --------------------------------------------------
 
+# Change the operator's environment, then wait until only pods of the new
+# template remain. `rollout status` returns once the new ReplicaSet is
+# available, but pods of the previous template can still be terminating, and a
+# terminating operator keeps reconciling until it exits. Without the wait, an
+# old pod can act on the next policy a scenario creates.
+set_operator_env() {
+  local namespace=pgroles-system
+  local replicas
+  kubectl -n "$namespace" set env deployment/pgroles-operator "$@" >/dev/null
+  kubectl -n "$namespace" rollout status deployment/pgroles-operator --timeout=120s
+  replicas="$(kubectl -n "$namespace" get deployment/pgroles-operator -o jsonpath='{.spec.replicas}')"
+  for _ in $(seq 1 60); do
+    if [ "$(kubectl -n "$namespace" get pods -l app.kubernetes.io/name=pgroles-operator -o json | jq '.items | length')" = "$replicas" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "::error::operator pods of a previous template were still running 120s after the rollout"
+  kubectl -n "$namespace" get pods -l app.kubernetes.io/name=pgroles-operator -o wide || true
+  return 1
+}
+
 active_operator_pod_json() {
   local namespace="${1:-pgroles-system}"
   kubectl -n "$namespace" get pods \
