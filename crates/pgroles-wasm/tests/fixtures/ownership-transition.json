@@ -1,10 +1,47 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": {
-    "roles": { "deployer": {}, "old_owner": {}, "new_owner": {} },
-    "schemas": { "app": { "owner": "old_owner" } }
+  "description": "A schema owner change makes the new owner the implicit grantor for privileges on the schema.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "old_owner": {},
+        "new_owner": {}
+      },
+      "schemas": {
+        "app": {
+          "owner": "old_owner"
+        }
+      }
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: old_owner\n  - name: new_owner\nschemas:\n  - name: app\n    owner: new_owner\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    }
   },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: old_owner\n  - name: new_owner\nschemas:\n  - name: app\n    owner: new_owner\n",
-  "mode": "authoritative",
-  "executor": { "role": "deployer", "superuser": false }
+  "expected": {
+    "changes": [
+      {
+        "kind": "AlterSchemaOwner",
+        "name": "app",
+        "owner": "new_owner"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "ownership_transfer_changes_grantor",
+        "severity": "info",
+        "phase": "alter",
+        "role": "new_owner",
+        "change_index": 0
+      },
+      {
+        "kind": "database_preflight_required",
+        "phase": "alter",
+        "change_index": 0
+      }
+    ]
+  }
 }

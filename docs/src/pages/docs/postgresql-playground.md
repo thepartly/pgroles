@@ -17,6 +17,6 @@ The playground is the core Acme course sandbox: durable ownership, capability ro
 
 The [grants](/docs/grants), [memberships](/docs/memberships), [default privileges](/docs/default-privileges), and [limitations](/docs/limitations) pages are the exhaustive reference. This course stays focused on the operational story that makes those mechanisms worth remembering.
 
-The playground runs real PostgreSQL interactions in your browser. It intentionally does not seed the separate tenant RLS scenario; use [Same table, different rows](/docs/postgresql-row-security) for that lesson. The explorer complements this sandbox by simulating an ordered pgroles plan from a sanitized snapshot; it does not replace live checks.
+The playground runs real PostgreSQL interactions in your browser. It intentionally does not seed the separate tenant RLS scenario; use [Same table, different rows](/docs/postgresql-row-security) for that lesson. The explorer complements this sandbox by simulating an ordered pgroles plan from a [snapshot you prepare and scrub](/docs/explorer-snapshots); it does not replace live checks.
 
 {% explorer-scenario scenario="acme-membership-bridge" /%}

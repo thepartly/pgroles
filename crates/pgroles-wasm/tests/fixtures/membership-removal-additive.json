@@ -1,10 +1,39 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": {
-    "roles": { "deployer": {}, "reader": {} },
-    "memberships": [{ "role": "reader", "member": "deployer", "inherit": true, "admin": false }]
+  "description": "Additive mode retains the undeclared membership, so the executor keeps its access.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {}
+      },
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "deployer",
+          "inherit": true,
+          "admin": false
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
+    "mode": "additive",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    }
   },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
-  "mode": "additive",
-  "executor": { "role": "deployer", "superuser": false }
+  "expected": {
+    "absentChanges": [
+      "RemoveMember"
+    ],
+    "absentFindings": [
+      {
+        "kind": "executor_loses_access"
+      },
+      {
+        "kind": "membership_disconnects_role"
+      }
+    ]
+  }
 }

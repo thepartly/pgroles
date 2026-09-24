@@ -1,10 +1,50 @@
 {
-  "schema_version": "pgroles.explorer.v1",
-  "current": {
-    "roles": { "deployer": {}, "reader": {} },
-    "memberships": [{ "role": "reader", "member": "deployer", "inherit": true, "admin": false }]
+  "description": "Adopt mode removes the undeclared inheriting membership, so the executor loses proven access.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "deployer": {},
+        "reader": {}
+      },
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "deployer",
+          "inherit": true,
+          "admin": false
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
+    "mode": "adopt",
+    "executor": {
+      "role": "deployer",
+      "superuser": false
+    }
   },
-  "desired_yaml": "roles:\n  - name: deployer\n  - name: reader\n",
-  "mode": "adopt",
-  "executor": { "role": "deployer", "superuser": false }
+  "expected": {
+    "changes": [
+      {
+        "kind": "RemoveMember",
+        "role": "reader",
+        "member": "deployer"
+      }
+    ],
+    "findings": [
+      {
+        "kind": "executor_loses_access",
+        "phase": "membership_remove",
+        "role": "reader"
+      }
+    ],
+    "phaseReachability": [
+      {
+        "phase": "membership_remove",
+        "role": "reader",
+        "authority": "usage",
+        "status": "unreachable"
+      }
+    ]
+  }
 }

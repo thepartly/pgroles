@@ -1,8 +1,8 @@
 {
-  "schema_version": "pgroles.review-artifact.v1",
+  "schema_version": "pgroles.review-artifact.v2",
   "provenance": {
     "tool_version": "0.12.0",
-    "captured_at": "2026-09-20T18:56:39.82503744Z",
+    "captured_at": "2026-09-23T05:50:54.435218547Z",
     "policy": {
       "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
     },
@@ -154,68 +154,54 @@
           0,
           1
         ],
-        "executor_reachability": [
-          {
-            "role": "review_app",
-            "status": "unknown"
-          },
-          {
-            "role": "review_app_reader",
-            "status": "unknown"
-          },
-          {
-            "role": "review_deployer",
-            "status": "reachable"
-          }
-        ],
-        "executor_usage": [
-          {
-            "role": "review_app",
-            "status": "unknown"
-          },
-          {
-            "role": "review_app_reader",
-            "status": "unknown"
-          },
-          {
-            "role": "review_deployer",
-            "status": "reachable"
-          }
-        ]
+        "executor_reachability_delta": {
+          "changed": [
+            {
+              "role": "review_app",
+              "status": "unknown"
+            },
+            {
+              "role": "review_app_reader",
+              "status": "unknown"
+            },
+            {
+              "role": "review_deployer",
+              "status": "reachable"
+            }
+          ],
+          "removed": []
+        },
+        "executor_usage_delta": {
+          "changed": [
+            {
+              "role": "review_app",
+              "status": "unknown"
+            },
+            {
+              "role": "review_app_reader",
+              "status": "unknown"
+            },
+            {
+              "role": "review_deployer",
+              "status": "reachable"
+            }
+          ],
+          "removed": []
+        }
       },
       {
         "phase": "membership_add",
         "change_indices": [
           2
         ],
-        "executor_reachability": [
-          {
-            "role": "review_app",
-            "status": "unknown"
-          },
-          {
-            "role": "review_app_reader",
-            "status": "unknown"
-          },
-          {
-            "role": "review_deployer",
-            "status": "reachable"
-          }
-        ],
-        "executor_usage": [
-          {
-            "role": "review_app",
-            "status": "unknown"
-          },
-          {
-            "role": "review_app_reader",
-            "status": "unknown"
-          },
-          {
-            "role": "review_deployer",
-            "status": "reachable"
-          }
-        ]
+        "executor_reachability_delta": {
+          "changed": [],
+          "removed": []
+        },
+        "executor_usage_delta": {
+          "changed": [],
+          "removed": []
+        }
       }
     ],
     "findings": [
@@ -224,14 +210,11 @@
         "severity": "warning",
         "phase": "create",
         "change_index": 0,
-        "message": "this operation requires database ownership or privilege preflight"
-      },
-      {
-        "kind": "database_preflight_required",
-        "severity": "warning",
-        "phase": "create",
-        "change_index": 1,
-        "message": "this operation requires database ownership or privilege preflight"
+        "change_indices": [
+          0,
+          1
+        ],
+        "message": "2 CreateRole operations require database ownership or privilege preflight"
       },
       {
         "kind": "required_role_reachability_unknown",
@@ -281,7 +264,7 @@
       "status": "available",
       "sql": "CREATE ROLE \"review_app\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nCREATE ROLE \"review_app_reader\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nGRANT \"review_app_reader\" TO \"review_app\" WITH INHERIT TRUE;"
     },
-    "review_fingerprint": "sha256:619cd735d954ee644c046e9bbac6b338bde8fc8d1d64cf98ec529f5a46489421"
+    "review_fingerprint": "sha256:6c4151d7c7d47e6eb9db844d6a46b0de3ff60469c675d69d25e5e32af3580299"
   },
   "exploration": {
     "status": "omitted",

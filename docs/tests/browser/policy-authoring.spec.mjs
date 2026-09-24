@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 
+import { expectNoHorizontalOverflow, touchProfiles } from './touch-profiles.mjs'
+
 test('validates and compiles without usable snapshot or executor facts', async ({ page, request }) => {
   const metadataResponse = await request.get('generated/manifest-metadata.json')
   expect(metadataResponse.ok()).toBe(true)
@@ -34,21 +36,39 @@ test('reports a structural field that is invalid in its semantic context', async
   await expect(authoring.getByRole('heading', { name: 'Compiled policy' })).toBeHidden()
 })
 
-test('keeps expanded policy readable on a narrow screen', async ({ page }) => {
-  await page.setViewportSize({ width: 360, height: 800 })
+test.describe('on a 360px touch screen', () => {
+  test.use(touchProfiles[0].use)
+
+  test('keeps expanded policy readable', async ({ page }, testInfo) => {
+    await page.goto('docs/explorer/')
+    await page.getByRole('button', { name: 'Inspect expansion' }).tap()
+    const authoring = page.getByRole('region', { name: 'Policy authoring' })
+    await authoring.getByText('Expanded policy and desired graph').tap()
+    await expect(authoring.locator('pre')).toBeVisible()
+    await expectNoHorizontalOverflow(page)
+    const screenshot = testInfo.outputPath('policy-authoring-360.png')
+    await authoring.screenshot({ path: screenshot })
+    await testInfo.attach('policy-authoring-360', { path: screenshot, contentType: 'image/png' })
+  })
+})
+
+test('reports a failed WASM download as a loading error and recovers on retry', async ({ page }) => {
+  let blocked = true
+  await page.route((url) => url.pathname.endsWith('/wasm/pgroles_wasm_bg.wasm'), (route) => (blocked ? route.fulfill({ status: 500, body: 'unavailable' }) : route.continue()))
   await page.goto('docs/explorer/')
-  await page.getByRole('button', { name: 'Inspect expansion' }).click()
+  await page.getByRole('button', { name: 'Validate policy' }).click()
   const authoring = page.getByRole('region', { name: 'Policy authoring' })
-  await authoring.getByText('Expanded policy and desired graph').click()
-  await expect(authoring.locator('pre')).toBeVisible()
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
-  await authoring.screenshot({ path: '/tmp/pgroles-policy-authoring-360.png' })
+  await expect(authoring.getByRole('alert')).toContainText('Could not load policy tools')
+  blocked = false
+  await page.getByRole('button', { name: 'Validate policy' }).click()
+  await expect(authoring).toContainText('Policy is valid.')
+  await expect(authoring.getByRole('alert')).toBeHidden()
 })
 
 test('discards validation when the policy changes while WASM is loading', async ({ page }) => {
   let releaseModule
   const moduleRequested = new Promise((resolve) => {
-    page.route('**/wasm/pgroles_wasm.js', async (route) => {
+    page.route((url) => url.pathname.endsWith('/wasm/pgroles_wasm.js'), async (route) => {
       await new Promise((release) => { releaseModule = release; resolve() })
       await route.continue()
     })

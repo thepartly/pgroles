@@ -15,8 +15,12 @@ import {
 } from '@tabler/icons-react'
 
 import {
+  DEFAULT_PG_MAJOR_VERSION,
+  PG_MAJOR_VERSION_CHOICES,
   analyzeRequest,
+  describeChange,
   explorerImport,
+  foldRecordedPhaseReachability,
   loadAnalyzer,
   readableWasmError,
   reviewArtifactImport,
@@ -27,6 +31,12 @@ import { explorerScenarios, getExplorerScenario } from '@/lib/explorerScenarios.
 import { PolicyAuthoring } from '@/components/PolicyAuthoring'
 
 const DEFAULT_SCENARIO = explorerScenarios[0]
+const ERROR_TITLES = {
+  import: 'Import failed',
+  load: 'Analyzer unavailable',
+  analysis: 'Analysis failed',
+}
+const VARIANT_OVERRIDES = ['executor', 'pg_major_version', 'authority_graph_complete']
 
 function humanize(value = '') {
   return value
@@ -35,10 +45,8 @@ function humanize(value = '') {
     .replace(/^./, (letter) => letter.toUpperCase())
 }
 
-function changeLabel(change) {
-  const [kind, detail] = Object.entries(change)[0] ?? ['Change', {}]
-  const subject = detail?.name ?? detail?.role ?? detail?.owner ?? detail?.from_role
-  return subject ? `${humanize(kind)} · ${subject}` : humanize(kind)
+function variantCases(scenario) {
+  return (scenario.cases ?? []).filter((scenarioCase) => VARIANT_OVERRIDES.some((key) => Object.hasOwn(scenarioCase.requestOverrides ?? {}, key)))
 }
 
 function PhaseTimeline({ phases, focusPhase }) {
@@ -56,8 +64,8 @@ function PhaseTimeline({ phases, focusPhase }) {
           </div>
           <ul className="mt-2 space-y-1 text-sm">
             {phase.changes.map((change, changeIndex) => (
-              <li key={changeIndex} className="rounded-md border bg-white px-3 py-2 font-mono text-xs dark:bg-stone-900">
-                {changeLabel(change)}
+              <li key={changeIndex} className="break-words rounded-md border bg-white px-3 py-2 font-mono text-xs dark:bg-stone-900">
+                {describeChange(change)}
               </li>
             ))}
           </ul>
@@ -80,7 +88,7 @@ function ReachabilityList({ label, values = [] }) {
       <p className="font-semibold text-muted-foreground">{label}</p>
       {values.length === 0 ? <p className="mt-1">No role paths</p> : (
         <ul className="mt-1 space-y-1">
-          {values.map((value) => <li key={value.role} className="flex justify-between gap-2"><span className="truncate font-mono">{value.role}</span><span className={value.status === 'reachable' ? 'text-teal-700 dark:text-teal-300' : value.status === 'unknown' ? 'text-amber-700 dark:text-amber-300' : 'text-red-700 dark:text-red-300'}>{humanize(value.status)}</span></li>)}
+          {values.map((value, index) => <li key={`${value.role}-${index}`} className="flex justify-between gap-2"><span className="truncate font-mono">{value.role}</span><span className={value.status === 'reachable' ? 'text-teal-700 dark:text-teal-300' : value.status === 'unknown' ? 'text-amber-700 dark:text-amber-300' : 'text-red-700 dark:text-red-300'}>{humanize(value.status)}</span></li>)}
         </ul>
       )}
     </div>
@@ -94,13 +102,17 @@ function FindingItem({ finding, changes }) {
     info: 'border-teal-300 bg-teal-50 text-teal-950 dark:border-teal-900 dark:bg-teal-950/30 dark:text-teal-100',
     warning: 'border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100',
   }
-  const change = finding.change_index == null ? null : changes[finding.change_index]
+  const indices = Array.isArray(finding.change_indices) && finding.change_indices.length > 0
+    ? finding.change_indices
+    : finding.change_index == null ? [] : [finding.change_index]
+  const change = indices.length > 0 ? changes[indices[0]] : null
+  const changeText = change ? `${describeChange(change)}${indices.length > 1 ? ` +${indices.length - 1} more` : ''}` : ''
   return (
     <li data-severity={severity} className={`flex min-w-0 gap-3 rounded-lg border p-3 text-sm ${tones[severity] ?? tones.warning}`}>
       <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
       <span className="min-w-0 break-words">
         <span className="mb-1 block text-xs font-semibold uppercase">{humanize(severity)}</span>
-        {(finding.phase || change) && <span className="mb-1 block text-xs font-semibold opacity-75">{finding.phase ? humanize(finding.phase) : 'Plan'}{change ? ` · ${changeLabel(change)}` : ''}</span>}
+        {(finding.phase || change) && <span className="mb-1 block text-xs font-semibold opacity-75">{finding.phase ? humanize(finding.phase) : 'Plan'}{changeText ? ` · ${changeText}` : ''}</span>}
         {finding.message}
       </span>
     </li>
@@ -196,23 +208,19 @@ function RoleAdjacency({ visual, onSelect, maxRows }) {
 function RecordedReview({ artifact, onSelectNode }) {
   const { provenance, context, preflight, recorded, exploration } = artifact
   const changes = new Map(recorded.changes.map((entry) => [entry.index, entry]))
-  const recordedChange = (entry) => ({ [entry.change.kind]: entry.change })
-  const recordedChangeLabel = (entry) => {
-    const subject = entry.change.name ?? entry.change.role ?? entry.change.owner ?? entry.change.from_role
-    return subject ? `${humanize(entry.change.kind)} · ${typeof subject === 'string' ? subject : JSON.stringify(subject)}` : humanize(entry.change.kind)
-  }
+  const phaseStates = useMemo(() => foldRecordedPhaseReachability(recorded.phases), [recorded.phases])
   return (
     <section aria-label="Recorded plan review" className="min-w-0 space-y-6 overflow-hidden rounded-2xl border-2 border-teal-600/40 bg-teal-50/30 p-5 dark:bg-teal-950/10">
       <div><p className="text-xs font-semibold tracking-wider text-teal-700 uppercase dark:text-teal-300">Recorded review</p><h2 className="mt-1 break-all font-display text-xl font-semibold">{provenance.target_label}</h2><p className="mt-2 break-words text-sm text-muted-foreground">Captured {provenance.captured_at} by pgroles {provenance.tool_version} against PostgreSQL {provenance.pg_major_version}. This is the exported plan as recorded; opening it does not inspect a database or recompute the plan.</p></div>
       <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4"><div className="min-w-0"><dt className="text-muted-foreground">Mode</dt><dd className="font-semibold">{humanize(context.mode)}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Inspector</dt><dd className="break-all font-mono">{context.inspector.role}{context.inspector.superuser != null ? ` · superuser ${context.inspector.superuser ? 'yes' : 'no'}` : ''}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Intended executor</dt><dd className="break-all font-mono">{context.intended_executor.role}{context.intended_executor.superuser != null ? ` · superuser ${context.intended_executor.superuser ? 'yes' : 'no'}` : ''}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Policy digest</dt><dd className="truncate font-mono" title={provenance.policy.content_digest}>{provenance.policy.content_digest}</dd>{provenance.policy.commit && <dd className="truncate font-mono text-xs text-muted-foreground">Commit {provenance.policy.commit}</dd>}</div></dl>
       {context.managed_scope && <details className="rounded-lg border bg-white/70 p-3 text-sm dark:bg-stone-900/70"><summary className="cursor-pointer font-semibold">Managed scope</summary><pre className="mt-3 overflow-auto text-xs">{JSON.stringify(context.managed_scope, null, 2)}</pre></details>}
       <div><h3 className="font-display text-lg font-semibold">Preflight evidence</h3><p className="mt-1 text-xs text-muted-foreground">Authority graph: {context.authority_graph_complete ? 'complete snapshot' : 'partial snapshot; absence is not proof of unavailable authority'}.</p><ul className="mt-2 grid gap-2 sm:grid-cols-3">{preflight.map((item, evidenceIndex) => <li key={`${item.check}-${item.actor_role ?? 'no-actor'}-${evidenceIndex}`} className="rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><span className="block text-xs text-muted-foreground">{humanize(item.check)}{item.actor_role ? ` · ${item.actor_role}` : ''}</span><strong>{humanize(item.status)}</strong>{item.issue_count > 0 && <span> · {item.issue_count} issue{item.issue_count === 1 ? '' : 's'}</span>}<p className="mt-1 text-xs text-muted-foreground">{humanize(item.coverage.kind)} coverage · {item.coverage.checked_change_indices.length} checked · {item.coverage.unchecked_change_indices.length} unchecked</p>{item.coverage.checks_performed.length > 0 && <p className="mt-1 text-xs text-muted-foreground">Checks: {item.coverage.checks_performed.map(humanize).join(', ')}</p>}{item.issues?.length > 0 && <ul className="mt-2 space-y-1 text-xs">{item.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><strong>{humanize(issue.code)}</strong>{issue.role ? ` · ${issue.role}` : ''}: {issue.message}</li>)}</ul>}</li>)}</ul></div>
-      <div className="min-w-0"><h3 className="font-display text-lg font-semibold">Recorded changes</h3><ol className="mt-2 min-w-0 space-y-2">{recorded.changes.map((entry) => <li key={entry.index} className="min-w-0 rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><span className="text-xs font-semibold uppercase text-muted-foreground">{humanize(entry.priority)} · change {entry.index + 1}</span>{entry.source && <span className="ml-2 break-all text-xs text-muted-foreground">{entry.source.document} · <code>{JSON.stringify(entry.source.managed_key)}</code></span>}<p className="mt-1 font-mono text-xs">{humanize(entry.change.kind)}</p><pre className="mt-2 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{JSON.stringify(entry.change, null, 2)}</pre>{entry.omissions?.map((omission) => <p key={omission.field} className="mt-1 text-xs text-amber-700 dark:text-amber-300">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}</li>)}</ol></div>
-      {recorded.findings.length > 0 && <div><h3 className="font-display text-lg font-semibold">Recorded findings</h3><ul className="mt-2 space-y-2">{recorded.findings.map((finding, index) => <FindingItem key={index} finding={finding} changes={recorded.changes.map(recordedChange)} />)}</ul></div>}
-      <div><h3 className="font-display text-lg font-semibold">Recorded phases</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reachability is the recorded conservative model for {context.intended_executor.role}, not a live preflight. Missing executor membership facts may produce unknown or unreachable results.</p><ol className="mt-2 space-y-3">{recorded.phases.map((phase) => <li key={phase.phase} className="rounded-lg border bg-white p-3 dark:bg-stone-900"><strong>{humanize(phase.phase)}</strong><ul className="mt-2 space-y-1 text-xs">{phase.change_indices.map((index) => <li key={index} className="font-mono">{changes.has(index) ? recordedChangeLabel(changes.get(index)) : `Change ${index + 1}`}</li>)}</ul><div className="mt-3 grid gap-2 sm:grid-cols-2"><ReachabilityList label="Inherited usage" values={phase.executor_usage}/><ReachabilityList label="SET ROLE" values={phase.executor_reachability}/></div></li>)}</ol></div>
+      <div className="min-w-0"><h3 className="font-display text-lg font-semibold">Recorded changes</h3><ol className="mt-2 min-w-0 space-y-2">{recorded.changes.map((entry) => <li key={entry.index} className="min-w-0 rounded-lg border bg-white p-3 text-sm dark:bg-stone-900"><span className="text-xs font-semibold uppercase text-muted-foreground">{humanize(entry.priority)} · change {entry.index + 1}</span>{entry.source && <span className="ml-2 break-all text-xs text-muted-foreground">{entry.source.document} · <code>{JSON.stringify(entry.source.managed_key)}</code></span>}<p className="mt-1 font-mono text-xs">{humanize(entry.change.kind)}</p><pre className="mt-2 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{JSON.stringify(entry.change, null, 2)}</pre>{entry.omissions?.map((omission, omissionIndex) => <p key={`${omission.field}-${omissionIndex}`} className="mt-1 text-xs text-amber-700 dark:text-amber-300">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}</li>)}</ol></div>
+      {recorded.findings.length > 0 && <div><h3 className="font-display text-lg font-semibold">Recorded findings</h3><ul className="mt-2 space-y-2">{recorded.findings.map((finding, index) => <FindingItem key={index} finding={finding} changes={recorded.changes.map((entry) => entry.change)} />)}</ul></div>}
+      <div><h3 className="font-display text-lg font-semibold">Recorded phases</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reachability is the recorded conservative model for {context.intended_executor.role}, not a live preflight. Missing executor membership facts may produce unknown or unreachable results.</p><ol className="mt-2 space-y-3">{recorded.phases.map((phase, phaseIndex) => <li key={`${phase.phase}-${phaseIndex}`} className="rounded-lg border bg-white p-3 dark:bg-stone-900"><strong>{humanize(phase.phase)}</strong><ul className="mt-2 space-y-1 text-xs">{phase.change_indices.map((index) => <li key={index} className="break-words font-mono">{changes.has(index) ? describeChange(changes.get(index).change) : `Change ${index + 1}`}</li>)}</ul><div className="mt-3 grid gap-2 sm:grid-cols-2"><ReachabilityList label="Inherited usage" values={phaseStates[phaseIndex].executor_usage}/><ReachabilityList label="SET ROLE" values={phaseStates[phaseIndex].executor_reachability}/></div></li>)}</ol></div>
       <div className="min-w-0"><h3 className="font-display text-lg font-semibold">SQL preview</h3>{recorded.sql_preview.status === 'available' ? <pre className="mt-2 max-h-96 w-full max-w-full overflow-auto rounded-lg bg-stone-950 p-4 text-xs leading-5 text-stone-100">{recorded.sql_preview.sql}</pre> : <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">SQL omitted: {humanize(recorded.sql_preview.reason)}. Sensitive changes: {recorded.sql_preview.sensitive_change_indices.join(', ') || 'not listed'}.</p>}</div>
       <div><h3 className="font-display text-lg font-semibold">Recorded resulting graph</h3><div className="mt-2"><RoleAdjacency visual={recorded.visual} onSelect={onSelectNode} maxRows={1024}/></div></div>
-      {recorded.omissions?.map((omission) => <p key={omission.field} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}
+      {recorded.omissions?.map((omission, omissionIndex) => <p key={`${omission.field}-${omissionIndex}`} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">{humanize(omission.field)} omitted: {humanize(omission.reason)}</p>)}
       <div className="rounded-lg bg-stone-200/60 p-3 text-xs leading-5 text-muted-foreground dark:bg-stone-800/60"><p>Review fingerprint: <code className="break-all">{recorded.review_fingerprint}</code>. This is a portable content fingerprint, not an approval token.</p><p className="mt-1">Provenance and fingerprint are displayed as recorded; this viewer does not authenticate the artifact.</p><p className="mt-1">Hypothetical variation unavailable: {humanize(exploration.reason)}.</p></div>
     </section>
   )
@@ -234,14 +242,18 @@ export function PgrolesExplorer() {
   const [snapshotName, setSnapshotName] = useState(initial.title)
   const [executorRole, setExecutorRole] = useState(initialExecutor.role)
   const [executorSuperuser, setExecutorSuperuser] = useState(initialExecutor.superuser)
+  const [executorCreaterole, setExecutorCreaterole] = useState(initialExecutor.createrole ?? 'unknown')
   const [executorMemberships, setExecutorMemberships] = useState(initialExecutor.memberships)
   const [newMembershipSetRole, setNewMembershipSetRole] = useState(initialExecutor.new_membership_set_role)
   const [newRoleSetRole, setNewRoleSetRole] = useState(initialExecutor.new_role_set_role)
   const [newRoleInherit, setNewRoleInherit] = useState(initialExecutor.new_role_inherit)
   const [newRoleAdminOption, setNewRoleAdminOption] = useState(initialExecutor.new_role_admin_option)
   const [mode, setMode] = useState(initial.request.mode)
+  const [pgMajorVersion, setPgMajorVersion] = useState(initial.request.pg_major_version ?? DEFAULT_PG_MAJOR_VERSION)
+  const [pgVersionFromSnapshot, setPgVersionFromSnapshot] = useState(false)
+  const [authorityGraphComplete, setAuthorityGraphComplete] = useState(initial.request.authority_graph_complete ?? true)
   const [result, setResult] = useState(null)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [showGraph, setShowGraph] = useState(false)
   const [selectedNode, setSelectedNode] = useState(null)
@@ -249,16 +261,42 @@ export function PgrolesExplorer() {
 
   const snapshotRoles = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot.roles) && snapshot.roles && typeof snapshot.roles === 'object' ? snapshot.roles : null
   const executorInSnapshot = snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, executorRole)
-  const effectiveExecutorSuperuser = executorInSnapshot ? snapshotRoles[executorRole]?.superuser === true : executorSuperuser
+  const snapshotExecutorSuperuser = executorInSnapshot && snapshotRoles[executorRole]?.superuser === true
+  // Mirrors the analyzer: a snapshot SUPERUSER cannot be asserted away, while an
+  // explicit superuser fact wins over a snapshot entry without the flag.
+  const effectiveExecutorSuperuser = snapshotExecutorSuperuser || executorSuperuser
+  const executorSuperuserOverridesSnapshot = executorInSnapshot && !snapshotExecutorSuperuser && executorSuperuser
   const findingsBySeverity = useMemo(() => result?.findings ?? [], [result])
   const errorCount = useMemo(() => findingsBySeverity.filter((finding) => finding.severity === 'error').length, [findingsBySeverity])
   const activeScenario = getExplorerScenario(activeScenarioId) ?? initial
+  const scenarioVariants = variantCases(activeScenario)
+  const pgVersionChoices = PG_MAJOR_VERSION_CHOICES.includes(pgMajorVersion) ? PG_MAJOR_VERSION_CHOICES : [...PG_MAJOR_VERSION_CHOICES, pgMajorVersion].sort((left, right) => left - right)
 
   function clearAnalysis() {
     analysisRun.current += 1
     setResult(null)
     setSelectedNode(null)
     setLoading(false)
+  }
+
+  // A superuser assertion made for another role does not carry over to a role
+  // the snapshot describes; the box can be ticked again to override the snapshot.
+  function editExecutorRole(role) {
+    setExecutorRole(role)
+    if (snapshotRoles !== null && Object.prototype.hasOwnProperty.call(snapshotRoles, role)) setExecutorSuperuser(false)
+    setActiveCaseId('custom')
+    clearAnalysis()
+  }
+
+  function applyExecutor(executor = {}) {
+    setExecutorRole(executor.role ?? '')
+    setExecutorSuperuser(Boolean(executor.superuser))
+    setExecutorCreaterole(executor.createrole ?? 'unknown')
+    setExecutorMemberships(executor.memberships ?? [])
+    setNewMembershipSetRole(executor.new_membership_set_role ?? 'unknown')
+    setNewRoleSetRole(executor.new_role_set_role ?? 'unknown')
+    setNewRoleInherit(executor.new_role_inherit ?? 'unknown')
+    setNewRoleAdminOption(executor.new_role_admin_option ?? 'unknown')
   }
 
   useEffect(() => {
@@ -268,26 +306,22 @@ export function PgrolesExplorer() {
     if (loadedScenario.current === queryKey) return
     loadedScenario.current = queryKey
     const scenario = getExplorerScenario(queryValue) ?? DEFAULT_SCENARIO
-    const requestExecutor = scenario.request.executor
     setScenarioNotice(queryValue && !getExplorerScenario(queryValue) ? `Unknown scenario “${queryValue}”. Showing ${DEFAULT_SCENARIO.title}.` : '')
     setActiveScenarioId(scenario.id)
     setActiveCaseId('')
     setDesiredYaml(scenario.request.desired_yaml)
     setSnapshot(scenario.request.current)
     setSnapshotName(scenario.title)
-    setExecutorRole(requestExecutor.role)
-    setExecutorSuperuser(requestExecutor.superuser)
-    setExecutorMemberships(requestExecutor.memberships ?? [])
-    setNewMembershipSetRole(requestExecutor.new_membership_set_role ?? 'unknown')
-    setNewRoleSetRole(requestExecutor.new_role_set_role ?? 'unknown')
-    setNewRoleInherit(requestExecutor.new_role_inherit ?? 'unknown')
-    setNewRoleAdminOption(requestExecutor.new_role_admin_option ?? 'unknown')
+    applyExecutor(scenario.request.executor)
     setMode(scenario.request.mode)
+    setPgMajorVersion(scenario.request.pg_major_version ?? DEFAULT_PG_MAJOR_VERSION)
+    setPgVersionFromSnapshot(false)
+    setAuthorityGraphComplete(scenario.request.authority_graph_complete ?? true)
     analysisRun.current += 1
     setResult(null)
     setSelectedNode(null)
     setLoading(false)
-    setError('')
+    setError(null)
   }, [router.isReady, router.query.scenario])
 
   function selectScenario(id) {
@@ -298,17 +332,14 @@ export function PgrolesExplorer() {
     setActiveCaseId(caseId)
     const scenarioCase = activeScenario.cases?.find((candidate) => candidate.id === caseId)
     const overrides = scenarioCase?.requestOverrides ?? {}
-    const caseExecutor = overrides.executor ?? activeScenario.request.executor
-    setMode(overrides.mode ?? activeScenario.request.mode)
-    setExecutorRole(caseExecutor.role)
-    setExecutorSuperuser(caseExecutor.superuser)
-    setExecutorMemberships(caseExecutor.memberships ?? [])
-    setNewMembershipSetRole(caseExecutor.new_membership_set_role ?? 'unknown')
-    setNewRoleSetRole(caseExecutor.new_role_set_role ?? 'unknown')
-    setNewRoleInherit(caseExecutor.new_role_inherit ?? 'unknown')
-    setNewRoleAdminOption(caseExecutor.new_role_admin_option ?? 'unknown')
+    const request = activeScenario.request
+    setMode(overrides.mode ?? request.mode)
+    applyExecutor(overrides.executor ?? request.executor)
+    setPgMajorVersion(overrides.pg_major_version ?? request.pg_major_version ?? DEFAULT_PG_MAJOR_VERSION)
+    setPgVersionFromSnapshot(false)
+    setAuthorityGraphComplete(overrides.authority_graph_complete ?? request.authority_graph_complete ?? true)
     clearAnalysis()
-    setError('')
+    setError(null)
   }
 
   async function importSnapshot(event) {
@@ -316,7 +347,7 @@ export function PgrolesExplorer() {
     if (!file) return
     clearAnalysis()
     const run = analysisRun.current
-    setError('')
+    setError(null)
     try {
       validateSnapshotFileSize(file.size)
       const parsed = explorerImport(JSON.parse(await file.text()))
@@ -324,16 +355,13 @@ export function PgrolesExplorer() {
       setSnapshot(parsed.current)
       setSnapshotName(file.name)
       setActiveCaseId('custom')
-      if (parsed.executor?.role) setExecutorRole(parsed.executor.role)
-      setExecutorSuperuser(Boolean(parsed.executor?.superuser))
-      setExecutorMemberships(parsed.executor?.memberships ?? [])
-      setNewMembershipSetRole(parsed.executor?.new_membership_set_role ?? 'unknown')
-      setNewRoleSetRole(parsed.executor?.new_role_set_role ?? 'unknown')
-      setNewRoleInherit(parsed.executor?.new_role_inherit ?? 'unknown')
-      setNewRoleAdminOption(parsed.executor?.new_role_admin_option ?? 'unknown')
+      applyExecutor({ ...parsed.executor, role: parsed.executor?.role || executorRole })
+      if (parsed.pgMajorVersion != null) setPgMajorVersion(parsed.pgMajorVersion)
+      setPgVersionFromSnapshot(parsed.pgMajorVersion != null)
+      setAuthorityGraphComplete(parsed.authorityGraphComplete ?? true)
     } catch (readError) {
       if (analysisRun.current === run) {
-        setError(`Could not read snapshot: ${readableWasmError(readError)}`)
+        setError({ kind: 'import', message: `Could not read snapshot: ${readableWasmError(readError)}` })
       }
     } finally {
       event.target.value = ''
@@ -346,13 +374,13 @@ export function PgrolesExplorer() {
     clearAnalysis()
     setReviewArtifact(null)
     const run = analysisRun.current
-    setError('')
+    setError(null)
     try {
       validateReviewArtifactFileSize(file.size)
       const artifact = reviewArtifactImport(JSON.parse(await file.text()))
       if (analysisRun.current === run) setReviewArtifact(artifact)
     } catch (readError) {
-      if (analysisRun.current === run) setError(`Could not read review artifact: ${readableWasmError(readError)}`)
+      if (analysisRun.current === run) setError({ kind: 'import', message: `Could not read review artifact: ${readableWasmError(readError)}` })
     } finally {
       event.target.value = ''
     }
@@ -361,21 +389,40 @@ export function PgrolesExplorer() {
   async function runAnalysis() {
     const run = ++analysisRun.current
     setLoading(true)
-    setError('')
+    setError(null)
+    let analyze
     try {
-      const analyze = await loadAnalyzer(router.basePath)
-      const request = analyzeRequest({ current: snapshot, desiredYaml, mode, executorRole, executorSuperuser: effectiveExecutorSuperuser, executorMemberships, newMembershipSetRole, newRoleSetRole, newRoleInherit, newRoleAdminOption })
-      const nextResult = analyze(request)
-      if (analysisRun.current === run) setResult(nextResult)
-    } catch (analysisError) {
+      analyze = await loadAnalyzer(router.basePath)
+    } catch (loadError) {
       if (analysisRun.current === run) {
         setResult(null)
-        setError(readableWasmError(analysisError))
+        setError({ kind: 'load', message: `Could not load the WASM analyzer: ${readableWasmError(loadError)}. Check your connection and try again.` })
+        setLoading(false)
       }
+      return
+    }
+    if (analysisRun.current !== run) return
+    try {
+      const request = analyzeRequest({
+        current: snapshot, desiredYaml, mode, pgMajorVersion, authorityGraphComplete,
+        executorRole, executorSuperuser: effectiveExecutorSuperuser, executorCreaterole, executorMemberships,
+        newMembershipSetRole, newRoleSetRole, newRoleInherit, newRoleAdminOption,
+      })
+      setResult(analyze(request))
+    } catch (analysisError) {
+      setResult(null)
+      setError({ kind: 'analysis', message: readableWasmError(analysisError) })
     } finally {
-      if (analysisRun.current === run) setLoading(false)
+      setLoading(false)
     }
   }
+
+  const errorAlert = error && (
+    <div role="alert" data-error-kind={error.kind} className="flex gap-3 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-100">
+      <IconAlertTriangle className="mt-0.5 size-5 shrink-0" />
+      <div className="min-w-0"><strong>{ERROR_TITLES[error.kind]}</strong><p className="mt-1 whitespace-pre-wrap break-words">{error.message}</p></div>
+    </div>
+  )
 
   if (reviewArtifact) {
     return (
@@ -400,7 +447,7 @@ export function PgrolesExplorer() {
 
       <section className="rounded-2xl border bg-white p-5 dark:bg-stone-900">
         <h2 className="font-display text-base font-semibold">Recorded plan review</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Open a sanitized <code>pgroles.review-artifact.v1</code> export locally. It is shown as recorded without loading the analyzer.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Open a sanitized <code>pgroles.review-artifact.v2</code> export locally. It is shown as recorded without loading the analyzer.</p>
         <input ref={reviewFileInput} aria-label="Recorded review file" type="file" accept="application/json,.json" onChange={importReview} className="sr-only" />
         <button type="button" onClick={() => reviewFileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Open recorded review</button>
       </section>
@@ -421,7 +468,7 @@ export function PgrolesExplorer() {
         <div className="overflow-hidden rounded-2xl border bg-white dark:bg-stone-900">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
             <div><h2 className="font-display text-base font-semibold">Desired YAML</h2><p className="text-xs text-muted-foreground">Validate, inspect expansion, then compare with the snapshot.</p></div>
-            <select aria-label="Load bundled scenario" value={activeScenarioId} onChange={(event) => selectScenario(event.target.value)} className="rounded-md border bg-transparent px-3 py-2 text-sm">{explorerScenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}</select>
+            <select aria-label="Load bundled scenario" value={activeScenarioId} onChange={(event) => selectScenario(event.target.value)} className="max-w-full rounded-md border bg-transparent px-3 py-2 text-sm">{explorerScenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}</select>
           </div>
           <textarea aria-label="Desired YAML" spellCheck="false" value={desiredYaml} onChange={(event) => { setDesiredYaml(event.target.value); clearAnalysis() }} className="min-h-[28rem] w-full resize-y bg-stone-950 p-4 font-mono text-[13px] leading-6 text-stone-100 outline-none" />
           <PolicyAuthoring desiredYaml={desiredYaml} basePath={router.basePath} />
@@ -431,26 +478,30 @@ export function PgrolesExplorer() {
           <section className="rounded-2xl border bg-white p-5 dark:bg-stone-900">
             <h2 className="font-display text-base font-semibold">Current snapshot</h2>
             <p className="mt-1 break-all text-sm text-muted-foreground">{snapshotName}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Authority graph: {authorityGraphComplete ? 'complete; a missing path proves no authority' : 'partial; missing paths are unknown'}</p>
             <input ref={fileInput} aria-label="Sanitized snapshot file" type="file" accept="application/json,.json" onChange={importSnapshot} className="sr-only" />
             <button type="button" onClick={() => fileInput.current?.click()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:bg-stone-50 dark:hover:bg-stone-800"><IconFileUpload className="size-4" /> Import sanitized JSON</button>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">No exporter produces this file yet. <Link href="/docs/explorer-snapshots" className="font-semibold text-amber-700 underline-offset-4 hover:underline dark:text-amber-300">Snapshot format and scrubbing</Link></p>
           </section>
           <section className="space-y-4 rounded-2xl border bg-white p-5 dark:bg-stone-900">
-            {activeScenario.cases?.some((scenarioCase) => scenarioCase.requestOverrides.executor) && (
+            {scenarioVariants.length > 0 && (
               <div>
                 <label className="block text-sm font-medium">
-                  Executor facts
-                  <select aria-label="Executor facts variant" value={activeCaseId} onChange={(event) => selectScenarioCase(event.target.value)} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm">
-                    <option value="">Scenario default: INHERIT unknown</option>
+                  Scenario variant
+                  <select aria-label="Scenario variant" value={activeCaseId} onChange={(event) => selectScenarioCase(event.target.value)} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm">
+                    <option value="">Scenario default</option>
                     <option value="custom" disabled>Custom / imported facts</option>
-                    {activeScenario.cases.filter((scenarioCase) => scenarioCase.requestOverrides.executor).map((scenarioCase) => <option key={scenarioCase.id} value={scenarioCase.id}>{scenarioCase.title ?? humanize(scenarioCase.id)}</option>)}
+                    {scenarioVariants.map((scenarioCase) => <option key={scenarioCase.id} value={scenarioCase.id}>{scenarioCase.title ?? humanize(scenarioCase.id)}</option>)}
                   </select>
                 </label>
                 {activeCaseId && activeCaseId !== 'custom' && <p className="mt-2 text-xs leading-5 text-muted-foreground">{activeScenario.cases.find((scenarioCase) => scenarioCase.id === activeCaseId)?.description}</p>}
               </div>
             )}
-            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => { setExecutorRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={executorInSnapshot} onChange={(event) => { setExecutorSuperuser(event.target.checked); setActiveCaseId('custom'); clearAnalysis() }} /> Executor is a superuser {executorInSnapshot && <span className="text-xs text-muted-foreground">From snapshot</span>}</label>
+            <label className="block text-sm font-medium">Executor role<input value={executorRole} onChange={(event) => editExecutorRole(event.target.value)} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm" /></label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={effectiveExecutorSuperuser} disabled={snapshotExecutorSuperuser} onChange={(event) => { setExecutorSuperuser(event.target.checked); setActiveCaseId('custom'); clearAnalysis() }} /> Executor is a superuser {snapshotExecutorSuperuser && <span className="text-xs text-muted-foreground">From snapshot</span>}{executorSuperuserOverridesSnapshot && <span className="text-xs text-muted-foreground">Overrides snapshot</span>}</label>
+            <label className="block text-sm font-medium">Executor CREATEROLE<select aria-label="Executor CREATEROLE" value={executorCreaterole} onChange={(event) => { setExecutorCreaterole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="unknown">Unknown (use the snapshot role)</option><option value="allowed">Allowed</option><option value="denied">Denied</option></select><span className="mt-1 block text-xs font-normal text-muted-foreground">Consulted for membership grants on PostgreSQL 15 and earlier.</span></label>
             <label className="block text-sm font-medium">New membership SET ROLE<select value={newMembershipSetRole} onChange={(event) => { setNewMembershipSetRole(event.target.value); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="allowed">Allowed (PostgreSQL 16+ default)</option><option value="denied">Denied</option><option value="unknown">Unknown</option></select></label>
+            <label className="block text-sm font-medium">PostgreSQL version<select aria-label="PostgreSQL major version" value={pgMajorVersion} onChange={(event) => { setPgMajorVersion(Number(event.target.value)); setPgVersionFromSnapshot(false); setActiveCaseId('custom'); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm">{pgVersionChoices.map((version) => <option key={version} value={version}>PostgreSQL {version}{version === DEFAULT_PG_MAJOR_VERSION ? ' (default)' : ''}</option>)}</select>{pgVersionFromSnapshot && <span className="mt-1 block text-xs font-normal text-muted-foreground">From snapshot</span>}</label>
             <label className="block text-sm font-medium">Reconciliation mode<select value={mode} onChange={(event) => { setMode(event.target.value); clearAnalysis() }} className="mt-1 block w-full rounded-md border bg-transparent px-3 py-2 text-sm"><option value="authoritative">Authoritative</option><option value="additive">Additive</option><option value="adopt">Adopt</option></select></label>
             <button type="button" onClick={runAnalysis} disabled={loading || !executorRole.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-3 font-semibold text-stone-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">
               {loading ? <IconLoader2 className="size-5 animate-spin" /> : <IconPlayerPlay className="size-5" />} {loading ? 'Loading analyzer…' : 'Analyze plan'}
@@ -460,12 +511,13 @@ export function PgrolesExplorer() {
         </div>
       </section>
 
-      {error && <div role="alert" className="flex gap-3 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-100"><IconAlertTriangle className="mt-0.5 size-5 shrink-0" /><div><strong>Analysis failed</strong><p className="mt-1 whitespace-pre-wrap">{error}</p></div></div>}
+      {errorAlert}
 
-      {result && <section aria-live="polite" className="space-y-6">
-        <div className="grid gap-4 sm:grid-cols-3">
+      {result && <section aria-live="polite" aria-label="Analysis results" className="space-y-6">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Changes</span><strong className="mt-1 block text-2xl">{result.changes.length}</strong></div>
           <div className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Findings</span><strong className="mt-1 block text-2xl">{result.findings.length}</strong>{errorCount > 0 && <span className="mt-1 block text-xs font-semibold text-red-700 dark:text-red-300">{errorCount} error{errorCount === 1 ? '' : 's'}</span>}</div>
+          <div data-testid="analysis-target" className="rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Analyzed for</span><strong className="mt-1 block text-2xl">{result.pg_major_version != null ? `PostgreSQL ${result.pg_major_version}` : 'PostgreSQL version not reported'}</strong>{result.authority_graph_complete != null && <span className="mt-1 block text-xs text-muted-foreground">{result.authority_graph_complete ? 'Complete authority graph' : 'Partial authority graph'}</span>}</div>
           <div className="min-w-0 rounded-xl border bg-white p-4 dark:bg-stone-900"><span className="text-xs text-muted-foreground">Illustrative plan fingerprint</span><code className="mt-1 block truncate text-sm" title={result.plan_fingerprint}>{result.plan_fingerprint}</code></div>
         </div>
         <p className="rounded-lg bg-stone-200/60 px-4 py-3 text-xs leading-5 text-muted-foreground dark:bg-stone-800/60">This fingerprint identifies the effects, mode, and executor facts supplied to this browser analysis. It is not an approval token and does not include verified target identity or the full execution context.</p>

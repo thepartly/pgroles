@@ -262,8 +262,14 @@ for (const outcome of ['success', 'failure', 'new query']) {
     if (outcome === 'new query') {
       await page.getByRole('searchbox').fill('review-out')
       release()
-      await expect(links).toHaveCount(3)
       await expect(links.first()).toContainText('Recorded reviews')
+      // The stale page of earlier results must not be appended to the new
+      // query's single page.
+      const status = page.getByRole('dialog').getByRole('status')
+      await expect(status).toHaveText(/^\d+ results$/)
+      const total = Number((await status.textContent()).split(' ')[0])
+      expect(total).toBeLessThan(10)
+      await expect(links).toHaveCount(total)
     } else {
       release()
       if (outcome === 'failure') {

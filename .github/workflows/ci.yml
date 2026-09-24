@@ -199,6 +199,8 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
 
       - name: Install active toolchain WASM target
         run: rustup target add wasm32-unknown-unknown
@@ -207,7 +209,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Verify generated manifest metadata
         run: scripts/check-manifest-metadata.sh
@@ -223,6 +225,14 @@ jobs:
 
       - name: Check explorer adapter
         run: cargo check -p pgroles-wasm --target wasm32-unknown-unknown
+
+      # Package-scoped, like the checks above: workspace feature unification
+      # would otherwise lint pgroles-core with its passwords feature enabled.
+      - name: Lint browser-safe core
+        run: cargo clippy -p pgroles-core --no-default-features --all-targets -- -D warnings
+
+      - name: Lint explorer adapter for WASM
+        run: cargo clippy -p pgroles-wasm --target wasm32-unknown-unknown -- -D warnings
 
       - name: Verify native and WASM fixture parity
         env:

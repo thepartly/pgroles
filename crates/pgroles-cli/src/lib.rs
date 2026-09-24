@@ -767,6 +767,36 @@ schemas:
         assert!(!validated.desired.memberships.is_empty());
     }
 
+    #[test]
+    fn validate_accepts_manifests_over_the_browser_byte_limit() {
+        use std::fmt::Write as _;
+
+        // At the role and grant entry bounds, and larger than the 1 MiB browser limit.
+        let comment = "c".repeat(250);
+        let mut yaml = String::from("roles:\n");
+        for index in 0..1024 {
+            writeln!(
+                yaml,
+                "  - name: app_role_{index:04}\n    login: true\n    comment: \"{comment}\""
+            )
+            .unwrap();
+        }
+        yaml.push_str("grants:\n");
+        for index in 0..4096 {
+            writeln!(
+                yaml,
+                "  - role: app_role_{:04}\n    privileges: [SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER]\n    object: {{ type: table, schema: app, name: table_with_a_descriptive_name_{index:05} }}",
+                index % 1024
+            )
+            .unwrap();
+        }
+        assert!(yaml.len() > pgroles_core::authoring::MAX_POLICY_YAML_BYTES);
+
+        let validated = validate_manifest(&yaml).expect("native validation has no byte limit");
+        assert_eq!(validated.desired.roles.len(), 1024);
+        assert_eq!(validated.desired.grants.len(), 4096);
+    }
+
     // -----------------------------------------------------------------------
     // compute_plan + format
     // -----------------------------------------------------------------------

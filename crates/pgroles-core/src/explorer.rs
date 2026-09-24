@@ -19,12 +19,19 @@ use crate::diff::{Change, ReconciliationMode, plan_changes};
 use crate::manifest::{ObjectType, Privilege};
 use crate::model::{
     DefaultPrivKey, DefaultPrivState, DefaultPrivilegeScope, GrantKey, GrantState, Grantee,
-    MembershipEdge, RoleGraph, RoleState, SchemaState,
+    MembershipEdge, RoleAttribute, RoleGraph, RoleState, SchemaState,
 };
 use crate::visual::{VisualGraph, VisualSource, build_visual_graph};
 
 pub const EXPLORER_SCHEMA_VERSION: &str = "pgroles.explorer.v1";
 pub const MAX_EXPLORER_YAML_BYTES: usize = 1024 * 1024;
+/// PostgreSQL major version whose authority rules apply when a request does
+/// not name one.
+pub const DEFAULT_PG_MAJOR_VERSION: u16 = 16;
+/// Oldest PostgreSQL major version the explorer models.
+pub const MIN_PG_MAJOR_VERSION: u16 = 12;
+/// Newest PostgreSQL major version the explorer accepts.
+pub const MAX_PG_MAJOR_VERSION: u16 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,11 +46,23 @@ pub struct AnalyzeRequest {
     )]
     pub mode: ReconciliationMode,
     pub executor: ExecutorFacts,
+    /// PostgreSQL major version whose authority rules apply. `None` means
+    /// [`DEFAULT_PG_MAJOR_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_major_version: Option<u16>,
+    /// Whether absence from the snapshot and executor facts proves absence in
+    /// PostgreSQL. `None` means `true`; pass `false` for a partial snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_graph_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalyzeResponse {
     pub schema_version: String,
+    /// Effective PostgreSQL major version used for authority rules.
+    pub pg_major_version: u16,
+    /// Effective authority-graph completeness used for the analysis.
+    pub authority_graph_complete: bool,
     pub changes: Vec<Change>,
     pub phases: Vec<PhaseAnalysis>,
     pub findings: Vec<AuthorityFinding>,
@@ -67,12 +86,17 @@ pub struct PlanAnalysisOptions {
     /// PostgreSQL. `true` treats the graph as authoritative; scoped native
     /// inspection must use `false`.
     pub authority_graph_complete: bool,
+    /// PostgreSQL major version whose membership-authority rules apply.
+    /// Before 16, CREATEROLE authorizes membership changes on non-superuser
+    /// roles; from 16, ADMIN OPTION is required.
+    pub pg_major_version: u16,
 }
 
 impl Default for PlanAnalysisOptions {
     fn default() -> Self {
         Self {
             authority_graph_complete: true,
+            pg_major_version: DEFAULT_PG_MAJOR_VERSION,
         }
     }
 }
@@ -216,8 +240,15 @@ pub enum SetRoleCapability {
 #[serde(deny_unknown_fields)]
 pub struct ExecutorFacts {
     pub role: String,
+    /// `true` wins over the snapshot; `false` defers to the snapshot's
+    /// `superuser` attribute for the executor role.
     #[serde(default)]
     pub superuser: bool,
+    /// Whether the executor holds CREATEROLE. `allowed` and `denied` win over
+    /// the snapshot; `unknown` defers to the snapshot's `createrole`
+    /// attribute for the executor role. Only consulted before PostgreSQL 16.
+    #[serde(default)]
+    pub createrole: SetRoleCapability,
     /// Authority facts may name executor roles outside the managed snapshot.
     #[serde(default)]
     pub memberships: Vec<ExecutorMembershipFact>,
@@ -247,7 +278,7 @@ pub struct ExecutorMembershipFact {
     pub admin_option: SetRoleCapability,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanPhase {
     Create,
@@ -299,6 +330,12 @@ pub enum FindingKind {
     MembershipDisconnectsRole,
     RoleBecomesReachable,
     DatabasePreflightRequired,
+    /// Membership in a SUPERUSER role can only be granted or revoked by a
+    /// superuser, in every PostgreSQL version.
+    SuperuserRequired,
+    /// A schema owner change makes the new owner the implicit grantor for
+    /// privileges on that schema.
+    OwnershipTransferChangesGrantor,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +349,11 @@ pub struct AuthorityFinding {
     pub change_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Every change an aggregated finding covers, in plan order. Only
+    /// aggregated findings (database preflight) populate it; `change_index`
+    /// then names the first of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub change_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -336,6 +378,10 @@ pub enum AnalysisError {
     },
     #[error("desired YAML has {actual} bytes, which exceeds the explorer limit of {limit}")]
     DesiredYamlTooLarge { actual: usize, limit: usize },
+    #[error(
+        "unsupported PostgreSQL major version {version}; the explorer models versions {min} through {max}"
+    )]
+    UnsupportedPgMajorVersion { version: u16, min: u16, max: u16 },
     #[error("could not serialize illustrative plan: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -347,6 +393,8 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
         ));
     }
     request.validate_bounds()?;
+    let pg_major_version = request.effective_pg_major_version()?;
+    let authority_graph_complete = request.authority_graph_complete.unwrap_or(true);
     let prepared = prepare_policy(&request.desired_yaml)?;
     if prepared
         .manifest
@@ -361,13 +409,23 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     let desired = prepared.desired;
     let graph = request.current.into_graph();
     let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
-    let analysis = analyze_changes(graph, &changes, &request.executor);
+    let analysis = analyze_changes_with_options(
+        graph,
+        &changes,
+        &request.executor,
+        PlanAnalysisOptions {
+            authority_graph_complete,
+            pg_major_version,
+        },
+    );
     let phases = analysis.phases;
     let findings = analysis.findings;
     let visual = analysis.visual;
     let fingerprint_bytes = serde_json::to_vec(&(
         EXPLORER_SCHEMA_VERSION,
         request.mode.to_string(),
+        pg_major_version,
+        authority_graph_complete,
         &request.executor,
         &changes,
         &phases,
@@ -379,6 +437,8 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     );
     Ok(AnalyzeResponse {
         schema_version: EXPLORER_SCHEMA_VERSION.into(),
+        pg_major_version,
+        authority_graph_complete,
         changes,
         phases,
         findings,
@@ -399,83 +459,80 @@ pub fn analyze_changes(
 }
 
 pub fn analyze_changes_with_options(
-    mut graph: RoleGraph,
+    graph: RoleGraph,
     changes: &[Change],
     executor: &ExecutorFacts,
     options: PlanAnalysisOptions,
 ) -> PlanAnalysis {
-    let mut set_role: BTreeMap<_, _> = executor
-        .memberships
-        .iter()
-        .map(|fact| ((fact.role.clone(), fact.member.clone()), fact.set_role))
-        .collect();
-    // Memberships imported without PG16 option facts are possible SET paths,
-    // but never proven ones. Explicit executor facts override this fallback.
-    for edge in &graph.memberships {
-        set_role
-            .entry((edge.role.clone(), edge.member.clone()))
-            .or_insert(SetRoleCapability::Unknown);
-    }
-    let mut usage: BTreeMap<_, _> = graph
-        .memberships
-        .iter()
-        .map(|edge| {
-            (
-                (edge.role.clone(), edge.member.clone()),
-                if edge.inherit {
-                    SetRoleCapability::Allowed
-                } else {
-                    SetRoleCapability::Denied
-                },
-            )
-        })
-        .collect();
-    for fact in &executor.memberships {
-        usage.insert((fact.role.clone(), fact.member.clone()), fact.inherit);
-    }
-    let mut admin_options: BTreeMap<_, _> = graph
-        .memberships
-        .iter()
-        .map(|edge| {
-            (
-                (edge.role.clone(), edge.member.clone()),
-                if edge.admin {
-                    SetRoleCapability::Allowed
-                } else {
-                    SetRoleCapability::Denied
-                },
-            )
-        })
-        .collect();
-    for fact in &executor.memberships {
-        admin_options.insert((fact.role.clone(), fact.member.clone()), fact.admin_option);
-    }
-    let mut phases = Vec::new();
-    let mut findings = Vec::new();
+    simulate(graph, changes, executor, options, Recompute::WhenAffected).0
+}
+
+/// Per-edge tri-state authority facts keyed by `(granted role, member)`.
+type EdgeFacts = BTreeMap<(String, String), SetRoleCapability>;
+
+/// When the simulation recomputes executor reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recompute {
+    /// Only after changes that can alter reachability (see
+    /// [`affects_reachability`]).
+    WhenAffected,
+    /// After every change; tests use it as the reference model.
+    #[cfg(test)]
+    Always,
+}
+
+/// Simulate the plan phase by phase. Returns the analysis and how many
+/// reachability computations it performed.
+fn simulate(
+    mut graph: RoleGraph,
+    changes: &[Change],
+    executor: &ExecutorFacts,
+    options: PlanAnalysisOptions,
+    recompute: Recompute,
+) -> (PlanAnalysis, usize) {
+    let complete = options.authority_graph_complete;
+    let (mut set_role, mut usage, mut admin_options) =
+        initial_edge_facts(&graph, executor, options.pg_major_version);
+    let mut attributes = ExecutorAttributes::initial(&graph, executor);
+    let mut computations = 2;
     let mut current_reachability = reachability(
         &graph,
         &set_role,
-        executor,
-        options.authority_graph_complete,
+        &executor.role,
+        attributes.superuser,
+        complete,
     );
-    let mut current_usage =
-        reachability(&graph, &usage, executor, options.authority_graph_complete);
+    let mut current_usage = reachability(
+        &graph,
+        &usage,
+        &executor.role,
+        attributes.superuser,
+        complete,
+    );
+    let mut phases = Vec::new();
+    let mut findings = Vec::new();
+    let mut preflight = PreflightIndex::new();
     let mut global_change_index = 0;
     for (phase, phase_changes) in grouped_phases(changes) {
         let phase_usage_before = current_usage.clone();
+        let mut dropped = BTreeSet::new();
         for change in &phase_changes {
             analyze_required_authority(
                 change,
                 phase,
                 global_change_index,
                 AuthorityState {
+                    graph: &graph,
                     set_reachable: &current_reachability,
                     usage_reachable: &current_usage,
                     admin_options: &admin_options,
-                    is_superuser: executor_is_superuser(&graph, executor),
-                    authority_graph_complete: options.authority_graph_complete,
+                    is_superuser: attributes.superuser,
+                    createrole: attributes.createrole,
+                    authority_graph_complete: complete,
+                    pg_major_version: options.pg_major_version,
                 },
                 &mut findings,
+                &mut preflight,
             );
             apply_change(
                 &mut graph,
@@ -483,57 +540,231 @@ pub fn analyze_changes_with_options(
                 &mut usage,
                 &mut admin_options,
                 executor,
+                options.pg_major_version,
                 change,
             );
-            current_reachability = reachability(
-                &graph,
-                &set_role,
-                executor,
-                options.authority_graph_complete,
-            );
-            current_usage =
-                reachability(&graph, &usage, executor, options.authority_graph_complete);
+            attributes.apply(change, executor);
+            if let Change::DropRole { name } = change {
+                dropped.insert(name.clone());
+            }
+            if recompute != Recompute::WhenAffected || affects_reachability(change) {
+                current_reachability = reachability(
+                    &graph,
+                    &set_role,
+                    &executor.role,
+                    attributes.superuser,
+                    complete,
+                );
+                current_usage = reachability(
+                    &graph,
+                    &usage,
+                    &executor.role,
+                    attributes.superuser,
+                    complete,
+                );
+                computations += 2;
+            }
             global_change_index += 1;
         }
-        let after = reachability(
-            &graph,
-            &set_role,
-            executor,
-            options.authority_graph_complete,
+        compare_reachability(
+            phase,
+            &phase_usage_before,
+            &current_usage,
+            &dropped,
+            complete,
+            &mut findings,
         );
-        let usage_after = reachability(&graph, &usage, executor, options.authority_graph_complete);
-        compare_reachability(phase, &phase_usage_before, &usage_after, &mut findings);
         phases.push(PhaseAnalysis {
             phase,
             changes: phase_changes,
-            executor_reachability: after
-                .iter()
-                .map(|(role, status)| RoleReachability {
-                    role: role.clone(),
-                    status: *status,
-                })
-                .collect(),
-            executor_usage: usage_after
-                .iter()
-                .map(|(role, status)| RoleReachability {
-                    role: role.clone(),
-                    status: *status,
-                })
-                .collect(),
+            executor_reachability: reachability_list(&current_reachability),
+            executor_usage: reachability_list(&current_usage),
         });
-        current_reachability = after;
-        current_usage = usage_after;
     }
+    finish_preflight_findings(&mut findings, &preflight);
     // `graph` is the simulated state after the mode-filtered plan. In additive
     // and adopt modes it can intentionally differ from raw desired state.
-    PlanAnalysis {
-        phases,
-        findings,
-        visual: build_visual_graph(&graph, VisualSource::Desired),
+    (
+        PlanAnalysis {
+            phases,
+            findings,
+            visual: build_visual_graph(&graph, VisualSource::Desired),
+        },
+        computations,
+    )
+}
+
+fn reachability_list(statuses: &BTreeMap<String, ReachabilityStatus>) -> Vec<RoleReachability> {
+    statuses
+        .iter()
+        .map(|(role, status)| RoleReachability {
+            role: role.clone(),
+            status: *status,
+        })
+        .collect()
+}
+
+fn capability(value: bool) -> SetRoleCapability {
+    if value {
+        SetRoleCapability::Allowed
+    } else {
+        SetRoleCapability::Denied
+    }
+}
+
+/// The SET ROLE fact of a membership edge that carries no per-edge option.
+/// Before PostgreSQL 16 there is no membership `SET` option, so membership
+/// itself proves SET ROLE authority; from 16 on, an edge without the option
+/// fact is a possible path but never a proven one.
+fn membership_set_role_default(pg_major_version: u16) -> SetRoleCapability {
+    if pg_major_version >= 16 {
+        SetRoleCapability::Unknown
+    } else {
+        SetRoleCapability::Allowed
+    }
+}
+
+/// Record `value` for `key` unless it is `Unknown` and something is already
+/// known: an explicit fact overrides snapshot evidence, but an omitted one
+/// never erases it.
+fn merge_fact(facts: &mut EdgeFacts, key: (String, String), value: SetRoleCapability) {
+    if value == SetRoleCapability::Unknown {
+        facts.entry(key).or_insert(SetRoleCapability::Unknown);
+    } else {
+        facts.insert(key, value);
+    }
+}
+
+/// Build SET ROLE, INHERIT, and ADMIN facts from the snapshot, then layer
+/// explicit executor facts over them.
+fn initial_edge_facts(
+    graph: &RoleGraph,
+    executor: &ExecutorFacts,
+    pg_major_version: u16,
+) -> (EdgeFacts, EdgeFacts, EdgeFacts) {
+    let mut set_role = EdgeFacts::new();
+    let mut usage = EdgeFacts::new();
+    let mut admin_options = EdgeFacts::new();
+    let default_set_role = membership_set_role_default(pg_major_version);
+    for edge in &graph.memberships {
+        let key = (edge.role.clone(), edge.member.clone());
+        // Snapshot memberships carry no PG16 SET option fact.
+        set_role.insert(key.clone(), default_set_role);
+        // Duplicate edges for one pair aggregate like inspection does: an
+        // option applies if any edge carries it.
+        let inherit = usage
+            .entry(key.clone())
+            .or_insert(SetRoleCapability::Denied);
+        if edge.inherit {
+            *inherit = SetRoleCapability::Allowed;
+        }
+        let admin = admin_options
+            .entry(key)
+            .or_insert(SetRoleCapability::Denied);
+        if edge.admin {
+            *admin = SetRoleCapability::Allowed;
+        }
+    }
+    for fact in &executor.memberships {
+        let key = (fact.role.clone(), fact.member.clone());
+        // A fact asserts that the membership exists, so a SET option left
+        // unknown resolves to what a membership proves on this version.
+        let set_role_fact = if fact.set_role == SetRoleCapability::Unknown {
+            default_set_role
+        } else {
+            fact.set_role
+        };
+        merge_fact(&mut set_role, key.clone(), set_role_fact);
+        merge_fact(&mut usage, key.clone(), fact.inherit);
+        merge_fact(&mut admin_options, key, fact.admin_option);
+    }
+    (set_role, usage, admin_options)
+}
+
+/// Executor role attributes as they evolve through the plan.
+#[derive(Debug, Clone, Copy)]
+struct ExecutorAttributes {
+    superuser: bool,
+    createrole: SetRoleCapability,
+}
+
+impl ExecutorAttributes {
+    /// Explicit executor facts win over the snapshot's attributes for the
+    /// executor role; omitted ones defer to it.
+    fn initial(graph: &RoleGraph, executor: &ExecutorFacts) -> Self {
+        let snapshot = graph.roles.get(&executor.role);
+        Self {
+            superuser: executor.superuser || snapshot.is_some_and(|role| role.superuser),
+            createrole: match executor.createrole {
+                SetRoleCapability::Unknown => snapshot.map_or(SetRoleCapability::Unknown, |role| {
+                    capability(role.createrole)
+                }),
+                explicit => explicit,
+            },
+        }
+    }
+
+    /// Apply the plan's own attribute changes to the executor role.
+    fn apply(&mut self, change: &Change, executor: &ExecutorFacts) {
+        if let Change::AlterRole { name, attributes } = change
+            && *name == executor.role
+        {
+            for attribute in attributes {
+                match attribute {
+                    RoleAttribute::Superuser(value) => self.superuser = *value,
+                    RoleAttribute::Createrole(value) => self.createrole = capability(*value),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Whether applying `change` can alter executor reachability. Reachability
+/// depends only on the role set, membership facts, and the executor's
+/// superuser attribute; grants, default privileges, ownership, comments,
+/// passwords, and session termination leave all three unchanged. INHERIT
+/// attribute changes are included conservatively.
+fn affects_reachability(change: &Change) -> bool {
+    match change {
+        Change::CreateRole { .. }
+        | Change::DropRole { .. }
+        | Change::AddMember { .. }
+        | Change::RemoveMember { .. } => true,
+        Change::AlterRole { attributes, .. } => attributes.iter().any(|attribute| {
+            matches!(
+                attribute,
+                RoleAttribute::Superuser(_) | RoleAttribute::Inherit(_)
+            )
+        }),
+        Change::CreateSchema { .. }
+        | Change::AlterSchemaOwner { .. }
+        | Change::EnsureSchemaOwnerPrivileges { .. }
+        | Change::SetComment { .. }
+        | Change::Grant { .. }
+        | Change::Revoke { .. }
+        | Change::SetDefaultPrivilege { .. }
+        | Change::RevokeDefaultPrivilege { .. }
+        | Change::ReassignOwned { .. }
+        | Change::DropOwned { .. }
+        | Change::TerminateSessions { .. }
+        | Change::SetPassword { .. } => false,
     }
 }
 
 impl AnalyzeRequest {
+    fn effective_pg_major_version(&self) -> Result<u16, AnalysisError> {
+        let version = self.pg_major_version.unwrap_or(DEFAULT_PG_MAJOR_VERSION);
+        if !(MIN_PG_MAJOR_VERSION..=MAX_PG_MAJOR_VERSION).contains(&version) {
+            return Err(AnalysisError::UnsupportedPgMajorVersion {
+                version,
+                min: MIN_PG_MAJOR_VERSION,
+                max: MAX_PG_MAJOR_VERSION,
+            });
+        }
+        Ok(version)
+    }
+
     fn validate_bounds(&self) -> Result<(), AnalysisError> {
         fn entries(
             collection: &'static str,
@@ -667,61 +898,73 @@ impl ExplorerSnapshot {
                 )
             })
             .collect();
-        let mut grant_entry_grantors = BTreeMap::new();
-        let grants = self
-            .grants
-            .into_iter()
-            .map(|grant| {
-                let key = GrantKey {
-                    role: Grantee::parse(&grant.role),
-                    object_type: grant.object_type,
-                    schema: grant.schema,
-                    name: grant.name,
-                };
-                if !grant.grantors.is_empty() {
-                    grant_entry_grantors.insert(key.clone(), grant.grantors);
+        // Duplicate entries for one target merge the way inspection
+        // aggregates live catalog rows: privileges and grantors union, and a
+        // membership option applies if any entry carries it.
+        let mut grant_entry_grantors: BTreeMap<GrantKey, BTreeMap<String, BTreeSet<Privilege>>> =
+            BTreeMap::new();
+        let mut grants: BTreeMap<GrantKey, GrantState> = BTreeMap::new();
+        for grant in self.grants {
+            let key = GrantKey {
+                role: Grantee::parse(&grant.role),
+                object_type: grant.object_type,
+                schema: grant.schema,
+                name: grant.name,
+            };
+            if !grant.grantors.is_empty() {
+                let entry = grant_entry_grantors.entry(key.clone()).or_default();
+                for (grantor, privileges) in grant.grantors {
+                    entry.entry(grantor).or_default().extend(privileges);
                 }
-                (
-                    key,
-                    GrantState {
-                        privileges: grant.privileges,
-                    },
-                )
-            })
-            .collect();
-        let default_privileges = self
-            .default_privileges
-            .into_iter()
-            .map(|item| {
-                (
-                    DefaultPrivKey {
-                        owner: item.owner,
-                        scope: item.schema.map_or(DefaultPrivilegeScope::Global, |schema| {
-                            DefaultPrivilegeScope::Schema { schema }
-                        }),
-                        on_type: item.on_type,
-                        grantee: Grantee::parse(&item.grantee),
-                    },
-                    DefaultPrivState {
-                        privileges: item.privileges,
-                    },
-                )
-            })
-            .collect();
-        let mut memberships = BTreeSet::new();
-        let mut membership_edge_grantors = BTreeMap::new();
+            }
+            grants
+                .entry(key)
+                .or_insert_with(|| GrantState {
+                    privileges: BTreeSet::new(),
+                })
+                .privileges
+                .extend(grant.privileges);
+        }
+        let mut default_privileges: BTreeMap<DefaultPrivKey, DefaultPrivState> = BTreeMap::new();
+        for item in self.default_privileges {
+            default_privileges
+                .entry(DefaultPrivKey {
+                    owner: item.owner,
+                    scope: item.schema.map_or(DefaultPrivilegeScope::Global, |schema| {
+                        DefaultPrivilegeScope::Schema { schema }
+                    }),
+                    on_type: item.on_type,
+                    grantee: Grantee::parse(&item.grantee),
+                })
+                .or_insert_with(|| DefaultPrivState {
+                    privileges: BTreeSet::new(),
+                })
+                .privileges
+                .extend(item.privileges);
+        }
+        let mut effective_memberships: BTreeMap<(String, String), MembershipEdge> = BTreeMap::new();
+        let mut membership_edge_grantors: BTreeMap<(String, String), BTreeSet<String>> =
+            BTreeMap::new();
         for item in self.memberships {
+            let key = (item.role.clone(), item.member.clone());
+            let edge = effective_memberships
+                .entry(key.clone())
+                .or_insert_with(|| MembershipEdge {
+                    role: item.role,
+                    member: item.member,
+                    inherit: false,
+                    admin: false,
+                });
+            edge.inherit |= item.inherit;
+            edge.admin |= item.admin;
             if !item.grantors.is_empty() {
                 membership_edge_grantors
-                    .insert((item.role.clone(), item.member.clone()), item.grantors);
+                    .entry(key)
+                    .or_default()
+                    .extend(item.grantors);
             }
-            memberships.insert(MembershipEdge {
-                role: item.role,
-                member: item.member,
-                inherit: item.inherit,
-                admin: item.admin,
-            });
         }
+        let memberships: BTreeSet<_> = effective_memberships.into_values().collect();
         let inherent_grants = self
             .inherent_grants
             .into_iter()
@@ -783,67 +1026,51 @@ fn phase_for(change: &Change) -> PlanPhase {
 
 fn reachability(
     graph: &RoleGraph,
-    facts: &BTreeMap<(String, String), SetRoleCapability>,
-    executor: &ExecutorFacts,
+    facts: &EdgeFacts,
+    executor_role: &str,
+    executor_superuser: bool,
     authority_graph_complete: bool,
 ) -> BTreeMap<String, ReachabilityStatus> {
-    if executor_is_superuser(graph, executor) {
-        return graph
-            .roles
-            .keys()
-            .cloned()
-            .chain(
-                facts
-                    .keys()
-                    .flat_map(|(role, member)| [role.clone(), member.clone()]),
-            )
-            .chain([executor.role.clone()])
-            .map(|role| (role, ReachabilityStatus::Reachable))
+    let mut all_roles: BTreeSet<&str> = graph.roles.keys().map(String::as_str).collect();
+    all_roles.insert(executor_role);
+    // Index edges by member once so each traversal is linear in the facts.
+    let mut granted_to: BTreeMap<&str, Vec<(&str, SetRoleCapability)>> = BTreeMap::new();
+    for ((role, member), capability) in facts {
+        all_roles.insert(role);
+        all_roles.insert(member);
+        granted_to
+            .entry(member.as_str())
+            .or_default()
+            .push((role.as_str(), *capability));
+    }
+    if executor_superuser {
+        return all_roles
+            .into_iter()
+            .map(|role| (role.to_owned(), ReachabilityStatus::Reachable))
             .collect();
     }
-    let mut definite = BTreeSet::from([executor.role.clone()]);
-    let mut possible = definite.clone();
-    let mut queue = VecDeque::from([executor.role.clone()]);
-    while let Some(member) = queue.pop_front() {
-        for ((role, _), capability) in facts
-            .iter()
-            .filter(|((_, edge_member), _)| edge_member == &member)
-        {
-            if *capability == SetRoleCapability::Allowed && definite.insert(role.clone()) {
-                queue.push_back(role.clone());
+    let traverse = |follow: fn(SetRoleCapability) -> bool| {
+        let mut seen = BTreeSet::from([executor_role]);
+        let mut queue = VecDeque::from([executor_role]);
+        while let Some(member) = queue.pop_front() {
+            for (role, capability) in granted_to.get(member).into_iter().flatten() {
+                if follow(*capability) && seen.insert(role) {
+                    queue.push_back(role);
+                }
             }
         }
-    }
-    let mut queue = VecDeque::from_iter(possible.iter().cloned());
-    while let Some(member) = queue.pop_front() {
-        for ((role, _), capability) in facts
-            .iter()
-            .filter(|((_, edge_member), _)| edge_member == &member)
-        {
-            if *capability != SetRoleCapability::Denied && possible.insert(role.clone()) {
-                queue.push_back(role.clone());
-            }
-        }
-    }
-    let all_roles: BTreeSet<_> = graph
-        .roles
-        .keys()
-        .cloned()
-        .chain(
-            facts
-                .keys()
-                .flat_map(|(role, member)| [role.clone(), member.clone()]),
-        )
-        .chain([executor.role.clone()])
-        .collect();
+        seen
+    };
+    let definite = traverse(|capability| capability == SetRoleCapability::Allowed);
+    let possible = traverse(|capability| capability != SetRoleCapability::Denied);
     all_roles
         .into_iter()
         .map(|role| {
             (
-                role.clone(),
-                if definite.contains(&role) {
+                role.to_owned(),
+                if definite.contains(role) {
                     ReachabilityStatus::Reachable
-                } else if possible.contains(&role) || !authority_graph_complete {
+                } else if possible.contains(role) || !authority_graph_complete {
                     ReachabilityStatus::Unknown
                 } else {
                     ReachabilityStatus::Unreachable
@@ -853,30 +1080,29 @@ fn reachability(
         .collect()
 }
 
-fn executor_is_superuser(graph: &RoleGraph, executor: &ExecutorFacts) -> bool {
-    graph
-        .roles
-        .get(&executor.role)
-        .map(|role| role.superuser)
-        .unwrap_or(executor.superuser)
-}
-
 fn compare_reachability(
     phase: PlanPhase,
     before: &BTreeMap<String, ReachabilityStatus>,
     after: &BTreeMap<String, ReachabilityStatus>,
+    dropped: &BTreeSet<String>,
+    authority_graph_complete: bool,
     findings: &mut Vec<AuthorityFinding>,
 ) {
+    // A role missing from a map has no recorded path at all; that disproves
+    // a path only when the authority graph is complete.
+    let unseen = if authority_graph_complete {
+        ReachabilityStatus::Unreachable
+    } else {
+        ReachabilityStatus::Unknown
+    };
     let roles: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
     for role in roles {
-        let after_status = after
-            .get(&role)
-            .copied()
-            .unwrap_or(ReachabilityStatus::Unreachable);
-        let before_status = before
-            .get(&role)
-            .copied()
-            .unwrap_or(ReachabilityStatus::Unreachable);
+        // Dropping a role is not a loss of access to it.
+        if dropped.contains(&role) && !after.contains_key(&role) {
+            continue;
+        }
+        let after_status = after.get(&role).copied().unwrap_or(unseen);
+        let before_status = before.get(&role).copied().unwrap_or(unseen);
         let (kind, severity, verb) = match (before_status, after_status) {
             (
                 ReachabilityStatus::Reachable,
@@ -908,17 +1134,101 @@ fn compare_reachability(
             phase: Some(phase),
             change_index: None,
             role: Some(role),
+            change_indices: Vec::new(),
         });
     }
 }
 
 struct AuthorityState<'a> {
+    graph: &'a RoleGraph,
     set_reachable: &'a BTreeMap<String, ReachabilityStatus>,
     usage_reachable: &'a BTreeMap<String, ReachabilityStatus>,
-    admin_options: &'a BTreeMap<(String, String), SetRoleCapability>,
+    admin_options: &'a EdgeFacts,
     is_superuser: bool,
+    createrole: SetRoleCapability,
     authority_graph_complete: bool,
+    pg_major_version: u16,
 }
+
+impl AuthorityState<'_> {
+    /// Status for a role with no recorded path.
+    fn unseen(&self) -> ReachabilityStatus {
+        if self.authority_graph_complete {
+            ReachabilityStatus::Unreachable
+        } else {
+            ReachabilityStatus::Unknown
+        }
+    }
+
+    /// Whether the executor holds ADMIN OPTION on `role`, directly or through
+    /// a role whose privileges it inherits.
+    fn admin_option(&self, role: &str) -> ReachabilityStatus {
+        self.admin_options
+            .range((role.to_owned(), String::new())..)
+            .take_while(|((granted_role, _), _)| granted_role == role)
+            .map(|((_, member), admin)| {
+                (
+                    self.usage_reachable
+                        .get(member)
+                        .copied()
+                        .unwrap_or(self.unseen()),
+                    *admin,
+                )
+            })
+            .fold(self.unseen(), |best, (member, admin)| {
+                match (member, admin) {
+                    (ReachabilityStatus::Reachable, SetRoleCapability::Allowed) => {
+                        ReachabilityStatus::Reachable
+                    }
+                    (
+                        ReachabilityStatus::Reachable | ReachabilityStatus::Unknown,
+                        SetRoleCapability::Unknown | SetRoleCapability::Allowed,
+                    ) if best != ReachabilityStatus::Reachable => ReachabilityStatus::Unknown,
+                    _ => best,
+                }
+            })
+    }
+
+    /// Authority to grant or revoke membership in a non-superuser role.
+    /// Before PostgreSQL 16, CREATEROLE suffices; from 16, only ADMIN OPTION
+    /// does.
+    fn membership_authority(&self, role: &str) -> ReachabilityStatus {
+        let admin = self.admin_option(role);
+        if self.pg_major_version >= 16 {
+            return admin;
+        }
+        match self.createrole {
+            SetRoleCapability::Allowed => ReachabilityStatus::Reachable,
+            SetRoleCapability::Unknown if admin != ReachabilityStatus::Reachable => {
+                ReachabilityStatus::Unknown
+            }
+            _ => admin,
+        }
+    }
+}
+
+fn authority_finding(
+    kind: FindingKind,
+    severity: FindingSeverity,
+    message: String,
+    phase: PlanPhase,
+    index: usize,
+    role: Option<String>,
+) -> AuthorityFinding {
+    AuthorityFinding {
+        kind,
+        severity,
+        message,
+        phase: Some(phase),
+        change_index: Some(index),
+        role,
+        change_indices: Vec::new(),
+    }
+}
+
+/// Aggregated preflight findings keyed by `(phase, change kind)`, pointing at
+/// their position in the findings list.
+type PreflightIndex = BTreeMap<(PlanPhase, &'static str), usize>;
 
 fn analyze_required_authority(
     change: &Change,
@@ -926,6 +1236,7 @@ fn analyze_required_authority(
     index: usize,
     authority: AuthorityState<'_>,
     findings: &mut Vec<AuthorityFinding>,
+    preflight: &mut PreflightIndex,
 ) {
     let required = match change {
         Change::SetDefaultPrivilege { owner, .. }
@@ -945,15 +1256,10 @@ fn analyze_required_authority(
     if !authority.is_superuser
         && let Some((role, reachability, authority_name)) = required
     {
-        let status =
-            reachability
-                .get(role)
-                .copied()
-                .unwrap_or(if authority.authority_graph_complete {
-                    ReachabilityStatus::Unreachable
-                } else {
-                    ReachabilityStatus::Unknown
-                });
+        let status = reachability
+            .get(role)
+            .copied()
+            .unwrap_or(authority.unseen());
         if status != ReachabilityStatus::Reachable {
             let (kind, severity, qualifier) = if status == ReachabilityStatus::Unknown {
                 (
@@ -968,19 +1274,37 @@ fn analyze_required_authority(
                     "is unavailable",
                 )
             };
-            findings.push(AuthorityFinding {
+            findings.push(authority_finding(
                 kind,
                 severity,
-                message: format!(
+                format!(
                     "required {authority_name} authority for grantor or owner role {role} {qualifier} for this operation"
                 ),
-                phase: Some(phase),
-                change_index: Some(index),
-                role: Some(role.clone()),
-            });
+                phase,
+                index,
+                Some(role.clone()),
+            ));
         }
     }
     if !authority.is_superuser
+        && let Change::AddMember { role, .. } | Change::RemoveMember { role, .. } = change
+        && authority
+            .graph
+            .roles
+            .get(role)
+            .is_some_and(|state| state.superuser)
+    {
+        findings.push(authority_finding(
+            FindingKind::SuperuserRequired,
+            FindingSeverity::Error,
+            format!(
+                "membership in superuser role {role} can only be granted or revoked by a superuser executor"
+            ),
+            phase,
+            index,
+            Some(role.clone()),
+        ));
+    } else if !authority.is_superuser
         && let Change::AddMember { role, .. }
         | Change::RemoveMember {
             role,
@@ -988,51 +1312,60 @@ fn analyze_required_authority(
             ..
         } = change
     {
-        let admin_status = authority
-            .admin_options
-            .iter()
-            .filter(|((granted_role, _), _)| granted_role == role)
-            .map(|((_, member), admin)| {
-                (
-                    authority.usage_reachable.get(member).copied().unwrap_or(
-                        if authority.authority_graph_complete {
-                            ReachabilityStatus::Unreachable
-                        } else {
-                            ReachabilityStatus::Unknown
-                        },
-                    ),
-                    *admin,
-                )
-            })
-            .fold(
-                if authority.authority_graph_complete {
-                    ReachabilityStatus::Unreachable
-                } else {
-                    ReachabilityStatus::Unknown
-                },
-                |best, (member, admin)| match (member, admin) {
-                    (ReachabilityStatus::Reachable, SetRoleCapability::Allowed) => {
-                        ReachabilityStatus::Reachable
-                    }
-                    (
-                        ReachabilityStatus::Reachable | ReachabilityStatus::Unknown,
-                        SetRoleCapability::Unknown | SetRoleCapability::Allowed,
-                    ) if best != ReachabilityStatus::Reachable => ReachabilityStatus::Unknown,
-                    _ => best,
-                },
-            );
-        if admin_status != ReachabilityStatus::Reachable {
-            findings.push(AuthorityFinding {
-                kind: FindingKind::RequiredRoleReachabilityUnknown,
-                severity: FindingSeverity::Warning,
-                message: format!(
-                    "ADMIN OPTION for role {role} is not proven; database preflight is required"
+        let required = if authority.pg_major_version >= 16 {
+            "ADMIN OPTION"
+        } else {
+            "CREATEROLE or ADMIN OPTION"
+        };
+        match authority.membership_authority(role) {
+            ReachabilityStatus::Reachable => {}
+            ReachabilityStatus::Unknown => findings.push(authority_finding(
+                FindingKind::RequiredRoleReachabilityUnknown,
+                FindingSeverity::Warning,
+                format!(
+                    "{required} for role {role} is not proven; database preflight is required"
                 ),
-                phase: Some(phase),
-                change_index: Some(index),
-                role: Some(role.clone()),
-            });
+                phase,
+                index,
+                Some(role.clone()),
+            )),
+            ReachabilityStatus::Unreachable => findings.push(authority_finding(
+                FindingKind::RequiredRoleUnavailable,
+                FindingSeverity::Error,
+                if authority.pg_major_version >= 16 {
+                    format!(
+                        "ADMIN OPTION for role {role} is unavailable; PostgreSQL 16 and later require it to change membership, and CREATEROLE alone is not sufficient"
+                    )
+                } else {
+                    format!("CREATEROLE or ADMIN OPTION for role {role} is unavailable")
+                },
+                phase,
+                index,
+                Some(role.clone()),
+            )),
         }
+    }
+    if let Change::AlterSchemaOwner { name, owner } = change {
+        let previous = authority
+            .graph
+            .schemas
+            .get(name)
+            .and_then(|schema| schema.owner.as_deref());
+        let from = previous.map_or_else(
+            || "an owner outside the snapshot".to_string(),
+            |previous| format!("role {previous}"),
+        );
+        findings.push(authority_finding(
+            FindingKind::OwnershipTransferChangesGrantor,
+            FindingSeverity::Info,
+            format!(
+                "schema {name} ownership moves from {from} to role {owner}; {owner} becomes the implicit grantor for privileges on schema {name}, including entries {} granted",
+                previous.unwrap_or("the previous owner")
+            ),
+            phase,
+            index,
+            Some(owner.clone()),
+        ));
     }
     if matches!(
         change,
@@ -1042,6 +1375,7 @@ fn analyze_required_authority(
             | Change::CreateSchema { .. }
             | Change::AlterRole { .. }
             | Change::SetComment { .. }
+            | Change::SetPassword { .. }
             | Change::AlterSchemaOwner { .. }
             | Change::EnsureSchemaOwnerPrivileges { .. }
             | Change::ReassignOwned { .. }
@@ -1049,14 +1383,63 @@ fn analyze_required_authority(
             | Change::TerminateSessions { .. }
             | Change::DropRole { .. }
     ) {
-        findings.push(AuthorityFinding {
-            kind: FindingKind::DatabasePreflightRequired,
-            severity: FindingSeverity::Warning,
-            message: "this operation requires database ownership or privilege preflight".into(),
-            phase: Some(phase),
-            change_index: Some(index),
-            role: None,
-        });
+        let key = (phase, change_kind(change));
+        if let Some(&position) = preflight.get(&key) {
+            findings[position].change_indices.push(index);
+        } else {
+            preflight.insert(key, findings.len());
+            findings.push(AuthorityFinding {
+                change_indices: vec![index],
+                ..authority_finding(
+                    FindingKind::DatabasePreflightRequired,
+                    FindingSeverity::Warning,
+                    String::new(),
+                    phase,
+                    index,
+                    None,
+                )
+            });
+        }
+    }
+}
+
+/// Word the aggregated preflight findings once every change is counted.
+fn finish_preflight_findings(findings: &mut [AuthorityFinding], preflight: &PreflightIndex) {
+    for (&(_, kind), &position) in preflight {
+        let finding = &mut findings[position];
+        finding.message = match finding.change_indices.len() {
+            1 => {
+                format!("this {kind} operation requires database ownership or privilege preflight")
+            }
+            count => {
+                format!(
+                    "{count} {kind} operations require database ownership or privilege preflight"
+                )
+            }
+        };
+    }
+}
+
+/// The change's variant name, as it appears in serialized plans.
+fn change_kind(change: &Change) -> &'static str {
+    match change {
+        Change::CreateRole { .. } => "CreateRole",
+        Change::CreateSchema { .. } => "CreateSchema",
+        Change::AlterSchemaOwner { .. } => "AlterSchemaOwner",
+        Change::EnsureSchemaOwnerPrivileges { .. } => "EnsureSchemaOwnerPrivileges",
+        Change::AlterRole { .. } => "AlterRole",
+        Change::SetComment { .. } => "SetComment",
+        Change::Grant { .. } => "Grant",
+        Change::Revoke { .. } => "Revoke",
+        Change::SetDefaultPrivilege { .. } => "SetDefaultPrivilege",
+        Change::RevokeDefaultPrivilege { .. } => "RevokeDefaultPrivilege",
+        Change::AddMember { .. } => "AddMember",
+        Change::RemoveMember { .. } => "RemoveMember",
+        Change::ReassignOwned { .. } => "ReassignOwned",
+        Change::DropOwned { .. } => "DropOwned",
+        Change::TerminateSessions { .. } => "TerminateSessions",
+        Change::DropRole { .. } => "DropRole",
+        Change::SetPassword { .. } => "SetPassword",
     }
 }
 
@@ -1066,6 +1449,7 @@ fn apply_change(
     usage: &mut BTreeMap<(String, String), SetRoleCapability>,
     admin_options: &mut BTreeMap<(String, String), SetRoleCapability>,
     executor: &ExecutorFacts,
+    pg_major_version: u16,
     change: &Change,
 ) {
     match change {
@@ -1252,9 +1636,16 @@ fn apply_change(
                 inherit: *inherit,
                 admin: *admin,
             });
+            // pgroles grants membership without a SET option; before
+            // PostgreSQL 16 that option does not exist and every membership
+            // permits SET ROLE.
             set_role.insert(
                 (role.clone(), member.clone()),
-                executor.new_membership_set_role,
+                if pg_major_version >= 16 {
+                    executor.new_membership_set_role
+                } else {
+                    SetRoleCapability::Allowed
+                },
             );
             usage.insert(
                 (role.clone(), member.clone()),
@@ -1290,7 +1681,7 @@ fn apply_change(
                     .unwrap_or(false)
             });
             if preserve_edge {
-                set_role.insert(key.clone(), SetRoleCapability::Unknown);
+                set_role.insert(key.clone(), membership_set_role_default(pg_major_version));
                 usage.insert(key.clone(), SetRoleCapability::Unknown);
                 admin_options.insert(key, SetRoleCapability::Unknown);
                 return;
@@ -1395,12 +1786,15 @@ mod tests {
             executor: ExecutorFacts {
                 role: "deployer".into(),
                 superuser: false,
+                createrole: SetRoleCapability::Unknown,
                 memberships: Vec::new(),
                 new_membership_set_role: SetRoleCapability::Unknown,
                 new_role_set_role: SetRoleCapability::Unknown,
                 new_role_inherit: SetRoleCapability::Unknown,
                 new_role_admin_option: SetRoleCapability::Unknown,
             },
+            pg_major_version: None,
+            authority_graph_complete: None,
         }
     }
 
@@ -1474,25 +1868,137 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn added_membership_has_unknown_set_role_semantics() {
-        let mut input = request(ReconciliationMode::Authoritative);
-        input.current.roles.insert("deployer".into(), role());
-        input.current.roles.insert("owner".into(), role());
-        input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
-
-        let response = analyze(input).unwrap();
-        let membership_phase = response
-            .phases
+    fn set_role_status(phase: &PhaseAnalysis, role: &str) -> Option<ReachabilityStatus> {
+        phase
+            .executor_reachability
             .iter()
-            .find(|phase| phase.phase == PlanPhase::MembershipAdd)
-            .unwrap();
-        assert!(
-            membership_phase
-                .executor_reachability
+            .find(|entry| entry.role == role)
+            .map(|entry| entry.status)
+    }
+
+    #[test]
+    fn added_membership_proves_set_role_only_before_postgres_16() {
+        for (version, expected) in [
+            (15, ReachabilityStatus::Reachable),
+            (16, ReachabilityStatus::Unknown),
+        ] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            input.current.roles.insert("deployer".into(), role());
+            input.current.roles.insert("owner".into(), role());
+            input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
+
+            let response = analyze(input).unwrap();
+            let membership_phase = response
+                .phases
                 .iter()
-                .any(|role| { role.role == "owner" && role.status == ReachabilityStatus::Unknown })
+                .find(|phase| phase.phase == PlanPhase::MembershipAdd)
+                .unwrap();
+            assert_eq!(
+                set_role_status(membership_phase, "owner"),
+                Some(expected),
+                "PG{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_memberships_prove_set_role_only_before_postgres_16() {
+        for (version, expected, grantor_finding) in [
+            (15, ReachabilityStatus::Reachable, None),
+            (
+                16,
+                ReachabilityStatus::Unknown,
+                Some(FindingKind::RequiredRoleReachabilityUnknown),
+            ),
+        ] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            for name in ["deployer", "owner", "auditor", "reader"] {
+                input.current.roles.insert(name.into(), role());
+            }
+            // A snapshot membership without SET facts, and an executor fact
+            // whose SET option is unknown for an edge the snapshot lacks.
+            input.current.memberships.push(SnapshotMembership {
+                role: "owner".into(),
+                member: "deployer".into(),
+                inherit: true,
+                admin: false,
+                grantors: BTreeSet::new(),
+            });
+            input.executor.memberships.push(ExecutorMembershipFact {
+                role: "auditor".into(),
+                member: "deployer".into(),
+                set_role: SetRoleCapability::Unknown,
+                inherit: SetRoleCapability::Unknown,
+                admin_option: SetRoleCapability::Unknown,
+            });
+            // Revoking a grant made by `owner` needs SET ROLE to `owner`.
+            input.current.grants.push(SnapshotGrant {
+                role: "reader".into(),
+                object_type: ObjectType::Table,
+                schema: Some("app".into()),
+                name: Some("orders".into()),
+                privileges: BTreeSet::from([Privilege::Select]),
+                grantors: BTreeMap::from([("owner".into(), BTreeSet::from([Privilege::Select]))]),
+            });
+            input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\n  - name: auditor\n  - name: reader\nmemberships:\n  - role: owner\n    members:\n      - name: deployer\n".into();
+
+            let response = analyze(input).unwrap();
+            let revoke_phase = response
+                .phases
+                .iter()
+                .find(|phase| phase.phase == PlanPhase::Revoke)
+                .unwrap();
+            for role in ["owner", "auditor"] {
+                assert_eq!(
+                    set_role_status(revoke_phase, role),
+                    Some(expected),
+                    "PG{version} {role}"
+                );
+            }
+            let owner_finding = response
+                .findings
+                .iter()
+                .find(|finding| finding.role.as_deref() == Some("owner"))
+                .map(|finding| finding.kind);
+            assert_eq!(owner_finding, grantor_finding, "PG{version}");
+        }
+    }
+
+    #[test]
+    fn preserved_legacy_membership_edge_still_proves_set_role() {
+        let key = ("owner".to_string(), "deployer".to_string());
+        let mut graph = RoleGraph::default();
+        graph.memberships.insert(MembershipEdge {
+            role: key.0.clone(),
+            member: key.1.clone(),
+            inherit: true,
+            admin: false,
+        });
+        graph
+            .membership_edge_grantors
+            .insert(key.clone(), BTreeSet::from(["a".into(), "b".into()]));
+        let mut set = BTreeMap::from([(key.clone(), SetRoleCapability::Allowed)]);
+        let mut usage = set.clone();
+        let mut admin = BTreeMap::new();
+        let executor = request(ReconciliationMode::Authoritative).executor;
+
+        apply_change(
+            &mut graph,
+            &mut set,
+            &mut usage,
+            &mut admin,
+            &executor,
+            15,
+            &Change::RemoveMember {
+                role: key.0.clone(),
+                member: key.1.clone(),
+                grantor: Some("a".into()),
+            },
         );
+        assert_eq!(set[&key], SetRoleCapability::Allowed);
+        assert_eq!(usage[&key], SetRoleCapability::Unknown);
     }
 
     #[test]
@@ -1530,6 +2036,7 @@ mod tests {
             &executor,
             PlanAnalysisOptions {
                 authority_graph_complete: false,
+                ..PlanAnalysisOptions::default()
             },
         );
         assert!(!analysis.findings.iter().any(|finding| {
@@ -1833,6 +2340,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &remove("a"),
         );
         assert_eq!(graph.memberships.len(), 1);
@@ -1847,6 +2355,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &remove("b"),
         );
         assert!(graph.memberships.is_empty());
@@ -1894,6 +2403,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &revoke("a"),
         );
         assert_eq!(
@@ -1906,6 +2416,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &revoke("b"),
         );
         assert!(!graph.grants.contains_key(&key));
@@ -1932,6 +2443,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::ReassignOwned {
                 from_role: "old_owner".into(),
                 to_role: "new_owner".into(),
@@ -1944,6 +2456,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::DropOwned {
                 role: "old_owner".into(),
             },
@@ -1955,6 +2468,7 @@ mod tests {
             &mut usage,
             &mut admin,
             &executor,
+            DEFAULT_PG_MAJOR_VERSION,
             &Change::DropOwned {
                 role: "new_owner".into(),
             },
@@ -2090,5 +2604,932 @@ mod tests {
                 .iter()
                 .any(|finding| finding.message.contains("ADMIN OPTION for role target"))
         );
+    }
+
+    fn membership(role: &str, member: &str, inherit: bool, admin: bool) -> SnapshotMembership {
+        SnapshotMembership {
+            role: role.into(),
+            member: member.into(),
+            inherit,
+            admin,
+            grantors: BTreeSet::new(),
+        }
+    }
+
+    fn has_finding(response: &AnalyzeResponse, kind: FindingKind, role: &str) -> bool {
+        response
+            .findings
+            .iter()
+            .any(|finding| finding.kind == kind && finding.role.as_deref() == Some(role))
+    }
+
+    /// `deployer` is a direct inheriting member of every `r<i>`, and the
+    /// policy grants one table privilege per role round-robin.
+    fn star_request(roles: usize, grants: usize) -> AnalyzeRequest {
+        use std::fmt::Write as _;
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("deployer".into(), role());
+        let mut yaml = String::from("roles:\n  - name: deployer\n");
+        let mut memberships = String::from("memberships:\n");
+        for index in 0..roles {
+            let name = format!("r{index}");
+            input.current.roles.insert(name.clone(), role());
+            input
+                .current
+                .memberships
+                .push(membership(&name, "deployer", true, false));
+            writeln!(yaml, "  - name: {name}").unwrap();
+            write!(
+                memberships,
+                "  - role: {name}\n    members:\n      - name: deployer\n"
+            )
+            .unwrap();
+        }
+        yaml.push_str("grants:\n");
+        for index in 0..grants {
+            write!(
+                yaml,
+                "  - role: r{}\n    privileges: [SELECT]\n    object: {{ type: table, schema: app, name: t{index} }}\n",
+                index % roles
+            )
+            .unwrap();
+        }
+        yaml.push_str(&memberships);
+        input.desired_yaml = yaml;
+        input
+    }
+
+    #[test]
+    fn large_grant_plan_is_analyzed_quickly_with_one_preflight_finding() {
+        let input = star_request(500, 2000);
+        let started = std::time::Instant::now();
+        let response = analyze(input).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(response.changes.len(), 2000);
+        let preflight: Vec<_> = response
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == FindingKind::DatabasePreflightRequired)
+            .collect();
+        assert_eq!(preflight.len(), 1, "{:?}", response.findings);
+        assert_eq!(preflight[0].phase, Some(PlanPhase::Grant));
+        assert_eq!(preflight[0].change_index, Some(0));
+        assert_eq!(preflight[0].change_indices, (0..2000).collect::<Vec<_>>());
+        assert!(preflight[0].message.starts_with("2000 Grant operations"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "analysis took {elapsed:?}"
+        );
+    }
+
+    fn star_graph(roles: usize) -> RoleGraph {
+        let mut graph = RoleGraph::default();
+        graph.roles.insert("deployer".into(), RoleState::default());
+        for index in 0..roles {
+            let name = format!("r{index}");
+            graph.roles.insert(name.clone(), RoleState::default());
+            graph.memberships.insert(MembershipEdge {
+                role: name,
+                member: "deployer".into(),
+                inherit: true,
+                admin: false,
+            });
+        }
+        graph
+    }
+
+    fn grant(role: &str, table: &str) -> Change {
+        Change::Grant {
+            role: Grantee::Role(role.into()),
+            privileges: BTreeSet::from([Privilege::Select]),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some(table.into()),
+        }
+    }
+
+    #[test]
+    fn reachability_is_recomputed_only_after_changes_that_affect_it() {
+        let executor = request(ReconciliationMode::Authoritative).executor;
+        let mut changes: Vec<_> = (0..200)
+            .map(|index| grant(&format!("r{}", index % 50), &format!("t{index}")))
+            .collect();
+        let (_, computations) = simulate(
+            star_graph(50),
+            &changes,
+            &executor,
+            PlanAnalysisOptions::default(),
+            Recompute::WhenAffected,
+        );
+        assert_eq!(computations, 2, "only the initial SET ROLE and USAGE maps");
+
+        changes.push(Change::AddMember {
+            role: "r0".into(),
+            member: "r1".into(),
+            inherit: true,
+            admin: false,
+        });
+        let (_, computations) = simulate(
+            star_graph(50),
+            &changes,
+            &executor,
+            PlanAnalysisOptions::default(),
+            Recompute::WhenAffected,
+        );
+        assert_eq!(computations, 4);
+    }
+
+    #[test]
+    fn incremental_reachability_matches_recomputing_after_every_change() {
+        let mut graph = star_graph(4);
+        graph.roles.insert("owner".into(), RoleState::default());
+        graph.schemas.insert(
+            "app".into(),
+            SchemaState {
+                owner: Some("owner".into()),
+                owner_privileges: BTreeSet::new(),
+            },
+        );
+        let mut executor = request(ReconciliationMode::Authoritative).executor;
+        executor.memberships.push(ExecutorMembershipFact {
+            role: "owner".into(),
+            member: "r0".into(),
+            set_role: SetRoleCapability::Allowed,
+            inherit: SetRoleCapability::Allowed,
+            admin_option: SetRoleCapability::Unknown,
+        });
+        executor.new_role_set_role = SetRoleCapability::Allowed;
+        executor.new_role_inherit = SetRoleCapability::Allowed;
+        let changes = vec![
+            Change::CreateRole {
+                name: "fresh".into(),
+                state: RoleState::default(),
+            },
+            Change::AlterRole {
+                name: "deployer".into(),
+                attributes: vec![RoleAttribute::Superuser(true)],
+            },
+            Change::AlterSchemaOwner {
+                name: "app".into(),
+                owner: "fresh".into(),
+            },
+            Change::AlterRole {
+                name: "deployer".into(),
+                attributes: vec![RoleAttribute::Superuser(false)],
+            },
+            grant("r1", "orders"),
+            Change::SetDefaultPrivilege {
+                owner: "owner".into(),
+                scope: DefaultPrivilegeScope::Schema {
+                    schema: "app".into(),
+                },
+                on_type: ObjectType::Table,
+                grantee: Grantee::from("r2"),
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+            Change::RemoveMember {
+                role: "r0".into(),
+                member: "deployer".into(),
+                grantor: None,
+            },
+            Change::AddMember {
+                role: "r3".into(),
+                member: "fresh".into(),
+                inherit: true,
+                admin: true,
+            },
+            Change::RevokeDefaultPrivilege {
+                owner: "owner".into(),
+                scope: DefaultPrivilegeScope::Schema {
+                    schema: "app".into(),
+                },
+                on_type: ObjectType::Table,
+                grantee: Grantee::from("r2"),
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+            Change::DropOwned { role: "r2".into() },
+            Change::DropRole { name: "r2".into() },
+        ];
+        for authority_graph_complete in [true, false] {
+            let options = PlanAnalysisOptions {
+                authority_graph_complete,
+                ..PlanAnalysisOptions::default()
+            };
+            let (incremental, fewer) = simulate(
+                graph.clone(),
+                &changes,
+                &executor,
+                options,
+                Recompute::WhenAffected,
+            );
+            let (reference, every) = simulate(
+                graph.clone(),
+                &changes,
+                &executor,
+                options,
+                Recompute::Always,
+            );
+            assert_eq!(
+                serde_json::to_value(&incremental).unwrap(),
+                serde_json::to_value(&reference).unwrap()
+            );
+            assert!(fewer < every, "{fewer} < {every}");
+        }
+    }
+
+    #[test]
+    fn preflight_findings_aggregate_per_phase_and_change_kind() {
+        let executor = request(ReconciliationMode::Authoritative).executor;
+        let changes = vec![
+            grant("r0", "a"),
+            grant("r1", "b"),
+            Change::Revoke {
+                role: Grantee::Role("r0".into()),
+                privileges: BTreeSet::from([Privilege::Select]),
+                object_type: ObjectType::Table,
+                schema: Some("app".into()),
+                name: Some("c".into()),
+                grantor: None,
+            },
+            grant("r2", "d"),
+        ];
+        let analysis = analyze_changes(star_graph(3), &changes, &executor);
+        let preflight: Vec<_> = analysis
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == FindingKind::DatabasePreflightRequired)
+            .map(|finding| {
+                (
+                    finding.phase,
+                    finding.change_index,
+                    finding.change_indices.clone(),
+                    finding.message.clone(),
+                )
+            })
+            .collect();
+        // Grant, Revoke, Grant form three phase runs; the two Grant runs
+        // share the (phase, kind) finding.
+        assert_eq!(
+            preflight,
+            vec![
+                (
+                    Some(PlanPhase::Grant),
+                    Some(0),
+                    vec![0, 1, 3],
+                    "3 Grant operations require database ownership or privilege preflight".into()
+                ),
+                (
+                    Some(PlanPhase::Revoke),
+                    Some(2),
+                    vec![2],
+                    "this Revoke operation requires database ownership or privilege preflight"
+                        .into()
+                ),
+            ]
+        );
+        assert_eq!(analysis.phases.len(), 3);
+    }
+
+    #[test]
+    fn set_password_requires_database_preflight() {
+        let mut graph = RoleGraph::default();
+        graph.roles.insert("deployer".into(), RoleState::default());
+        graph.roles.insert("app".into(), RoleState::default());
+        let analysis = analyze_changes_with_options(
+            graph,
+            &[Change::SetPassword {
+                name: "app".into(),
+                password: "SCRAM-SHA-256$x".into(),
+            }],
+            &request(ReconciliationMode::Authoritative).executor,
+            PlanAnalysisOptions {
+                authority_graph_complete: false,
+                ..PlanAnalysisOptions::default()
+            },
+        );
+        assert!(analysis.findings.iter().any(|finding| {
+            finding.kind == FindingKind::DatabasePreflightRequired
+                && finding.phase == Some(PlanPhase::Alter)
+                && finding.change_indices == vec![0]
+        }));
+    }
+
+    #[test]
+    fn response_echoes_default_version_and_completeness() {
+        let response = analyze(request(ReconciliationMode::Authoritative)).unwrap();
+        assert_eq!(response.pg_major_version, DEFAULT_PG_MAJOR_VERSION);
+        assert!(response.authority_graph_complete);
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["pg_major_version"], 16);
+        assert_eq!(value["authority_graph_complete"], true);
+    }
+
+    #[test]
+    fn request_accepts_optional_version_and_completeness_fields() {
+        let parsed: AnalyzeRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": EXPLORER_SCHEMA_VERSION,
+            "current": {},
+            "desired_yaml": "roles: []\n",
+            "executor": { "role": "deployer", "createrole": "allowed" },
+            "pg_major_version": 15,
+            "authority_graph_complete": false
+        }))
+        .unwrap();
+        assert_eq!(parsed.pg_major_version, Some(15));
+        assert_eq!(parsed.authority_graph_complete, Some(false));
+        assert_eq!(parsed.executor.createrole, SetRoleCapability::Allowed);
+        let response = analyze(parsed).unwrap();
+        assert_eq!(response.pg_major_version, 15);
+        assert!(!response.authority_graph_complete);
+
+        let defaulted: AnalyzeRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": EXPLORER_SCHEMA_VERSION,
+            "current": {},
+            "desired_yaml": "roles: []\n",
+            "executor": { "role": "deployer" },
+            "pg_major_version": null,
+            "authority_graph_complete": null
+        }))
+        .unwrap();
+        assert_eq!(defaulted.pg_major_version, None);
+        assert_eq!(defaulted.authority_graph_complete, None);
+        assert_eq!(defaulted.executor.createrole, SetRoleCapability::Unknown);
+    }
+
+    #[test]
+    fn unsupported_pg_major_versions_are_rejected() {
+        for version in [0, 11, 21, 170] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            assert!(
+                matches!(
+                    analyze(input),
+                    Err(AnalysisError::UnsupportedPgMajorVersion {
+                        version: rejected,
+                        min: MIN_PG_MAJOR_VERSION,
+                        max: MAX_PG_MAJOR_VERSION,
+                    }) if rejected == version
+                ),
+                "version {version}"
+            );
+        }
+        for version in [MIN_PG_MAJOR_VERSION, 15, 16, 18, MAX_PG_MAJOR_VERSION] {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(version);
+            assert_eq!(analyze(input).unwrap().pg_major_version, version);
+        }
+    }
+
+    #[test]
+    fn fingerprint_binds_version_and_completeness() {
+        let base = analyze(request(ReconciliationMode::Authoritative)).unwrap();
+        let mut pg15 = request(ReconciliationMode::Authoritative);
+        pg15.pg_major_version = Some(15);
+        let mut explicit16 = request(ReconciliationMode::Authoritative);
+        explicit16.pg_major_version = Some(16);
+        let mut partial = request(ReconciliationMode::Authoritative);
+        partial.authority_graph_complete = Some(false);
+        assert_ne!(
+            base.plan_fingerprint,
+            analyze(pg15).unwrap().plan_fingerprint
+        );
+        assert_ne!(
+            base.plan_fingerprint,
+            analyze(partial).unwrap().plan_fingerprint
+        );
+        assert_eq!(
+            base.plan_fingerprint,
+            analyze(explicit16).unwrap().plan_fingerprint
+        );
+    }
+
+    /// `deployer` adds `new_member` to `target` with no ADMIN OPTION path.
+    fn membership_grant_request() -> AnalyzeRequest {
+        let mut input = request(ReconciliationMode::Authoritative);
+        for name in ["target", "new_member"] {
+            input.current.roles.insert(name.into(), role());
+        }
+        input.desired_yaml = "roles:\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: new_member\n".into();
+        input
+    }
+
+    #[test]
+    fn createrole_authorizes_membership_changes_only_before_postgres_16() {
+        for (version, createrole, expected) in [
+            (15, SetRoleCapability::Allowed, None),
+            (
+                15,
+                SetRoleCapability::Unknown,
+                Some((
+                    FindingKind::RequiredRoleReachabilityUnknown,
+                    FindingSeverity::Warning,
+                )),
+            ),
+            (
+                15,
+                SetRoleCapability::Denied,
+                Some((FindingKind::RequiredRoleUnavailable, FindingSeverity::Error)),
+            ),
+            (
+                16,
+                SetRoleCapability::Allowed,
+                Some((FindingKind::RequiredRoleUnavailable, FindingSeverity::Error)),
+            ),
+            (
+                17,
+                SetRoleCapability::Unknown,
+                Some((FindingKind::RequiredRoleUnavailable, FindingSeverity::Error)),
+            ),
+        ] {
+            let mut input = membership_grant_request();
+            input.pg_major_version = Some(version);
+            input.executor.createrole = createrole;
+            let response = analyze(input).unwrap();
+            let actual = response
+                .findings
+                .iter()
+                .find(|finding| finding.role.as_deref() == Some("target"))
+                .map(|finding| (finding.kind, finding.severity));
+            assert_eq!(actual, expected, "PG{version} createrole={createrole:?}");
+            if let Some(finding) = response
+                .findings
+                .iter()
+                .find(|finding| finding.role.as_deref() == Some("target"))
+            {
+                assert!(finding.message.contains("ADMIN OPTION for role target"));
+                assert_eq!(finding.message.contains("CREATEROLE or"), version < 16);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_createrole_applies_when_executor_createrole_is_unknown() {
+        for (snapshot, explicit, proven) in [
+            (true, SetRoleCapability::Unknown, true),
+            (false, SetRoleCapability::Unknown, false),
+            (false, SetRoleCapability::Allowed, true),
+            (true, SetRoleCapability::Denied, false),
+        ] {
+            let mut input = membership_grant_request();
+            input.pg_major_version = Some(15);
+            input.executor.createrole = explicit;
+            input.current.roles.insert(
+                "deployer".into(),
+                SnapshotRole {
+                    createrole: snapshot,
+                    ..role()
+                },
+            );
+            input.desired_yaml = format!(
+                "roles:\n  - name: deployer\n    createrole: {snapshot}\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: new_member\n"
+            );
+            let response = analyze(input).unwrap();
+            assert_eq!(
+                !response
+                    .findings
+                    .iter()
+                    .any(|finding| finding.role.as_deref() == Some("target")),
+                proven,
+                "snapshot={snapshot} explicit={explicit:?}: {:?}",
+                response.findings
+            );
+        }
+    }
+
+    #[test]
+    fn disproved_admin_path_is_an_error_only_with_a_complete_graph() {
+        let complete = analyze(membership_grant_request()).unwrap();
+        assert!(complete.findings.iter().any(|finding| {
+            finding.kind == FindingKind::RequiredRoleUnavailable
+                && finding.severity == FindingSeverity::Error
+                && finding.role.as_deref() == Some("target")
+        }));
+
+        let mut input = membership_grant_request();
+        input.authority_graph_complete = Some(false);
+        let partial = analyze(input).unwrap();
+        assert!(!partial.authority_graph_complete);
+        assert!(partial.findings.iter().any(|finding| {
+            finding.kind == FindingKind::RequiredRoleReachabilityUnknown
+                && finding.severity == FindingSeverity::Warning
+                && finding.role.as_deref() == Some("target")
+        }));
+        assert!(
+            !has_finding(&partial, FindingKind::RequiredRoleUnavailable, "target"),
+            "{:?}",
+            partial.findings
+        );
+    }
+
+    #[test]
+    fn partial_authority_graph_reports_unknown_instead_of_unreachable() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("deployer".into(), role());
+        input.current.roles.insert("owner".into(), role());
+        input.authority_graph_complete = Some(false);
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: owner\ndefault_privileges:\n  - owner: owner\n    schema: app\n    grant:\n      - role: deployer\n        privileges: [SELECT]\n        on_type: table\n".into();
+        let response = analyze(input).unwrap();
+        assert!(has_finding(
+            &response,
+            FindingKind::RequiredRoleReachabilityUnknown,
+            "owner"
+        ));
+        assert!(!has_finding(
+            &response,
+            FindingKind::RequiredRoleUnavailable,
+            "owner"
+        ));
+        assert!(response.phases[0].executor_usage.iter().any(|status| {
+            status.role == "owner" && status.status == ReachabilityStatus::Unknown
+        }));
+    }
+
+    #[test]
+    fn omitted_executor_fact_options_do_not_erase_snapshot_evidence() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("deployer".into(), role());
+        input.current.roles.insert("reader".into(), role());
+        input
+            .current
+            .memberships
+            .push(membership("reader", "deployer", true, false));
+        input.executor.memberships.push(ExecutorMembershipFact {
+            role: "reader".into(),
+            member: "deployer".into(),
+            set_role: SetRoleCapability::Allowed,
+            inherit: SetRoleCapability::Unknown,
+            admin_option: SetRoleCapability::Unknown,
+        });
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: reader\n".into();
+        let response = analyze(input.clone()).unwrap();
+        assert!(has_finding(
+            &response,
+            FindingKind::ExecutorLosesAccess,
+            "reader"
+        ));
+        assert!(!has_finding(
+            &response,
+            FindingKind::MembershipDisconnectsRole,
+            "reader"
+        ));
+
+        // An explicit denial still overrides the snapshot.
+        input.executor.memberships[0].inherit = SetRoleCapability::Denied;
+        let response = analyze(input).unwrap();
+        assert!(!has_finding(
+            &response,
+            FindingKind::ExecutorLosesAccess,
+            "reader"
+        ));
+    }
+
+    #[test]
+    fn snapshot_admin_option_survives_a_fact_that_omits_it() {
+        let mut input = membership_grant_request();
+        input.current.roles.insert("deployer".into(), role());
+        input
+            .current
+            .memberships
+            .push(membership("target", "deployer", true, true));
+        input.executor.memberships.push(ExecutorMembershipFact {
+            role: "target".into(),
+            member: "deployer".into(),
+            set_role: SetRoleCapability::Allowed,
+            inherit: SetRoleCapability::Unknown,
+            admin_option: SetRoleCapability::Unknown,
+        });
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: deployer\n        admin: true\n      - name: new_member\n".into();
+        let response = analyze(input).unwrap();
+        assert!(
+            !response
+                .findings
+                .iter()
+                .any(|finding| finding.role.as_deref() == Some("target")),
+            "{:?}",
+            response.findings
+        );
+    }
+
+    #[test]
+    fn membership_in_a_superuser_role_requires_a_superuser_executor() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("deployer".into(), role());
+        input.current.roles.insert(
+            "root_like".into(),
+            SnapshotRole {
+                superuser: true,
+                ..role()
+            },
+        );
+        input.current.roles.insert("x".into(), role());
+        input
+            .current
+            .memberships
+            .push(membership("root_like", "deployer", false, true));
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: root_like\n    superuser: true\n  - name: x\nmemberships:\n  - role: root_like\n    members:\n      - name: deployer\n        inherit: false\n        admin: true\n      - name: x\n".into();
+        for version in [15, 16] {
+            let mut input = input.clone();
+            input.pg_major_version = Some(version);
+            input.executor.createrole = SetRoleCapability::Allowed;
+            let response = analyze(input).unwrap();
+            let finding = response
+                .findings
+                .iter()
+                .find(|finding| finding.kind == FindingKind::SuperuserRequired)
+                .unwrap_or_else(|| panic!("PG{version}: {:?}", response.findings));
+            assert_eq!(finding.severity, FindingSeverity::Error);
+            assert_eq!(finding.role.as_deref(), Some("root_like"));
+            assert_eq!(finding.phase, Some(PlanPhase::MembershipAdd));
+        }
+
+        input.executor.superuser = true;
+        let response = analyze(input).unwrap();
+        assert!(
+            !response
+                .findings
+                .iter()
+                .any(|finding| finding.kind == FindingKind::SuperuserRequired)
+        );
+    }
+
+    #[test]
+    fn dropped_roles_are_not_reported_as_lost_or_disconnected() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.executor.role = "postgres".into();
+        input.executor.superuser = true;
+        input.current.roles.insert(
+            "postgres".into(),
+            SnapshotRole {
+                superuser: true,
+                ..role()
+            },
+        );
+        input.current.roles.insert(
+            "bob".into(),
+            SnapshotRole {
+                login: true,
+                ..role()
+            },
+        );
+        input.desired_yaml = "roles:\n  - name: postgres\n    superuser: true\n".into();
+        let response = analyze(input).unwrap();
+        assert!(
+            response
+                .changes
+                .iter()
+                .any(|change| matches!(change, Change::DropRole { name } if name == "bob"))
+        );
+        assert!(!has_finding(
+            &response,
+            FindingKind::ExecutorLosesAccess,
+            "bob"
+        ));
+
+        let mut graph = RoleGraph::default();
+        graph.roles.insert("deployer".into(), RoleState::default());
+        for name in ["old_a", "old_b"] {
+            graph.roles.insert(name.into(), RoleState::default());
+        }
+        let analysis = analyze_changes_with_options(
+            graph,
+            &[
+                Change::DropRole {
+                    name: "old_a".into(),
+                },
+                Change::DropRole {
+                    name: "old_b".into(),
+                },
+            ],
+            &request(ReconciliationMode::Authoritative).executor,
+            PlanAnalysisOptions {
+                authority_graph_complete: false,
+                ..PlanAnalysisOptions::default()
+            },
+        );
+        assert!(!analysis.findings.iter().any(|finding| matches!(
+            finding.kind,
+            FindingKind::ExecutorLosesAccess | FindingKind::MembershipDisconnectsRole
+        )));
+    }
+
+    #[test]
+    fn dropping_a_bridge_role_still_reports_roles_reached_through_it() {
+        let mut graph = RoleGraph::default();
+        for name in ["deployer", "bridge", "owner"] {
+            graph.roles.insert(name.into(), RoleState::default());
+        }
+        for (role, member) in [("bridge", "deployer"), ("owner", "bridge")] {
+            graph.memberships.insert(MembershipEdge {
+                role: role.into(),
+                member: member.into(),
+                inherit: true,
+                admin: false,
+            });
+        }
+        let analysis = analyze_changes(
+            graph,
+            &[Change::DropRole {
+                name: "bridge".into(),
+            }],
+            &request(ReconciliationMode::Authoritative).executor,
+        );
+        let lost: Vec<_> = analysis
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == FindingKind::ExecutorLosesAccess)
+            .filter_map(|finding| finding.role.as_deref())
+            .collect();
+        assert_eq!(lost, vec!["owner"]);
+    }
+
+    #[test]
+    fn duplicate_snapshot_memberships_merge_options_and_grantors() {
+        let mut input = membership_grant_request();
+        input.current.roles.insert("deployer".into(), role());
+        input.current.memberships.extend([
+            SnapshotMembership {
+                grantors: BTreeSet::from(["a".into()]),
+                ..membership("target", "deployer", false, true)
+            },
+            SnapshotMembership {
+                grantors: BTreeSet::from(["b".into()]),
+                ..membership("target", "deployer", true, false)
+            },
+        ]);
+        let graph = input.current.clone().into_graph();
+        assert_eq!(
+            graph.memberships,
+            BTreeSet::from([MembershipEdge {
+                role: "target".into(),
+                member: "deployer".into(),
+                inherit: true,
+                admin: true,
+            }])
+        );
+        assert_eq!(
+            graph.membership_edge_grantors[&("target".to_string(), "deployer".to_string())],
+            BTreeSet::from(["a".to_string(), "b".to_string()])
+        );
+
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: target\n  - name: new_member\nmemberships:\n  - role: target\n    members:\n      - name: deployer\n        admin: true\n      - name: new_member\n".into();
+        let response = analyze(input).unwrap();
+        assert!(
+            !response
+                .findings
+                .iter()
+                .any(|finding| finding.role.as_deref() == Some("target")),
+            "{:?}",
+            response.findings
+        );
+        assert!(
+            !response
+                .changes
+                .iter()
+                .any(|change| matches!(change, Change::RemoveMember { .. })),
+            "merged edge matches the desired membership: {:?}",
+            response.changes
+        );
+    }
+
+    #[test]
+    fn duplicate_snapshot_grants_merge_privileges_and_grantors() {
+        let target = |privileges: &[Privilege], grantor: &str| SnapshotGrant {
+            role: "reader".into(),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("orders".into()),
+            privileges: privileges.iter().copied().collect(),
+            grantors: BTreeMap::from([(grantor.to_string(), privileges.iter().copied().collect())]),
+        };
+        let snapshot = ExplorerSnapshot {
+            grants: vec![
+                target(&[Privilege::Select], "a"),
+                target(&[Privilege::Insert], "b"),
+                target(&[Privilege::Update], "a"),
+            ],
+            default_privileges: vec![
+                SnapshotDefaultPrivilege {
+                    owner: "owner".into(),
+                    schema: Some("app".into()),
+                    on_type: ObjectType::Table,
+                    grantee: "reader".into(),
+                    privileges: BTreeSet::from([Privilege::Select]),
+                },
+                SnapshotDefaultPrivilege {
+                    owner: "owner".into(),
+                    schema: Some("app".into()),
+                    on_type: ObjectType::Table,
+                    grantee: "reader".into(),
+                    privileges: BTreeSet::from([Privilege::Insert]),
+                },
+            ],
+            ..ExplorerSnapshot::default()
+        };
+        let graph = snapshot.into_graph();
+        let key = GrantKey {
+            role: Grantee::Role("reader".into()),
+            object_type: ObjectType::Table,
+            schema: Some("app".into()),
+            name: Some("orders".into()),
+        };
+        assert_eq!(
+            graph.grants[&key].privileges,
+            BTreeSet::from([Privilege::Select, Privilege::Insert, Privilege::Update])
+        );
+        assert_eq!(
+            graph.grant_entry_grantors[&key],
+            BTreeMap::from([
+                (
+                    "a".to_string(),
+                    BTreeSet::from([Privilege::Select, Privilege::Update])
+                ),
+                ("b".to_string(), BTreeSet::from([Privilege::Insert])),
+            ])
+        );
+        assert_eq!(graph.default_privileges.len(), 1);
+        assert_eq!(
+            graph.default_privileges.values().next().unwrap().privileges,
+            BTreeSet::from([Privilege::Select, Privilege::Insert])
+        );
+    }
+
+    #[test]
+    fn explicit_executor_superuser_wins_over_snapshot_default() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.executor.role = "postgres".into();
+        input.executor.superuser = true;
+        input.current.roles.insert("postgres".into(), role());
+        input.current.roles.insert("owner".into(), role());
+        input.desired_yaml = "roles:\n  - name: postgres\n  - name: owner\ndefault_privileges:\n  - owner: owner\n    schema: app\n    grant:\n      - role: postgres\n        privileges: [SELECT]\n        on_type: table\n".into();
+        let response = analyze(input.clone()).unwrap();
+        assert!(!has_finding(
+            &response,
+            FindingKind::RequiredRoleUnavailable,
+            "owner"
+        ));
+
+        // Omitted (false) defers to the snapshot attribute.
+        input.executor.superuser = false;
+        input.current.roles.insert(
+            "postgres".into(),
+            SnapshotRole {
+                superuser: true,
+                ..role()
+            },
+        );
+        input.desired_yaml = input.desired_yaml.replace(
+            "  - name: postgres\n  - name: owner",
+            "  - name: postgres\n    superuser: true\n  - name: owner",
+        );
+        let response = analyze(input).unwrap();
+        assert!(!has_finding(
+            &response,
+            FindingKind::RequiredRoleUnavailable,
+            "owner"
+        ));
+    }
+
+    #[test]
+    fn schema_owner_change_reports_the_new_implicit_grantor() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.current.roles.insert("deployer".into(), role());
+        input.current.roles.insert("old_owner".into(), role());
+        input.current.roles.insert("new_owner".into(), role());
+        input.current.schemas.insert(
+            "app".into(),
+            SnapshotSchema {
+                owner: Some("old_owner".into()),
+                owner_privileges: BTreeSet::new(),
+            },
+        );
+        input.desired_yaml = "roles:\n  - name: deployer\n  - name: old_owner\n  - name: new_owner\nschemas:\n  - name: app\n    owner: new_owner\n".into();
+        let response = analyze(input).unwrap();
+        let finding = response
+            .findings
+            .iter()
+            .find(|finding| finding.kind == FindingKind::OwnershipTransferChangesGrantor)
+            .expect("ownership transfer finding");
+        assert_eq!(finding.severity, FindingSeverity::Info);
+        assert_eq!(finding.phase, Some(PlanPhase::Alter));
+        assert_eq!(finding.role.as_deref(), Some("new_owner"));
+        assert!(
+            finding
+                .message
+                .contains("from role old_owner to role new_owner")
+        );
+        assert!(finding.message.contains("implicit grantor"));
+    }
+
+    #[test]
+    fn oversized_desired_yaml_is_rejected_by_explorer_bounds() {
+        let mut input = request(ReconciliationMode::Authoritative);
+        input.desired_yaml = " ".repeat(MAX_EXPLORER_YAML_BYTES + 1);
+        assert!(matches!(
+            analyze(input),
+            Err(AnalysisError::DesiredYamlTooLarge {
+                limit: MAX_EXPLORER_YAML_BYTES,
+                ..
+            })
+        ));
     }
 }

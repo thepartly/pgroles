@@ -8,25 +8,56 @@ async function analyze(page) {
   await expect(page.getByText('Execution phases')).toBeVisible()
 }
 
-test('uses snapshot superuser status for existing executors and manual status only for absent roles', async ({ page }) => {
+test('lets an explicit superuser fact override a snapshot role without the flag, as the analyzer does', async ({ page }) => {
   await page.goto(explorerUrl)
   const checkbox = page.getByRole('checkbox', { name: /Executor is a superuser/ })
+  const adminOptionFindings = page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' })
   await expect(checkbox).toBeEnabled()
-  await checkbox.check()
 
   await page.getByLabel('Executor role').fill('alice')
-  await expect(checkbox).toBeDisabled()
+  await expect(checkbox).toBeEnabled()
   await expect(checkbox).not.toBeChecked()
-  await expect(page.getByText('From snapshot', { exact: true })).toBeVisible()
+  await expect(page.getByText('From snapshot', { exact: true })).toBeHidden()
+  await expect(page.getByText('Overrides snapshot', { exact: true })).toBeHidden()
   await analyze(page)
-  await expect(page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' }).first()).toBeVisible()
+  await expect(adminOptionFindings.first()).toBeVisible()
+
+  await checkbox.check()
+  await expect(page.getByText('Overrides snapshot', { exact: true })).toBeVisible()
+  await analyze(page)
+  await expect(adminOptionFindings).toHaveCount(0)
 
   await page.getByLabel('Executor role').fill('platform_admin')
   await expect(checkbox).toBeEnabled()
   await expect(checkbox).toBeChecked()
-  await expect(page.getByText('From snapshot', { exact: true })).toBeHidden()
+  await expect(page.getByText('Overrides snapshot', { exact: true })).toBeHidden()
   await analyze(page)
-  await expect(page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' })).toHaveCount(0)
+  await expect(adminOptionFindings).toHaveCount(0)
+})
+
+test('keeps an imported explicit superuser fact for an executor the snapshot lists without the flag', async ({ page }) => {
+  await page.goto(explorerUrl)
+  await page.getByLabel('Sanitized snapshot file').setInputFiles({
+    name: 'asserted-superuser.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      current: { roles: { existing_admin: { superuser: false }, reader: {} } },
+      executor: { role: 'existing_admin', superuser: true },
+    })),
+  })
+  const checkbox = page.getByRole('checkbox', { name: /Executor is a superuser/ })
+  const adminOptionFindings = page.locator('[data-severity]').filter({ hasText: 'ADMIN OPTION' })
+  await expect(checkbox).toBeEnabled()
+  await expect(checkbox).toBeChecked()
+  await expect(page.getByText('Overrides snapshot', { exact: true })).toBeVisible()
+  await page.getByLabel('Desired YAML').fill('roles:\n  - name: existing_admin\n  - name: reader\n  - name: analyst\nmemberships:\n  - role: reader\n    members:\n      - name: analyst\n')
+  await analyze(page)
+  await expect(adminOptionFindings).toHaveCount(0)
+
+  await checkbox.uncheck()
+  await expect(page.getByText('Overrides snapshot', { exact: true })).toBeHidden()
+  await analyze(page)
+  await expect(adminOptionFindings.first()).toBeVisible()
 })
 
 test('shows imported snapshot superuser status despite a conflicting executor fallback', async ({ page }) => {
@@ -87,16 +118,55 @@ test('hides an old plan before a failed snapshot import is read', async ({ page 
 })
 
 test('does not publish an analysis made stale while WASM is loading', async ({ page }) => {
-  await page.route('**/wasm/pgroles_wasm.js', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    await route.continue()
+  let releaseModule
+  const moduleRequested = new Promise((resolve) => {
+    page.route((url) => url.pathname.endsWith('/wasm/pgroles_wasm.js'), async (route) => {
+      await new Promise((release) => { releaseModule = release; resolve() })
+      await route.continue()
+    })
   })
   await page.goto(explorerUrl)
-  await page.getByRole('button', { name: 'Analyze plan' }).click({ noWaitAfter: true })
+  await page.getByRole('button', { name: 'Analyze plan' }).click()
+  // The analysis is now waiting on the held engine download.
+  await moduleRequested
   await page.getByLabel('Executor role').fill('changed_while_loading')
-  await page.waitForTimeout(800)
+  // Validation waits on the same engine promise and resumes after the stale
+  // analysis in the same microtask drain, so once its result renders the stale
+  // analysis has already had its chance to publish.
+  await page.getByRole('button', { name: 'Validate policy' }).click()
+  releaseModule()
+  await expect(page.getByRole('region', { name: 'Policy authoring' })).toContainText('Policy is valid.')
   await expect(page.getByText('Execution phases')).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Analyze plan' })).toBeEnabled()
+
+  await page.getByRole('button', { name: 'Analyze plan' }).click()
+  await expect(page.getByText('Execution phases')).toBeVisible()
 })
+
+for (const [asset, pathSuffix] of [['JavaScript glue', '/wasm/pgroles_wasm.js'], ['WASM binary', '/wasm/pgroles_wasm_bg.wasm']]) {
+  test(`reports a failed ${asset} download and succeeds when retried`, async ({ page }) => {
+    let blocked = true
+    const requests = []
+    await page.route((url) => url.pathname.endsWith(pathSuffix), (route) => {
+      requests.push(route.request().url())
+      return blocked ? route.fulfill({ status: 500, contentType: 'text/plain', body: 'unavailable' }) : route.continue()
+    })
+    await page.goto(explorerUrl)
+    await page.getByRole('button', { name: 'Analyze plan' }).click()
+    const alert = page.locator('article').getByRole('alert')
+    await expect(alert).toHaveAttribute('data-error-kind', 'load')
+    await expect(alert).toContainText('Analyzer unavailable')
+    await expect(alert).toContainText('Could not load the WASM analyzer')
+    await expect(alert).not.toContainText('Analysis failed')
+    await expect(page.getByRole('button', { name: 'Analyze plan' })).toBeEnabled()
+
+    blocked = false
+    await page.getByRole('button', { name: 'Analyze plan' }).click()
+    await expect(page.getByText('Execution phases')).toBeVisible()
+    await expect(alert).toBeHidden()
+    expect(requests).toHaveLength(2)
+  })
+}
 
 test('uses compact mobile adjacency and bounds the optional graph for a larger plan', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })

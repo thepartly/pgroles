@@ -1,0 +1,8 @@
+{
+  "schema_version": "pgroles.explorer.v1",
+  "current": { "roles": { "deployer": {} } },
+  "desired_yaml": "roles:\n  - name: deployer\n",
+  "mode": "authoritative",
+  "executor": { "role": "deployer" },
+  "pg_major_version": 11
+}

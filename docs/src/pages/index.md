@@ -22,7 +22,7 @@ Start with [staged adoption](/docs/adoption) and check [executor prerequisites](
 
 {% quick-links %}
 
-{% quick-link title="Open the explorer" icon="presets" href="/docs/explorer" description="Validate a policy, compare a caller-sanitized snapshot, or import a recorded native review locally in your browser." /%}
+{% quick-link title="Open the explorer" icon="presets" href="/docs/explorer" description="Validate a policy, compare it with a snapshot you prepare and scrub yourself, or open a recorded native review locally in your browser." /%}
 
 {% quick-link title="Review a native plan" icon="installation" href="/docs/recorded-reviews" description="Export one CLI planning run and review its recorded changes, findings, and evidence without database access." /%}
 

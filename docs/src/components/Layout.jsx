@@ -15,6 +15,7 @@ import { Search } from '@/components/Search'
 import { ThemeSelector } from '@/components/ThemeSelector'
 import {
   DESTINATIONS,
+  getBreadcrumbs,
   getNavigation,
   getReadingLinks,
   resolvePage,
@@ -253,8 +254,10 @@ export function Layout({ children, title, tableOfContents }) {
   const reading = getReadingLinks(pathname)
   const currentSection = useTableOfContents(tableOfContents)
   const isHomePage = pathname === '/'
-  const isExplorer = destination.id === 'explorer'
-  const breadcrumb = page?.section ?? destination.label
+  // The explorer tool needs the full width. Other Explorer pages, such as
+  // the snapshot format, keep the documentation sidebar and breadcrumb.
+  const isExplorerTool = page?.href === '/docs/explorer'
+  const breadcrumbs = getBreadcrumbs(pathname)
 
   function isActive(section) {
     return section.id === currentSection || section.children?.some(isActive)
@@ -273,7 +276,7 @@ export function Layout({ children, title, tableOfContents }) {
       {isHomePage && <Hero />}
       <div className="dark:bg-stone-950 relative bg-stone-100 text-stone-900 dark:text-stone-100">
         <div className="max-w-8xl relative mx-auto flex justify-center sm:px-2 lg:px-8 xl:px-12">
-          {!isExplorer && (
+          {!isExplorerTool && (
             <aside className="hidden lg:relative lg:block lg:flex-none">
               <div
                 data-navigation-scroll
@@ -294,58 +297,47 @@ export function Layout({ children, title, tableOfContents }) {
           <main
             className={clsx(
               'min-w-0 flex-auto px-4 py-12',
-              isExplorer
+              isExplorerTool
                 ? 'w-full'
                 : 'max-w-2xl lg:max-w-none lg:pr-0 lg:pl-8 xl:px-16'
             )}
           >
             <article
-              data-pagefind-body={!isExplorer && page ? '' : undefined}
+              data-pagefind-body={!isExplorerTool && page ? '' : undefined}
               data-content-type={page?.contentType}
               data-destination={destination.label}
               data-pagefind-meta={
-                !isExplorer && page
+                !isExplorerTool && page
                   ? 'content_type[data-content-type], destination[data-destination]'
                   : undefined
               }
               data-pagefind-filter={
-                !isExplorer && page
+                !isExplorerTool && page
                   ? 'content_type[data-content-type], destination[data-destination]'
                   : undefined
               }
             >
-              {!isExplorer && (title || page) && (
+              {!isExplorerTool && (title || page) && (
                 <header className="mb-8 space-y-2">
                   <nav
                     aria-label="Breadcrumb"
                     data-pagefind-ignore
                     className="font-display text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300"
                   >
-                    {pathname === destination.href ? (
-                      <span>{destination.label}</span>
-                    ) : (
-                      <Link href={destination.href}>{destination.label}</Link>
-                    )}
-                    {breadcrumb !== destination.label && (
-                      <>
-                        <span aria-hidden="true"> / </span>
-                        <span>{breadcrumb}</span>
-                      </>
-                    )}
-                    {page?.navigationParent && (
-                      <>
-                        <span aria-hidden="true"> / </span>
-                        <Link href={page.navigationParent}>
-                          {resolvePage(page.navigationParent)?.navigationTitle}
-                        </Link>
-                      </>
-                    )}
-                    {page && (
-                      <>
-                        <span aria-hidden="true"> / </span>
-                        <span aria-current="page">{page.navigationTitle}</span>
-                      </>
-                    )}
+                    {breadcrumbs.map((crumb, index) => (
+                      <span key={`${crumb.label}-${index}`}>
+                        {index > 0 && <span aria-hidden="true"> / </span>}
+                        {crumb.href ? (
+                          <Link href={crumb.href}>{crumb.label}</Link>
+                        ) : (
+                          <span
+                            aria-current={crumb.current ? 'page' : undefined}
+                          >
+                            {crumb.label}
+                          </span>
+                        )}
+                      </span>
+                    ))}
                   </nav>
                   {title && (
                     <h1
