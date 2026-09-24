@@ -432,6 +432,10 @@ jobs:
       - uses: ./.github/actions/setup-e2e
         with:
           cluster-name: pgroles-e2e-operator
+          # The password lifecycle scenario asserts the password never reaches
+          # the operator log. The operator logs each statement's redacted SQL
+          # only at debug, so at info that assertion would check nothing.
+          operator-log-level: info,pgroles_operator=debug
 
       - name: Run the documented operator quick start
         run: scripts/e2e-doc-quick-start.sh
