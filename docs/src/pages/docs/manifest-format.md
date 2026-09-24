@@ -168,7 +168,7 @@ pgroles preserves existing owner-held ACL entries during reconciliation. Declare
 ## Convergent model
 
 {% callout type="warning" title="pgroles is convergent" %}
-The manifest declares desired state within pgroles’ managed scope. Reconciliation mode determines which changes are permitted, while external roles, PUBLIC rules and preservation settings introduce additional boundaries. Review the complete plan before applying.
+The manifest declares desired state within pgroles’ managed scope. In the default `authoritative` mode, roles, grants, default privileges, and memberships in that scope that the manifest omits are revoked or dropped. `adopt` mode never drops roles and `additive` mode never removes access; external roles, PUBLIC rules, and preservation settings add further boundaries. Declared schemas are created but never dropped automatically. Review the complete plan before applying.
 {% /callout %}
 
 Next: use the [manifest reference](/docs/manifest-reference) for exact field names, defaults, and bundle-mode details.

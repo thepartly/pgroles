@@ -29,11 +29,14 @@ function getBuildVersion(
   const revision = `${commit.slice(0, 8) || 'unknown revision'}${
     dirty ? ' (modified)' : ''
   }`
+  // Production docs deploy from main, which moves past a tag once anything
+  // merges after it, so development builds also name the latest release.
+  const latest = publishedRelease ? ` · latest release ${publishedRelease}` : ''
   return {
     label:
       release && release === publishedRelease && !dirty
         ? `Release docs · ${release} · ${revision}`
-        : `Development docs · ${revision}`,
+        : `Development docs · ${revision}${latest}`,
     commit,
   }
 }

@@ -18,11 +18,17 @@ test('only a clean published release identifies as release docs', () => {
     git('commit', '-m', 'Release fixture')
     git('tag', 'v0.12.0')
     assert.match(getBuildVersion(repository, 'v0.12.0').label, /^Release docs · v0.12.0 · [0-9a-f]{8}$/)
-    assert.match(getBuildVersion(repository, '').label, /^Development docs/)
+    assert.match(getBuildVersion(repository, '').label, /^Development docs · [0-9a-f]{8}$/)
     writeFileSync(join(repository, 'page.md'), 'Unreleased docs')
-    assert.match(getBuildVersion(repository, 'v0.12.0').label, /^Development docs .*\(modified\)$/)
+    assert.match(
+      getBuildVersion(repository, 'v0.12.0').label,
+      /^Development docs · [0-9a-f]{8} \(modified\) · latest release v0\.12\.0$/
+    )
     git('commit', '-am', 'Development fixture')
-    assert.match(getBuildVersion(repository, 'v0.12.0').label, /^Development docs · [0-9a-f]{8}$/)
+    assert.match(
+      getBuildVersion(repository, 'v0.12.0').label,
+      /^Development docs · [0-9a-f]{8} · latest release v0\.12\.0$/
+    )
     git('tag', 'v0.13.0')
     assert.match(getBuildVersion(repository, 'v0.12.0').label, /^Development docs/)
     assert.match(getBuildVersion(repository, 'v0.13.0').label, /^Release docs · v0.13.0/)
@@ -35,7 +41,7 @@ test('builds without git metadata are explicitly development docs', () => {
   const directory = mkdtempSync(join(tmpdir(), 'pgroles-docs-no-git-'))
   try {
     assert.deepEqual(getBuildVersion(directory, 'v0.12.0'), {
-      label: 'Development docs · unknown revision',
+      label: 'Development docs · unknown revision · latest release v0.12.0',
       commit: '',
     })
   } finally {

@@ -79,7 +79,9 @@ scenario interactions under the deployment base path.
 
 The footer identifies the source commit. Clean builds of the latest published
 release tag show **Release docs** with the tag; other builds show **Development
-docs**, including a modified marker for tracked local edits. CI fetches tags and
+docs**, including a modified marker for tracked local edits, followed by the
+latest published release. Production docs deploy from `main`, so they show
+Development docs once anything merges after a release. CI fetches tags and
 queries the latest published GitHub release for this check. Local builds default
 to Development docs; set `DOCS_PUBLISHED_RELEASE` to a verified published tag to
 label a release build. Compare the release label and feature-specific minimum
