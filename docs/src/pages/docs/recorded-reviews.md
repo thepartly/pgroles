@@ -7,8 +7,8 @@ Review the changes from one CLI planning run without recalculating them in the b
 
 ## Export once
 
-**Requires pgroles v0.13.0 or later (unreleased).** The published v0.12.0 binary
-does not support `--review-out`. Check your installed binary with `pgroles --version`.
+**Requires pgroles v0.13.0 or later.** Earlier binaries reject `--review-out`
+as a usage error. Check your installed binary with `pgroles --version`.
 
 With `DATABASE_URL` set for the target database, export a review alongside the normal output:
 
@@ -19,11 +19,10 @@ pgroles diff -f pgroles.yaml --mode adopt --format markdown \
   --no-exit-code > review.md
 ```
 
-`--review-out` requires a pgroles release after 0.12.0 and works with every
-output format. The artifact never reads `password.from_env` variables; only the
-`sql`, `json`, and `summary` formats require them. `--target-label` names the
-environment for reviewers and rejects values containing `://`, so a connection
-URL is never recorded.
+`--review-out` works with every output format. The artifact never reads
+`password.from_env` variables; only the `sql`, `json`, and `summary` formats
+require them. `--target-label` names the environment for reviewers and rejects
+values containing `://`, so a connection URL is never recorded.
 
 The command prints `Recorded review written to review.pgroles.json (review
 fingerprint sha256:…)` to stderr, and the Markdown report ends with the same

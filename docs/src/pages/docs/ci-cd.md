@@ -97,7 +97,7 @@ usage, connection, validation, inspection, or export errors:
       - name: Generate diff
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          # Pin a release that supports --review-out (any release after 0.12.0).
+          # Pin a release that supports --review-out (0.13.0 or later).
           PGROLES_IMAGE: ghcr.io/thepartly/pgroles:<version>
         run: |
           rm -f review.md "$GITHUB_WORKSPACE/review.pgroles.json"
@@ -152,7 +152,7 @@ usage, connection, validation, inspection, or export errors:
             }
 ```
 
-Replace `<version>` with a released version. `--review-out` is not available in
+Replace `<version>` with a released version, 0.13.0 or later. `--review-out` is not available in
 0.12.0 or earlier, where it is a usage error, so do not use a floating tag such
 as `latest` for this job. The image runs as an unprivileged user by default;
 `--user "$(id -u):$(id -g)"` lets it write the review file into the
