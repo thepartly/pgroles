@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test'
 
-const basePath = process.env.DOCS_TEST_BASE_PATH || '/pgroles/pr-preview/pr-236'
+const basePath = process.env.DOCS_TEST_BASE_PATH ?? '/pgroles/pr-preview/pr-236'
 
 export default defineConfig({
   testDir: './tests/browser',

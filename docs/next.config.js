@@ -3,6 +3,9 @@ const { readFileSync } = require('node:fs')
 const path = require('node:path')
 const withMarkdoc = require('@markdoc/next.js')
 const { PHASE_DEVELOPMENT_SERVER } = require('next/constants')
+const { getBuildVersion } = require('./build/version.cjs')
+
+const buildVersion = getBuildVersion()
 
 const basePath = process.env.DOCS_BASE_PATH || ''
 
@@ -43,6 +46,8 @@ module.exports = (phase) => {
     },
     env: {
       NEXT_PUBLIC_PGROLES_BUILD_ID: wasmBuildId(),
+      NEXT_PUBLIC_DOCS_BUILD_LABEL: buildVersion.label,
+      NEXT_PUBLIC_DOCS_BUILD_COMMIT: buildVersion.commit,
     },
     experimental: {
       scrollRestoration: true,

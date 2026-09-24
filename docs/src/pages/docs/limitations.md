@@ -84,6 +84,8 @@ pgroles does not touch server-level configuration. `ALTER SYSTEM`, `postgresql.c
 
 ## Row-level security
 
+### RLS policies are outside pgroles’ managed scope
+
 RLS policies (`CREATE POLICY`, `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`) are not modeled, inspected, or applied. This is on the roadmap — see [ROADMAP.md](https://github.com/thepartly/pgroles/blob/main/ROADMAP.md) on GitHub — but there is no current workaround beyond managing policies with raw SQL outside pgroles.
 
 ## Unmodeled grant object types

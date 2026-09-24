@@ -7,6 +7,14 @@ pgroles does not require superuser. It needs `CREATEROLE` plus a handful of scop
 
 ---
 
+## Permission denied
+
+A `permission denied` error means the executor lacks authority for the failing
+operation. Check the operation in the table below, then grant the scoped
+privilege or role membership it requires. `CREATEROLE` alone does not grant
+access to existing roles or database objects. For Kubernetes status reasons and
+execution gates, see [operator troubleshooting](/docs/operator-troubleshooting#executor-privileges).
+
 ## What pgroles actually needs
 
 The table targets PostgreSQL 16–18. `CREATEROLE` permits ordinary role creation;
