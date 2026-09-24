@@ -47,9 +47,7 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 
 ## Moving from 0.12 to 0.13
 
-- CRD schemas are unchanged. Continue using the chart's version-matched CRDs.
-- Operator reconciliation behaviour is unchanged. The operator now plans through `diff::plan_changes`, the planner shared with the CLI and the browser explorer, which applies the same retirement, reconciliation-mode, external-role, and preserved-grant handling in the same order.
-- The rest of this release is CLI and documentation work: `pgroles diff --review-out` recorded reviews, the browser plan explorer, and redacted `diff --format json` output. If CI jobs read comments or `config` values from `diff` JSON, read them from the manifest instead; see the release's upgrade notes.
+- CRDs, chart values, and reconciliation behaviour are unchanged. Continue using the chart's version-matched CRDs.
 
 ## Moving from 0.11 to 0.12
 

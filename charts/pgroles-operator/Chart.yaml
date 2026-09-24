@@ -16,14 +16,8 @@ maintainers:
     url: https://hardbyte.nz
 annotations:
   artifacthub.io/changes: |
-    - kind: added
-      description: 'pgroles diff --review-out writes a sanitized recorded review that the documentation explorer opens offline; the Markdown report ends with its review fingerprint.'
-    - kind: added
-      description: 'Browser plan explorer running pgroles-core as WebAssembly, with PostgreSQL version and authority-graph controls.'
     - kind: changed
-      description: 'diff --format json redacts role comments and configuration values, and diff no longer computes password verifiers.'
-    - kind: changed
-      description: 'The operator plans through diff::plan_changes, the planner shared with the CLI and explorer; reconciliation behaviour is unchanged.'
+      description: 'Operator image 0.13.0. Reconciliation behaviour, CRDs, and chart values are unchanged from 0.12.0.'
   artifacthub.io/category: database
   artifacthub.io/operator: "true"
   artifacthub.io/prerelease: "false"
