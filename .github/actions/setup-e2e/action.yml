@@ -9,6 +9,13 @@ inputs:
   operator-features:
     description: Optional operator Cargo features for this test image
     default: ""
+  operator-log-level:
+    description: >
+      RUST_LOG for the operator under test. The OTLP bridge exports every
+      enabled event to the dev collector, so debug output also inflates the
+      collector's log. Raise it only for jobs that assert on debug-level
+      operator logs.
+    default: info
 runs:
   using: composite
   steps:
@@ -151,6 +158,7 @@ runs:
           kubectl apply -f -
 
         kubectl -n pgroles-system set env deployment/pgroles-operator \
+          RUST_LOG="${{ inputs.operator-log-level }}" \
           OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.pgroles-system.svc.cluster.local:4317 \
           OTEL_METRICS_EXPORTER=otlp \
           OTEL_METRIC_EXPORT_INTERVAL=2000
