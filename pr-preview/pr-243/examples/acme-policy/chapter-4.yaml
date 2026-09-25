@@ -1,0 +1,34 @@
+roles:
+  - name: priya
+    external: true
+  - name: alice
+    login: true
+  - name: bob
+    login: true
+  - name: reporting_app
+    login: true
+  - name: deploy
+    login: true
+  - name: orders_reader
+  - name: app_owner
+
+schemas:
+  - name: app
+    owner: app_owner
+
+grants:
+  - role: orders_reader
+    privileges: [USAGE]
+    object: { type: schema, name: app }
+  - role: orders_reader
+    privileges: [SELECT]
+    object: { type: table, schema: app, name: orders }
+
+memberships:
+  - role: orders_reader
+    members:
+      - name: bob
+      - name: reporting_app
+  - role: app_owner
+    members:
+      - name: deploy
