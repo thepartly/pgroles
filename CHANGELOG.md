@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
-- **Recorded reviews.** `pgroles diff --review-out review.pgroles.json` saves the plan to a file: the ordered changes, the SQL preview, findings, executor authority per phase, and what it was computed against (pgroles version, PostgreSQL version, policy digest, and the `--target-label` and `--policy-commit` you pass). Passwords, role settings, and comments are left out, and the SQL preview is omitted when any change carries them, so the file is safe to attach to a pull request. The Markdown report and stderr print the file's review fingerprint. (#236, #241)
+- **Recorded reviews.** `pgroles diff --review-out review.pgroles.json` saves the plan to a file: the ordered changes, the SQL preview, findings, executor authority per phase, and what it was computed against (pgroles version, PostgreSQL version, policy digest, and the `--target-label` and `--policy-commit` you pass). Passwords, role settings, and comments are left out, and the SQL preview is omitted when any change carries them. Role and object names, managed scope, and labels stay in, so review the file before sharing it outside the team. The Markdown report and stderr print the file's review fingerprint. (#236, #241)
 - **Plan explorer.** The docs site has a browser explorer that validates a policy, analyses it against a snapshot, and opens recorded reviews, without connecting to a database. Nothing leaves the browser. (#236, #241)
 - **Docs search.** Full-text search across the docs and the Learn PostgreSQL course. (#238)
 
