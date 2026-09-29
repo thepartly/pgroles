@@ -1,0 +1,13 @@
+roles:
+  - name: priya
+    external: true
+  - name: alice
+    login: true
+
+grants:
+  - role: alice
+    privileges: [USAGE]
+    object: { type: schema, name: app }
+  - role: alice
+    privileges: [SELECT]
+    object: { type: table, schema: app, name: orders }
