@@ -58,8 +58,8 @@ password changes without reading their environment variables. Review the SQL and
 privileges as well as the conservative change priorities.
 
 For offline review, add `--review-out review.pgroles.json` to that same `diff`
-run and import the file into the explorer. `--review-out` needs a release after
-0.12.0 and works with any `--format`; the artifact never reads password
+run and import the file into the explorer. `--review-out` needs pgroles 0.13.0
+or later and works with any `--format`; the artifact never reads password
 variables. Preserve its recorded changes, preflight evidence, and provenance;
 opening a recorded review does not replan. The exporter omits exploration
 inputs, sensitive values, and any SQL preview affected by those omissions.

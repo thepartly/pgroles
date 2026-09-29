@@ -1,8 +1,8 @@
 {
   "schema_version": "pgroles.review-artifact.v2",
   "provenance": {
-    "tool_version": "0.12.0",
-    "captured_at": "2026-09-23T05:50:54.435218547Z",
+    "tool_version": "0.13.0",
+    "captured_at": "2026-09-23T19:35:41.3063163Z",
     "policy": {
       "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
     },
