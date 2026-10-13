@@ -956,6 +956,14 @@ async fn mark_requested_reconcile_handled(
     .await
 }
 
+fn set_blocked_plan_ref(status: &mut PostgresPolicyStatus, plan_name: &str) {
+    // The summary stays on the review plan. Failure status clears the policy
+    // summary, so setting it here would add a needless Some -> None round trip.
+    status.current_plan_ref = Some(crate::crd::PlanReference {
+        name: plan_name.to_string(),
+    });
+}
+
 fn mark_reconcile_failure_status(
     status: &mut PostgresPolicyStatus,
     error_reason: &str,
@@ -1815,10 +1823,7 @@ async fn apply_under_lock(
                 // authority must stop before recording AutoApproved.
                 if let Some(message) = &authority_block {
                     update_status(ctx, resource, |status| {
-                        status.current_plan_ref = Some(crate::crd::PlanReference {
-                            name: plan_name.clone(),
-                        });
-                        status.change_summary = Some(summary.clone());
+                        set_blocked_plan_ref(status, &plan_name);
                     })
                     .await?;
                     return Err(ReconcileError::ExecutorAuthority(message.clone()));
@@ -3402,13 +3407,9 @@ where
     apply_additive_absence_condition(&latest, &mut status);
     clear_stale_approval_ignored_condition(&latest, &mut status);
 
-    // A status write that changes nothing still bumps `resourceVersion`, and
-    // the resulting watch event re-triggers this controller immediately —
-    // discarding whatever back-off `error_policy` chose. That is not a
-    // theoretical cost: a permanently-failing policy reconciles, writes status,
-    // wakes itself, and spins as fast as it can reconcile (~5/second observed),
-    // taking the per-database advisory lock every time and starving every other
-    // policy pointed at the same database.
+    // Avoid redundant API writes and resourceVersion changes. The policy
+    // watch filters status-only updates; this does not imply a self-triggered
+    // reconcile loop, but no-op status patches still cost API requests.
     //
     // Compared as serialized JSON rather than with `PartialEq`: the question is
     // whether the PATCH body differs from what is stored, and that is exactly a
@@ -6143,5 +6144,34 @@ mod tests {
         // Should be within 2 seconds of now.
         let diff = now_secs.abs_diff(parsed.unwrap());
         assert!(diff <= 2, "parsed time should be close to now, diff={diff}");
+    }
+    #[test]
+    fn blocked_authority_retry_does_not_temporarily_change_failure_status() {
+        let mut status = PostgresPolicyStatus::default();
+        set_blocked_plan_ref(&mut status, "blocked-plan");
+        mark_reconcile_failure_status(
+            &mut status,
+            "ExecutorAuthority",
+            "grantor unavailable",
+            false,
+            false,
+        );
+        let stable = serde_json::to_value(&status).unwrap();
+        for _ in 0..3 {
+            set_blocked_plan_ref(&mut status, "blocked-plan");
+            assert_eq!(
+                serde_json::to_value(&status).unwrap(),
+                stable,
+                "publishing the same review reference must not create an intermediate status patch"
+            );
+            mark_reconcile_failure_status(
+                &mut status,
+                "ExecutorAuthority",
+                "grantor unavailable",
+                false,
+                false,
+            );
+            assert_eq!(serde_json::to_value(&status).unwrap(), stable);
+        }
     }
 }

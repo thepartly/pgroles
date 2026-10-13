@@ -45,6 +45,14 @@ plan="$(wait_for_current_plan_ref plan-authority-policy)"
 wait_for_plan_phase "$plan" Pending
 [[ "$(get_plan_sql "$plan")" == *'REVOKE "pln_group" FROM "pln_member" GRANTED BY "pln_grantor";'* ]]
 test "$(pg_query "SELECT pg_has_role('pln_member','pln_group','MEMBER');")" = t
+# Failure status must stay coherent during scheduled retries. Do not assert
+# that every resourceVersion is fixed: other legitimate writers may update it.
+failure_status() {
+  kubectl get pgr plan-authority-policy -o json | python3 -c 'import json,sys; s=json.load(sys.stdin)["status"]; s.pop("lastHandledReconcileAt",None); s.pop("last_handled_reconcile_at",None); print(json.dumps(s,sort_keys=True))'
+}
+initial_failure="$(failure_status)"
+sleep 6
+test "$(failure_status)" = "$initial_failure"
 for pass in 1 2 3; do
   kubectl annotate pgr plan-authority-policy reconcile.pgroles.io/requestedAt="pending-$pass-$(date +%s)" --overwrite
   sleep 3
