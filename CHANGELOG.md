@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Blocked auto-apply plans remain Pending and retain their review reference. Identical Approved plans are reused instead of accumulating while executor authority is unavailable.
+
 ## [0.13.0] - 2026-09-24
 
 ### Highlights

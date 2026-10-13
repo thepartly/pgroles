@@ -1810,6 +1810,20 @@ async fn apply_under_lock(
                     .await;
                 }
 
+                // Publish the review reference while the blocked plan stays
+                // Pending. Approval is an execution decision, so missing
+                // authority must stop before recording AutoApproved.
+                if let Some(message) = &authority_block {
+                    update_status(ctx, resource, |status| {
+                        status.current_plan_ref = Some(crate::crd::PlanReference {
+                            name: plan_name.clone(),
+                        });
+                        status.change_summary = Some(summary.clone());
+                    })
+                    .await?;
+                    return Err(ReconcileError::ExecutorAuthority(message.clone()));
+                }
+
                 crate::plan::mark_plan_approved(
                     &ctx.kube_client,
                     &plan,
@@ -1821,13 +1835,6 @@ async fn apply_under_lock(
                 // Re-fetch after approval status update.
                 let plan = plans_api.get(&plan_name).await?;
                 emit_plan_event(ctx, resource, &plan, PlanEventType::Approved).await;
-
-                // The plan exists and is reviewable; this is the point past
-                // which it would execute, so this is where missing authority
-                // stops it.
-                if let Some(message) = &authority_block {
-                    return Err(ReconcileError::ExecutorAuthority(message.clone()));
-                }
 
                 emit_plan_event(ctx, resource, &plan, PlanEventType::ApplyStarted).await;
 

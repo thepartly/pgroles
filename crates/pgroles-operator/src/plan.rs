@@ -637,7 +637,7 @@ fn plan_base_pin(plan: &PostgresPolicyPlan) -> Option<&str> {
 /// This function:
 /// 1. Renders the full executable SQL from the changes
 /// 2. Computes SHA-256 of the full SQL (before any redaction/truncation)
-/// 3. Checks for an existing Pending plan with the same hash (dedup)
+/// 3. Checks for an existing Pending or Approved plan with the same hash (dedup)
 /// 4. Persists the SQL preview artifact, if needed
 /// 5. Creates the new plan resource with ownerReferences
 /// 6. Updates the plan status
@@ -738,10 +738,10 @@ pub async fn create_or_update_plan(
         .filter(|plan| owner.owns(plan))
         .collect();
 
-    // 5. Check for duplicate pending plan with the same effects.
+    // 5. Check for duplicate pending or approved plan with the same effects.
     for plan in &existing_plans {
         if let Some(ref status) = plan.status
-            && status.phase == PlanPhase::Pending
+            && matches!(status.phase, PlanPhase::Pending | PlanPhase::Approved)
             && plan_matches_digest(status, &change_digest)
             && expected_base.is_none_or(|base| plan_base_pin(plan) == Some(base))
         {
@@ -750,9 +750,9 @@ pub async fn create_or_update_plan(
             info!(
                 plan = %plan_name,
                 policy = %policy_name,
-                "existing pending plan has identical change digest, skipping creation"
+                "existing actionable plan has identical change digest, skipping creation"
             );
-            // This pending plan *is* the replacement: it is already visible and
+            // This actionable plan *is* the replacement: it is already visible and
             // holds exactly these effects, so any stale approved plan can be
             // retired now without leaving the policy with nothing actionable.
             supersede_stale_plans(

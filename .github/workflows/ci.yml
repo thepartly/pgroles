@@ -1596,6 +1596,9 @@ jobs:
       # cluster, operator and PostgreSQL, and a second kind cluster would cost
       # several minutes of CI for nothing.
       # ==================================================================
+      - name: Verify blocked auto-apply plan lifecycle
+        run: bash scripts/e2e-plan-authority.sh
+
       - name: Verify candidate grant preservation
         run: scripts/e2e-candidate-preservation.sh
 
