@@ -111,6 +111,10 @@ pub enum BlockCause {
     /// The policy's reconcile did not converge: failing, suspended, in
     /// conflict, or blocked on target identity.
     Unstable,
+    /// This candidate alone could not be evaluated this pass — adopting it or
+    /// reading its plans failed — so its previous result is withdrawn. The
+    /// parent is not at fault and the reason must not say it is.
+    CandidateUnavailable,
 }
 
 impl BlockCause {
@@ -124,7 +128,24 @@ impl BlockCause {
                 "the active policy is not converging, so there is no post-enforcement state to \
                  plan this candidate against"
             }
+            BlockCause::CandidateUnavailable => {
+                "this candidate could not be evaluated this pass, so its previous result is \
+                 withdrawn; it is re-planned on the next reconcile"
+            }
         }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            BlockCause::AwaitingDecision | BlockCause::Unstable => {
+                candidate_reason::BLOCKED_BY_ACTIVE_POLICY
+            }
+            BlockCause::CandidateUnavailable => candidate_reason::PLANNING_FAILED,
+        }
+    }
+
+    fn is_warning(self) -> bool {
+        true
     }
 }
 
@@ -339,9 +360,12 @@ pub(crate) async fn invalidate_parent_evaluation(
 ) -> Result<(), ReconcileError> {
     let namespace = policy.namespace().ok_or(ReconcileError::NoNamespace)?;
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
+    // One candidate's failure must not leave its siblings showing eligibility
+    // that is no longer current, so each is attempted independently.
     for mut candidate in api.list(&ListParams::default()).await? {
         if candidate_belongs_to(&candidate, policy) && needs_parent_invalidation(&candidate) {
-            invalidate_if_current(ctx, policy, &mut candidate).await?;
+            invalidate_candidate_best_effort(ctx, policy, &mut candidate, BlockCause::Unstable)
+                .await;
         }
     }
     Ok(())
@@ -351,9 +375,10 @@ async fn invalidate_candidate_best_effort(
     ctx: &OperatorContext,
     policy: &PostgresPolicy,
     candidate: &mut PostgresPolicyCandidate,
+    cause: BlockCause,
 ) {
     if needs_parent_invalidation(candidate)
-        && let Err(err) = invalidate_if_current(ctx, policy, candidate).await
+        && let Err(err) = invalidate_if_current(ctx, policy, candidate, cause).await
     {
         tracing::warn!(candidate = %candidate.name_any(), %err,
             "could not clear unavailable candidate eligibility");
@@ -364,40 +389,24 @@ async fn invalidate_if_current(
     ctx: &OperatorContext,
     policy: &PostgresPolicy,
     candidate: &mut PostgresPolicyCandidate,
+    cause: BlockCause,
 ) -> Result<(), ReconcileError> {
     let original_uid = candidate.metadata.uid.clone();
-    let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
-    let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    for _ in 0..3 {
-        if !invalidation_still_current(original_uid.as_deref(), candidate, policy) {
-            return Ok(());
-        }
-        match block_candidate(ctx, candidate, BlockCause::Unstable).await {
-            Ok(()) => return Ok(()),
-            Err(ReconcileError::Kube(kube::Error::Api(error)))
-                if error.code == 409 || error.code == 422 =>
-            {
-                let Some(fresh) = api.get_opt(&candidate.name_any()).await? else {
-                    return Ok(());
-                };
-                // A validation error with unchanged preconditions is not a
-                // concurrency conflict and must not be hidden by retries.
-                if fresh.metadata.uid == candidate.metadata.uid
-                    && fresh.metadata.resource_version == candidate.metadata.resource_version
-                {
-                    return Err(ReconcileError::Kube(kube::Error::Api(error)));
-                }
-                *candidate = fresh;
-            }
-            Err(error) => return Err(error),
-        }
-    }
     if !invalidation_still_current(original_uid.as_deref(), candidate, policy) {
         return Ok(());
     }
-    Err(ReconcileError::InvalidSpec(
-        "candidate status changed repeatedly; retry from fresh state".into(),
-    ))
+    let already_blocked = is_blocked(candidate, cause);
+    let wrote = write_candidate_status(
+        ctx,
+        candidate,
+        |status| set_blocked_condition(status, cause),
+        |fresh| invalidation_still_current(original_uid.as_deref(), fresh, policy),
+    )
+    .await?;
+    if wrote && !already_blocked {
+        publish_block_event(ctx, candidate, cause).await;
+    }
+    Ok(())
 }
 
 fn invalidation_still_current(
@@ -477,7 +486,13 @@ pub async fn reconcile_candidates(
                 %err,
                 "failed to adopt candidate; current eligibility is unavailable"
             );
-            invalidate_candidate_best_effort(ctx, policy, candidate).await;
+            invalidate_candidate_best_effort(
+                ctx,
+                policy,
+                candidate,
+                BlockCause::CandidateUnavailable,
+            )
+            .await;
             continue;
         }
 
@@ -522,7 +537,13 @@ pub async fn reconcile_candidates(
                     %err,
                     "failed to read this candidate's plans; current eligibility is unavailable"
                 );
-                invalidate_candidate_best_effort(ctx, policy, candidate).await;
+                invalidate_candidate_best_effort(
+                    ctx,
+                    policy,
+                    candidate,
+                    BlockCause::CandidateUnavailable,
+                )
+                .await;
                 continue;
             }
         };
@@ -558,6 +579,17 @@ pub async fn reconcile_candidates(
         match outcome {
             Ok(outcome) => {
                 record_outcome(ctx, candidate, outcome, &evaluation).await?;
+            }
+            // A target override shares its database's locks with whatever
+            // else manages it. Contention there is as routine as it is for the
+            // parent, so the stamped result stands until the next pass.
+            Err(ReconcileError::LockContention(database, reason)) => {
+                tracing::debug!(
+                    candidate = %candidate.name_any(),
+                    %database,
+                    %reason,
+                    "candidate target is locked; keeping its previous result"
+                );
             }
             Err(err) => {
                 let message = err.to_string();
@@ -1321,34 +1353,92 @@ async fn adopt_candidate(
 }
 
 /// Apply a status mutation to a candidate and write it back.
-async fn write_status<F>(
+///
+/// Never writes over a candidate that became terminal after `candidate` was
+/// read; see [`write_candidate_status`].
+pub(crate) async fn write_status<F>(
     ctx: &OperatorContext,
     candidate: &mut PostgresPolicyCandidate,
     mutate: F,
 ) -> Result<(), ReconcileError>
 where
-    F: FnOnce(&mut PostgresPolicyCandidateStatus),
+    F: Fn(&mut PostgresPolicyCandidateStatus),
 {
+    let snapshot_terminal = candidate_phase(candidate).is_terminal();
+    write_candidate_status(ctx, candidate, mutate, |fresh| {
+        snapshot_terminal || !candidate_phase(fresh).is_terminal()
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Write a candidate's complete status, guarded by its UID and
+/// resourceVersion, and return whether the write landed.
+///
+/// The guard is what stops a stale snapshot reopening a superseded or promoted
+/// proposal, but it also fails on any unrelated metadata edit — a label, an
+/// annotation — made since the read. Such a conflict re-reads the candidate
+/// and re-applies `mutate` to the fresh status, while `still_wanted` holds for
+/// the fresh object; otherwise the write is abandoned (`Ok(false)`). A
+/// validation failure with unchanged preconditions is an error, not a race.
+pub(crate) async fn write_candidate_status<F, W>(
+    ctx: &OperatorContext,
+    candidate: &mut PostgresPolicyCandidate,
+    mutate: F,
+    still_wanted: W,
+) -> Result<bool, ReconcileError>
+where
+    F: Fn(&mut PostgresPolicyCandidateStatus),
+    W: Fn(&PostgresPolicyCandidate) -> bool,
+{
+    const ATTEMPTS: usize = 3;
     let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    let mut status = candidate.status.clone().unwrap_or_default();
-    // A parent block, planning failure, supersession or promotion must not
-    // keep an eligibility result from an older evaluation of review SQL.
-    status.executor_authority = None;
-    mutate(&mut status);
-    let patch = candidate_status_cas_patch(candidate, &status)?;
-    let updated = api
-        .patch_status(
-            &candidate.name_any(),
-            &PatchParams::apply("pgroles-operator"),
-            &Patch::<()>::Json(
-                serde_json::from_value(patch)
-                    .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
-            ),
-        )
-        .await?;
-    *candidate = updated;
-    Ok(())
+    let original_uid = candidate.metadata.uid.clone();
+    for _ in 0..ATTEMPTS {
+        let mut status = candidate.status.clone().unwrap_or_default();
+        // A parent block, planning failure, supersession or promotion must not
+        // keep an eligibility result from an older evaluation of review SQL.
+        status.executor_authority = None;
+        mutate(&mut status);
+        let patch = candidate_status_cas_patch(candidate, &status)?;
+        let result = api
+            .patch_status(
+                &candidate.name_any(),
+                &PatchParams::apply("pgroles-operator"),
+                &Patch::<()>::Json(
+                    serde_json::from_value(patch)
+                        .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
+                ),
+            )
+            .await;
+        match result {
+            Ok(updated) => {
+                *candidate = updated;
+                return Ok(true);
+            }
+            Err(kube::Error::Api(error)) if error.code == 409 || error.code == 422 => {
+                let Some(fresh) = api.get_opt(&candidate.name_any()).await? else {
+                    return Ok(false);
+                };
+                if fresh.metadata.uid == candidate.metadata.uid
+                    && fresh.metadata.resource_version == candidate.metadata.resource_version
+                {
+                    return Err(ReconcileError::Kube(kube::Error::Api(error)));
+                }
+                if fresh.metadata.uid != original_uid || !still_wanted(&fresh) {
+                    *candidate = fresh;
+                    return Ok(false);
+                }
+                *candidate = fresh;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ReconcileError::InvalidSpec(format!(
+        "candidate {} status changed {ATTEMPTS} times while being written; retrying from fresh state",
+        candidate.name_any()
+    )))
 }
 
 pub(crate) fn candidate_status_cas_patch(
@@ -1413,10 +1503,13 @@ async fn record_outcome(
                 "Plan {plan_name} holds {changes} change(s) for review; execution is blocked{parent_note}:\n{message}"
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority =
-                    Some(evaluation.authority(ExecutorAuthorityEligibility::Blocked, issues));
+                status.executor_authority = Some(
+                    evaluation.authority(ExecutorAuthorityEligibility::Blocked, issues.clone()),
+                );
                 status.phase = CandidatePhase::Planned;
-                status.plan_ref = Some(PlanReference { name: plan_name });
+                status.plan_ref = Some(PlanReference {
+                    name: plan_name.clone(),
+                });
                 set_condition_in(
                     &mut status.conditions,
                     ready_condition(false, candidate_reason::EXECUTOR_AUTHORITY, &message),
@@ -1519,41 +1612,53 @@ async fn mark_over_budget(
     Ok(())
 }
 
+fn is_blocked(candidate: &PostgresPolicyCandidate, cause: BlockCause) -> bool {
+    candidate.status.as_ref().is_some_and(|status| {
+        status.conditions.iter().any(|c| {
+            c.condition_type == "Ready"
+                && c.status == "False"
+                && c.reason.as_deref() == Some(cause.reason())
+        })
+    })
+}
+
+fn set_blocked_condition(status: &mut PostgresPolicyCandidateStatus, cause: BlockCause) {
+    set_condition_in(
+        &mut status.conditions,
+        ready_condition(false, cause.reason(), cause.message()),
+    );
+}
+
+async fn publish_block_event(
+    ctx: &OperatorContext,
+    candidate: &PostgresPolicyCandidate,
+    cause: BlockCause,
+) {
+    crate::events::publish_candidate_event(
+        &ctx.event_recorder,
+        candidate,
+        cause.is_warning(),
+        cause.reason(),
+        cause.message().to_string(),
+    )
+    .await
+    .ok();
+}
+
 async fn block_candidate(
     ctx: &OperatorContext,
     candidate: &mut PostgresPolicyCandidate,
     cause: BlockCause,
 ) -> Result<(), ReconcileError> {
-    let already_blocked = candidate.status.as_ref().is_some_and(|status| {
-        status.conditions.iter().any(|c| {
-            c.condition_type == "Ready"
-                && c.status == "False"
-                && c.reason.as_deref() == Some(candidate_reason::BLOCKED_BY_ACTIVE_POLICY)
-        })
-    });
+    let already_blocked = is_blocked(candidate, cause);
     write_status(ctx, candidate, |status| {
-        set_condition_in(
-            &mut status.conditions,
-            ready_condition(
-                false,
-                candidate_reason::BLOCKED_BY_ACTIVE_POLICY,
-                cause.message(),
-            ),
-        );
+        set_blocked_condition(status, cause)
     })
     .await?;
     // The parent can stay blocked for many cycles; one Event per transition is
     // the point of Events, a stream of identical ones is noise.
     if !already_blocked {
-        crate::events::publish_candidate_event(
-            &ctx.event_recorder,
-            candidate,
-            true,
-            candidate_reason::BLOCKED_BY_ACTIVE_POLICY,
-            cause.message().to_string(),
-        )
-        .await
-        .ok();
+        publish_block_event(ctx, candidate, cause).await;
     }
     Ok(())
 }
@@ -2264,6 +2369,19 @@ mod tests {
             parent_state: ParentEvaluationState::Converged,
         }
         .authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![])
+    }
+
+    #[test]
+    fn a_failure_confined_to_one_candidate_does_not_blame_the_parent() {
+        let cause = BlockCause::CandidateUnavailable;
+        assert_eq!(cause.reason(), candidate_reason::PLANNING_FAILED);
+        assert!(!cause.message().contains("active policy"));
+        for parent_cause in [BlockCause::AwaitingDecision, BlockCause::Unstable] {
+            assert_eq!(
+                parent_cause.reason(),
+                candidate_reason::BLOCKED_BY_ACTIVE_POLICY
+            );
+        }
     }
 
     #[test]

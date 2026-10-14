@@ -770,23 +770,14 @@ pub async fn record_promotion(
         "content promoted into policy {} and applied{plan_note}",
         policy.name_any()
     );
-    let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
-    let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    let status = promoted_status(candidate, &message);
-    api.patch_status(
-        &promoted_name,
-        &PatchParams::apply("pgroles-operator"),
-        &Patch::<()>::Json(
-            serde_json::from_value(crate::candidate::candidate_status_cas_patch(
-                candidate, &status,
-            )?)
-            .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
-        ),
-    )
+    let mut candidate = candidate.clone();
+    crate::candidate::write_status(ctx, &mut candidate, |status| {
+        mark_promoted(status, &message)
+    })
     .await?;
     crate::events::publish_candidate_event(
         &ctx.event_recorder,
-        candidate,
+        &candidate,
         false,
         candidate_reason::PROMOTED,
         message,
@@ -801,11 +792,7 @@ pub async fn record_promotion(
     Ok(())
 }
 
-fn promoted_status(
-    candidate: &PostgresPolicyCandidate,
-    message: &str,
-) -> crate::crd::PostgresPolicyCandidateStatus {
-    let mut status = candidate.status.clone().unwrap_or_default();
+fn mark_promoted(status: &mut crate::crd::PostgresPolicyCandidateStatus, message: &str) {
     status.phase = CandidatePhase::Promoted;
     status.executor_authority = None;
     set_condition_in(
@@ -816,6 +803,15 @@ fn promoted_status(
         &mut status.conditions,
         ready_condition(true, candidate_reason::PROMOTED, message),
     );
+}
+
+#[cfg(test)]
+fn promoted_status(
+    candidate: &PostgresPolicyCandidate,
+    message: &str,
+) -> crate::crd::PostgresPolicyCandidateStatus {
+    let mut status = candidate.status.clone().unwrap_or_default();
+    mark_promoted(&mut status, message);
     status
 }
 
@@ -859,26 +855,15 @@ async fn set_candidate_condition(
             c.condition_type == condition.condition_type && c.reason.as_deref() == Some(reason)
         })
     });
-    let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
-    let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    let mut status = candidate.status.clone().unwrap_or_default();
-    status.executor_authority = None;
-    set_condition_in(&mut status.conditions, condition);
-    api.patch_status(
-        &candidate.name_any(),
-        &PatchParams::apply("pgroles-operator"),
-        &Patch::<()>::Json(
-            serde_json::from_value(crate::candidate::candidate_status_cas_patch(
-                candidate, &status,
-            )?)
-            .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
-        ),
-    )
+    let mut candidate = candidate.clone();
+    crate::candidate::write_status(ctx, &mut candidate, |status| {
+        set_condition_in(&mut status.conditions, condition.clone())
+    })
     .await?;
     if !already {
         crate::events::publish_candidate_event(
             &ctx.event_recorder,
-            candidate,
+            &candidate,
             warning,
             reason,
             message.to_string(),

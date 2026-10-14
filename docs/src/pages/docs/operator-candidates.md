@@ -89,14 +89,19 @@ even when the parent already holds the locks for the same database.
 Parent failures other than executor authority, suspension and unavailable
 planning clear previous eligibility and mark nonterminal previews unready
 through status only; their review SQL and plan reference remain available. Lock
-contention does not: it is routine when policies share a database, and the
-stamped `evaluatedAt` and `parentGeneration` already let a consumer reject a
-result that is too old. If the API cannot accept that status update,
-consumers must also reject the unhealthy parent. Promotion clears preview
-eligibility because it no longer describes current candidate review SQL.
-Status updates test the candidate UID and resourceVersion; conflicting
-invalidation re-reads ownership and terminal state so an older snapshot cannot
-reopen a superseded or promoted proposal.
+contention does not, on the parent or on a target override: it is routine when
+policies share a database, and the stamped `evaluatedAt` and `parentGeneration`
+already let a consumer reject a result that is too old. A failure confined to
+one candidate — its adoption, or reading its plans — reports `Ready=False` with
+reason `PlanningFailed` on that candidate alone rather than blaming the parent,
+and a failure partway through a pass withdraws nothing already written. If the
+API cannot accept a status update, consumers must also reject the unhealthy
+parent. Promotion clears preview eligibility because it no longer describes
+current candidate review SQL. Every candidate status write tests the
+candidate's UID and resourceVersion; a conflict re-reads the candidate and
+retries against the fresh object, and abandons the write if that object is a
+different incarnation or became terminal, so an older snapshot cannot reopen a
+superseded or promoted proposal.
 
 Candidate planning still omits plan advisory warnings and the adopt-mode
 schema-owner-transfer guard. Execution settings such as
