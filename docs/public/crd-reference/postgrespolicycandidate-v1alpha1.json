@@ -838,6 +838,47 @@
           "nullable": true,
           "type": "string"
         },
+        "executorAuthority": {
+          "description": "Read-only executor-authority preflight for the current review SQL.\nAbsent when no current check is available. Apply rechecks fresh state;\nNoKnownBlockers describes targeted checks, not guaranteed SQL success.",
+          "nullable": true,
+          "properties": {
+            "eligibility": {
+              "description": "Whether the shared apply preflight found any known authority blockers.",
+              "enum": [
+                "NoKnownBlockers",
+                "Blocked"
+              ],
+              "type": "string"
+            },
+            "issues": {
+              "description": "Known blockers, with stable diagnostic codes and readable details.",
+              "items": {
+                "description": "One known executor-authority blocker.",
+                "properties": {
+                  "code": {
+                    "description": "Stable kind returned by the shared authority preflight.",
+                    "type": "string"
+                  },
+                  "message": {
+                    "description": "Readable explanation naming the affected roles or objects.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "eligibility",
+            "issues"
+          ],
+          "type": "object"
+        },
         "observedGeneration": {
           "description": "The `.metadata.generation` that was last observed. A candidate spec is\nimmutable, so this advances at most once.",
           "format": "int64",

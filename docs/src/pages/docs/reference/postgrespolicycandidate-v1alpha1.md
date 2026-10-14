@@ -135,6 +135,12 @@ For workflows, see [operator guidance](/docs/operator), [approval](/docs/operato
 | ` status.conditions[].status ` | **string; required.** Status: "True", "False", or "Unknown". |
 | ` status.conditions[].type ` | **string; required.** Controller-defined condition type, such as Ready, Reconciling, or Degraded. This is an open vocabulary; consult status guidance for operational meanings. |
 | ` status.contentDigest ` | **string; optional.** Canonical digest of &#96;spec.content&#96;, computed by &#96;pgroles&#95;core::candidate::compute&#95;content&#95;digest&#96;. This is what promotion is verified against. **Constraints:** ` {"maxLength":128,"nullable":true} `. |
+| ` status.executorAuthority ` | **object; optional.** Read-only executor-authority preflight for the current review SQL. Absent when no current check is available. Apply rechecks fresh state; NoKnownBlockers describes targeted checks, not guaranteed SQL success. **Constraints:** ` {"nullable":true,"required":["eligibility","issues"]} `. |
+| ` status.executorAuthority.eligibility ` | **string; required.** Whether the shared apply preflight found any known authority blockers. **Constraints:** ` {"enum":["NoKnownBlockers","Blocked"]} `. |
+| ` status.executorAuthority.issues ` | **array; required.** Known blockers, with stable diagnostic codes and readable details. |
+| ` status.executorAuthority.issues[] ` | **object; item or branch.** One known executor-authority blocker. **Constraints:** ` {"required":["code","message"]} `. |
+| ` status.executorAuthority.issues[].code ` | **string; required.** Stable kind returned by the shared authority preflight. |
+| ` status.executorAuthority.issues[].message ` | **string; required.** Readable explanation naming the affected roles or objects. |
 | ` status.observedGeneration ` | **integer; optional.** The &#96;.metadata.generation&#96; that was last observed. A candidate spec is immutable, so this advances at most once. **Constraints:** ` {"format":"int64","nullable":true} `. |
 | ` status.phase ` | **string; optional.** Current candidate evaluation and promotion phase. **Default:** ` "Pending" `. **Constraints:** ` {"enum":["Pending","Planned","Promoted","Superseded","Stale"]} `. |
 | ` status.planRef ` | **object; optional.** The &#96;PostgresPolicyPlan&#96; produced for this candidate. **Constraints:** ` {"nullable":true,"required":["name"]} `. |

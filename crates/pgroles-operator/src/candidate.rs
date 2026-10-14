@@ -59,7 +59,8 @@ use pgroles_core::overlap::{
 
 use crate::context::OperatorContext;
 use crate::crd::{
-    CandidatePhase, CandidateTarget, ConnectionSpec, DatabaseIdentity, PlanPhase, PlanReference,
+    CandidateExecutorAuthority, CandidatePhase, CandidateTarget, ConnectionSpec, DatabaseIdentity,
+    ExecutorAuthorityDiagnostic, ExecutorAuthorityEligibility, PlanPhase, PlanReference,
     PolicyCondition, PostgresPolicy, PostgresPolicyCandidate, PostgresPolicyCandidateStatus,
     PostgresPolicyPlan, SecretReference, candidate_reason, is_retention_exempt, ready_condition,
     set_condition_in, superseded_condition,
@@ -174,6 +175,13 @@ pub struct CandidatePlanning<'a> {
 enum CandidateOutcome {
     /// A plan exists (fresh or deduplicated) holding these effects.
     Planned { plan_name: String, changes: i32 },
+    /// SQL remains reviewable, but the apply preflight found known blockers.
+    ExecutorAuthority {
+        plan_name: String,
+        changes: i32,
+        message: String,
+        issues: Vec<ExecutorAuthorityDiagnostic>,
+    },
     /// The content produces no changes at all — nothing to review.
     NoEffects,
     /// A plan exists, but an ephemeral overlay touches the same
@@ -261,6 +269,46 @@ fn classify_open_candidates(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Invalidate previous preview eligibility when parent evaluation cannot run.
+/// This uses only Kubernetes status: no database connection, inspection,
+/// adoption, plan mutation or SQL is needed on parent failure/suspension paths.
+pub(crate) async fn invalidate_parent_evaluation(
+    ctx: &OperatorContext,
+    policy: &PostgresPolicy,
+) -> Result<(), ReconcileError> {
+    let namespace = policy.namespace().ok_or(ReconcileError::NoNamespace)?;
+    let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
+    for mut candidate in api.list(&ListParams::default()).await? {
+        if candidate_belongs_to(&candidate, policy) && needs_parent_invalidation(&candidate) {
+            block_candidate(ctx, &mut candidate, BlockCause::Unstable).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn invalidate_candidate_best_effort(
+    ctx: &OperatorContext,
+    candidate: &mut PostgresPolicyCandidate,
+) {
+    if needs_parent_invalidation(candidate)
+        && let Err(err) = block_candidate(ctx, candidate, BlockCause::Unstable).await
+    {
+        tracing::warn!(candidate = %candidate.name_any(), %err,
+            "could not clear unavailable candidate eligibility");
+    }
+}
+
+fn needs_parent_invalidation(candidate: &PostgresPolicyCandidate) -> bool {
+    !candidate_phase(candidate).is_terminal()
+        && candidate.status.as_ref().is_some_and(|status| {
+            status.executor_authority.is_some()
+                || status
+                    .conditions
+                    .iter()
+                    .any(|c| c.condition_type == "Ready" && c.status == "True")
+        })
+}
+
 /// Plan every non-terminal candidate of `policy`, then run candidate retention.
 ///
 /// Called from the parent's reconcile while its locks are still held. Failures
@@ -313,8 +361,9 @@ pub async fn reconcile_candidates(
             tracing::warn!(
                 candidate = %candidate.name_any(),
                 %err,
-                "failed to adopt candidate; skipping this cycle"
+                "failed to adopt candidate; current eligibility is unavailable"
             );
+            invalidate_candidate_best_effort(ctx, candidate).await;
             continue;
         }
 
@@ -357,8 +406,9 @@ pub async fn reconcile_candidates(
                 tracing::warn!(
                     candidate = %candidate.name_any(),
                     %err,
-                    "failed to read this candidate's plans; skipping this cycle"
+                    "failed to read this candidate's plans; current eligibility is unavailable"
                 );
+                invalidate_candidate_best_effort(ctx, candidate).await;
                 continue;
             }
         };
@@ -726,6 +776,12 @@ async fn plan_against_target(
         return Ok(CandidateOutcome::NoEffects);
     }
 
+    // Use the exact read-only preflight apply uses, on this target and these
+    // final filtered effects. Preserve the review plan even when execution
+    // is impossible; promotion/apply still rechecks fresh authority.
+    let authority_issues =
+        pgroles_inspect::preflight_authority_issues(target.pool(), &changes, &current).await?;
+
     let candidate_pairs = effect_pairs(&changes);
     let overlapping = intersecting_pairs(&candidate_pairs, overlay_pairs);
 
@@ -776,6 +832,36 @@ async fn plan_against_target(
         )
         .await
         .ok();
+    }
+
+    if !authority_issues.is_empty() {
+        let mut message = authority_issues
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !overlapping.is_empty() {
+            message.push_str(&format!(
+                "\nActive ephemeral effects also overlap: {}",
+                overlapping
+                    .iter()
+                    .map(describe_pair)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return Ok(CandidateOutcome::ExecutorAuthority {
+            plan_name,
+            changes: summary.total,
+            message,
+            issues: authority_issues
+                .iter()
+                .map(|issue| ExecutorAuthorityDiagnostic {
+                    code: issue.code().to_string(),
+                    message: issue.to_string(),
+                })
+                .collect(),
+        });
     }
 
     if !overlapping.is_empty() {
@@ -1133,8 +1219,11 @@ where
     let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
     let mut status = candidate.status.clone().unwrap_or_default();
+    // A parent block, planning failure, supersession or promotion must not
+    // keep an eligibility result from an older evaluation of review SQL.
+    status.executor_authority = None;
     mutate(&mut status);
-    let patch = serde_json::json!({ "status": status });
+    let patch = candidate_status_patch(&status);
     let updated = api
         .patch_status(
             &candidate.name_any(),
@@ -1146,6 +1235,14 @@ where
     Ok(())
 }
 
+pub(crate) fn candidate_status_patch(status: &PostgresPolicyCandidateStatus) -> serde_json::Value {
+    let mut patch = serde_json::json!({ "status": status });
+    // Optional fields are skipped in serialization; a merge patch needs an
+    // explicit null to clear an old server-side preflight result.
+    patch["status"]["executorAuthority"] = serde_json::json!(status.executor_authority);
+    patch
+}
+
 async fn record_outcome(
     ctx: &OperatorContext,
     candidate: &mut PostgresPolicyCandidate,
@@ -1153,8 +1250,14 @@ async fn record_outcome(
 ) -> Result<(), ReconcileError> {
     match outcome {
         CandidateOutcome::Planned { plan_name, changes } => {
-            let message = format!("Plan {plan_name} holds {changes} change(s) for review");
+            let message = format!(
+                "Plan {plan_name} holds {changes} change(s) for review; executor-authority preflight found no known blockers (apply rechecks before execution)"
+            );
             write_status(ctx, candidate, |status| {
+                status.executor_authority = Some(CandidateExecutorAuthority {
+                    eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
+                    issues: vec![],
+                });
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -1162,6 +1265,29 @@ async fn record_outcome(
                 set_condition_in(
                     &mut status.conditions,
                     ready_condition(true, candidate_reason::PLANNED, &message),
+                );
+            })
+            .await
+        }
+        CandidateOutcome::ExecutorAuthority {
+            plan_name,
+            changes,
+            message,
+            issues,
+        } => {
+            let message = format!(
+                "Plan {plan_name} holds {changes} change(s) for review; execution is blocked:\n{message}"
+            );
+            write_status(ctx, candidate, |status| {
+                status.executor_authority = Some(CandidateExecutorAuthority {
+                    eligibility: ExecutorAuthorityEligibility::Blocked,
+                    issues,
+                });
+                status.phase = CandidatePhase::Planned;
+                status.plan_ref = Some(PlanReference { name: plan_name });
+                set_condition_in(
+                    &mut status.conditions,
+                    ready_condition(false, candidate_reason::EXECUTOR_AUTHORITY, &message),
                 );
             })
             .await
@@ -1192,6 +1318,10 @@ async fn record_outcome(
                 overlapping.join(", "),
             );
             write_status(ctx, candidate, |status| {
+                status.executor_authority = Some(CandidateExecutorAuthority {
+                    eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
+                    issues: vec![],
+                });
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -2433,5 +2563,77 @@ mod tests {
             pgroles_core::candidate::compute_content_digest(&candidate.spec.content)
         );
         assert!(content_digest(&candidate).starts_with("sha256:"));
+    }
+    #[test]
+    fn unavailable_preflight_explicitly_clears_a_previous_eligibility_result() {
+        let mut status = PostgresPolicyCandidateStatus {
+            executor_authority: Some(CandidateExecutorAuthority {
+                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
+                issues: vec![],
+            }),
+            ..Default::default()
+        };
+        let previous = candidate_status_patch(&status);
+        assert_eq!(
+            previous["status"]["executorAuthority"]["eligibility"],
+            "NoKnownBlockers"
+        );
+        status.executor_authority = None;
+        let patch = candidate_status_patch(&status);
+        assert!(
+            patch["status"]
+                .as_object()
+                .unwrap()
+                .contains_key("executorAuthority")
+        );
+        assert!(
+            patch["status"]["executorAuthority"].is_null(),
+            "omission would leave the old result in the API server's merge patch"
+        );
+    }
+    #[test]
+    fn parent_invalidation_covers_ready_and_blocked_authority_without_touching_terminal_history() {
+        let mut object = candidate("preview", PolicyContent::default());
+        assert!(!needs_parent_invalidation(&object));
+        object.status = Some(PostgresPolicyCandidateStatus {
+            phase: CandidatePhase::Planned,
+            plan_ref: Some(PlanReference {
+                name: "review-sql".into(),
+            }),
+            executor_authority: Some(CandidateExecutorAuthority {
+                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
+                issues: vec![],
+            }),
+            conditions: vec![ready_condition(true, candidate_reason::PLANNED, "preview")],
+            ..Default::default()
+        });
+        assert!(needs_parent_invalidation(&object));
+        let status = object.status.as_mut().unwrap();
+        status.executor_authority = None;
+        set_condition_in(
+            &mut status.conditions,
+            ready_condition(
+                false,
+                candidate_reason::BLOCKED_BY_ACTIVE_POLICY,
+                BlockCause::Unstable.message(),
+            ),
+        );
+        assert_eq!(status.plan_ref.as_ref().unwrap().name, "review-sql");
+        assert!(candidate_status_patch(status)["status"]["executorAuthority"].is_null());
+        assert!(
+            !needs_parent_invalidation(&object),
+            "repeated parent failures must not churn status"
+        );
+        let status = object.status.as_mut().unwrap();
+        set_condition_in(
+            &mut status.conditions,
+            ready_condition(true, candidate_reason::NO_EFFECTS, "no SQL"),
+        );
+        assert!(
+            needs_parent_invalidation(&object),
+            "a prior NoEffects result is stale too"
+        );
+        object.status.as_mut().unwrap().phase = CandidatePhase::Promoted;
+        assert!(!needs_parent_invalidation(&object));
     }
 }

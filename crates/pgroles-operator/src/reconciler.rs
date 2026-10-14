@@ -878,7 +878,15 @@ async fn reconcile_apply(
     let namespace = resource.namespace().ok_or(ReconcileError::NoNamespace)?;
     let identity = DatabaseIdentity::from_connection(&namespace, &resource.spec.connection);
 
-    match reconcile_apply_inner(resource, ctx, &identity).await {
+    let result = reconcile_apply_inner(resource, ctx, &identity).await;
+    // Connection/spec/authority failures and early suspended/conflict exits
+    // never reach candidate planning under the database locks. Invalidate an
+    // earlier successful preview through status alone, including contention
+    // where this replica cannot establish a current result.
+    if candidate_evaluation_unavailable(&result) {
+        invalidate_candidate_results_best_effort(ctx, resource).await;
+    }
+    match result {
         Ok((action, outcome)) => {
             if outcome.marks_requested_reconcile_handled() {
                 mark_requested_reconcile_handled(ctx, resource, requested_reconcile_at.as_deref())
@@ -935,6 +943,21 @@ async fn reconcile_apply(
             }
             Err(err)
         }
+    }
+}
+
+fn candidate_evaluation_unavailable(
+    result: &Result<(Action, ReconcileOutcome), ReconcileError>,
+) -> bool {
+    !matches!(
+        result,
+        Ok((_, ReconcileOutcome::Reconciled | ReconcileOutcome::Planned))
+    )
+}
+
+async fn invalidate_candidate_results_best_effort(ctx: &OperatorContext, policy: &PostgresPolicy) {
+    if let Err(err) = crate::candidate::invalidate_parent_evaluation(ctx, policy).await {
+        tracing::warn!(policy = %policy.name_any(), %err, "could not invalidate candidate eligibility; current parent readiness must also be required by preview consumers");
     }
 }
 
@@ -1247,9 +1270,11 @@ async fn reconcile_apply_inner(
                     crate::candidate::reconcile_candidates(ctx, resource, &planning).await
                 {
                     tracing::warn!(name, namespace, %err, "candidate planning failed");
+                    invalidate_candidate_results_best_effort(ctx, resource).await;
                 }
             }
             Err(err) => {
+                invalidate_candidate_results_best_effort(ctx, resource).await;
                 tracing::warn!(
                     name,
                     namespace,
@@ -1258,6 +1283,10 @@ async fn reconcile_apply_inner(
                 );
             }
         }
+    } else if result.is_ok() {
+        // No target handoff means there was no evaluation context in which
+        // an earlier candidate result could have been revalidated.
+        invalidate_candidate_results_best_effort(ctx, resource).await;
     }
 
     // Release advisory lock (always, even on error).
@@ -6221,6 +6250,34 @@ mod tests {
                 false,
             );
             assert_eq!(serde_json::to_value(&status).unwrap(), stable);
+        }
+    }
+    #[test]
+    fn all_parent_failure_and_early_exit_paths_invalidate_candidate_eligibility() {
+        for outcome in [
+            ReconcileOutcome::Suspended,
+            ReconcileOutcome::Conflict,
+            ReconcileOutcome::TargetIdentityBlocked,
+            ReconcileOutcome::LockContention,
+        ] {
+            assert!(candidate_evaluation_unavailable(&Ok((
+                Action::await_change(),
+                outcome
+            ))));
+        }
+        for error in [
+            ReconcileError::ExecutorAuthority("blocked".into()),
+            ReconcileError::SqlExec(sqlx::Error::PoolTimedOut),
+            ReconcileError::InvalidSpec("bad".into()),
+            ReconcileError::LockContention("db".into(), "busy".into()),
+        ] {
+            assert!(candidate_evaluation_unavailable(&Err(error)));
+        }
+        for outcome in [ReconcileOutcome::Reconciled, ReconcileOutcome::Planned] {
+            assert!(!candidate_evaluation_unavailable(&Ok((
+                Action::await_change(),
+                outcome
+            ))));
         }
     }
 }

@@ -54,11 +54,31 @@ and memberships retain their normal reconciliation semantics. If only preserved
 grants differ, the candidate reports `Ready=True` with reason `NoEffects` and
 creates no approval plan.
 
-Candidate planning still omits executor-authority preflight, plan advisory
-warnings, and the adopt-mode schema-owner-transfer guard. `Ready=True` means a
-preview is available; it does not prove the executor can apply it. Execution
-settings such as `allow_schema_owner_transfers` remain on the parent, outside
-candidate content.
+Candidate planning runs the same read-only executor-authority preflight as
+apply, against its target and final filtered changes. Known authority blockers
+report `Ready=False, reason=ExecutorAuthority`, while phase `Planned`, `planRef`
+and the review SQL remain available. No privileges are changed by this check.
+`Ready=True, reason=Planned` means the preflight found no known blockers; it is
+not a guarantee that SQL will execute. Apply rechecks fresh authority.
+The structured `status.executorAuthority` object reports `eligibility` as
+`Blocked` or `NoKnownBlockers`, plus an `issues` array of stable `code` and
+readable `message` diagnostics. It is absent when no current authority check is
+available, including a parent block or planning failure. For a preview with SQL,
+CI should require a current, converged, unsuspended parent plus candidate
+`Ready=True` and `executorAuthority.eligibility=NoKnownBlockers`;
+missing or blocked results fail the gate. `Ready=True/NoEffects` separately
+reports that there is no SQL to execute. Phase `Planned` records review SQL
+availability even when authority blocks execution.
+
+Parent failures, suspension and unavailable planning clear previous eligibility
+and mark nonterminal previews unready through status only; their review SQL and
+plan reference remain available. If the API cannot accept that status update,
+consumers must also reject the unhealthy parent. Promotion clears preview
+eligibility because it no longer describes current candidate review SQL.
+
+Candidate planning still omits plan advisory warnings and the adopt-mode
+schema-owner-transfer guard. Execution settings such as
+`allow_schema_owner_transfers` remain on the parent, outside candidate content.
 
 Promotion recomputes effects and checks the approved digest before execution.
 Different effects require a replacement plan; matching effects can still be
@@ -527,7 +547,8 @@ database and still inspects for itself.
 
 | Condition | Meaning |
 | --- | --- |
-| `Ready=True, reason=Planned` | A current plan exists for this candidate |
+| `Ready=True, reason=Planned` | A current plan exists and executor-authority preflight found no known blockers |
+| `Ready=False, reason=ExecutorAuthority` | Review SQL exists, but execution is blocked by known executor-authority issues; the message lists them |
 | `Ready=True, reason=NoEffects` | The content is already the database's state, so there is nothing to review. Not terminal — the content may diverge again |
 | `Ready=False, reason=BlockedByActivePolicy` | Parent is failing or awaiting its own approval; will re-plan |
 | `Ready=False, reason=OverlayOverlap` | An ephemeral grant overlaps this candidate's effects; fresh review required |
