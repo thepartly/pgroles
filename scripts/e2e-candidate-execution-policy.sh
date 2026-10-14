@@ -226,6 +226,12 @@ kubectl patch pgr execution-policy-manual-parent --type=merge -p='{"spec":{"role
 wait_for_plan_phase "$manual_plan" Applied
 wait_for_candidate_phase execution-policy-manual Promoted
 wait_for_ready_status_reason execution-policy-manual-parent True Reconciled
-test "$(kubectl get pgr execution-policy-manual-parent -o jsonpath='{.status.current_plan_ref.name}')" = "$manual_plan"
+# Manual in-sync reconciliation clears the parent's actionable-plan pointer.
+# The candidate and immutable origin retain the durable approval/adoption link.
+test "$(kubectl get pgcand execution-policy-manual -o jsonpath='{.status.planRef.name}')" = "$manual_plan"
+test "$(kubectl get pgplan "$manual_plan" -o jsonpath='{.spec.origin.kind}')" = PostgresPolicyCandidate
+test "$(kubectl get pgplan "$manual_plan" -o jsonpath='{.spec.origin.uid}')" = \
+  "$(kubectl get pgcand execution-policy-manual -o jsonpath='{.metadata.uid}')"
+test -n "$(kubectl get pgplan "$manual_plan" -o jsonpath='{.status.appliedAt}')"
 test "$(kubectl get pgcand execution-policy-manual -o jsonpath='{.status.executionPreflight}')" = ''
 test "$(pg_query "SELECT count(*) FROM pg_roles WHERE rolname='evp_manual_reader';")" = 1
