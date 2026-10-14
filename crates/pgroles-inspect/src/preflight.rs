@@ -302,8 +302,10 @@ impl std::fmt::Display for AuthorityIssue {
                  \"{role}\" as executor \"{executor}\"; the edge was granted by \
                  \"{grantor}\" and is removed with REVOKE ... GRANTED BY \
                  \"{grantor}\", which requires the privileges of that grantor — \
-                 grant the executor membership in \"{grantor}\" or run the revoke \
-                 as a role that has it"
+                 to keep the membership, declare it with its live options; to remove \
+                 it, run the revoke as a role holding the privileges of \"{grantor}\", \
+                 or grant the executor membership in \"{grantor}\" if it should hold \
+                 that authority"
             ),
             AuthorityIssue::MembershipOptionsBlocked {
                 role,
@@ -312,7 +314,7 @@ impl std::fmt::Display for AuthorityIssue {
                 reason,
             } => write!(
                 f,
-                "UnsatisfiableMembershipOptions: cannot update membership of \"{member}\" in \"{role}\" granted by \"{grantor}\": {reason}"
+                "UnsatisfiableMembershipOptions: cannot update membership of \"{member}\" in \"{role}\" granted by \"{grantor}\": {reason}; to keep the live options instead, declare them on the membership"
             ),
             AuthorityIssue::RevokeGrantorUnavailable { grantor, executor } => write!(
                 f,
