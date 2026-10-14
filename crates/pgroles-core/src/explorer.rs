@@ -418,16 +418,15 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     let desired = prepared.desired;
     let graph = request.current.into_graph();
     let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
-    let changes = crate::membership_options::resolve_membership_options(
-        changes,
+    let authority = analysis_membership_authority(
         &graph,
-        &analysis_membership_authority(
-            &graph,
-            &request.executor,
-            pg_major_version,
-            authority_graph_complete,
-        ),
-    )?;
+        &changes,
+        &request.executor,
+        pg_major_version,
+        authority_graph_complete,
+    );
+    let changes =
+        crate::membership_options::resolve_membership_options(changes, &graph, &authority)?;
     let analysis = analyze_changes_with_options(
         graph,
         &changes,
@@ -615,14 +614,42 @@ fn simulate(
 
 fn analysis_membership_authority(
     graph: &RoleGraph,
+    changes: &[Change],
     executor: &ExecutorFacts,
     pg_major_version: u16,
     complete: bool,
 ) -> crate::membership_options::MembershipAuthority {
-    let (_, usage, admins) = initial_edge_facts(graph, executor, pg_major_version);
-    let attributes = ExecutorAttributes::initial(graph, executor);
+    // Option increases run in the membership-add phase, so the authority that
+    // counts is what survives every earlier statement. Project those first,
+    // as the database-backed resolver does, so a holder whose path the plan
+    // removes is never chosen while another survives.
+    let (mut set_role, mut usage, mut admins) =
+        initial_edge_facts(graph, executor, pg_major_version);
+    let mut projected = graph.clone();
+    for change in changes
+        .iter()
+        .filter(|change| phase_for(change) < PlanPhase::MembershipAdd)
+    {
+        apply_change(
+            &mut projected,
+            &mut set_role,
+            &mut usage,
+            &mut admins,
+            executor,
+            pg_major_version,
+            change,
+        );
+    }
+    let dropped: BTreeSet<&str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::DropRole { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let attributes = ExecutorAttributes::initial(&projected, executor);
     let reachable = reachability(
-        graph,
+        &projected,
         &usage,
         &executor.role,
         attributes.superuser,
@@ -631,6 +658,7 @@ fn analysis_membership_authority(
     let mut usable_grantors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for ((role, holder), admin) in admins {
         if admin == SetRoleCapability::Allowed
+            && !dropped.contains(holder.as_str())
             && reachable.get(&holder) == Some(&ReachabilityStatus::Reachable)
         {
             usable_grantors.entry(role).or_default().insert(holder);
@@ -1987,6 +2015,49 @@ mod tests {
             pg_major_version: None,
             authority_graph_complete: None,
         }
+    }
+
+    #[test]
+    fn option_grantors_are_chosen_from_authority_that_survives_earlier_removals() {
+        // Two holders can administer `reader`; the plan removes the
+        // executor's path to one of them before the option increase runs. The
+        // database-backed resolver projects that removal, so the explorer must
+        // too, or its preview binds the increase to a holder that is gone.
+        let mut graph = RoleGraph::default();
+        for name in ["reader", "g1", "g2", "deployer", "app"] {
+            graph.roles.insert(name.into(), Default::default());
+        }
+        let edge = |role: &str, member: &str, inherit: bool, admin: bool| MembershipEdge {
+            role: role.into(),
+            member: member.into(),
+            inherit,
+            admin,
+        };
+        graph.memberships.insert(edge("reader", "g1", false, true));
+        graph.memberships.insert(edge("reader", "g2", false, true));
+        graph
+            .memberships
+            .insert(edge("g1", "deployer", true, false));
+        graph
+            .memberships
+            .insert(edge("g2", "deployer", true, false));
+        let executor = request(ReconciliationMode::Authoritative).executor;
+        let usable = |changes: &[Change]| {
+            analysis_membership_authority(&graph, changes, &executor, 16, true)
+                .usable_grantors
+                .get("reader")
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(usable(&[]), BTreeSet::from(["g1".into(), "g2".into()]));
+        let removal = Change::RemoveMember {
+            role: "g1".into(),
+            member: "deployer".into(),
+            grantor: None,
+        };
+        assert_eq!(usable(&[removal]), BTreeSet::from(["g2".into()]));
+        let drop = Change::DropRole { name: "g2".into() };
+        assert_eq!(usable(&[drop]), BTreeSet::from(["g1".into()]));
     }
 
     #[test]
