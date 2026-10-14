@@ -11,11 +11,14 @@ cleanup() {
   kubectl delete pgcand candidate-authority-preview candidate-authority-repair \
     candidate-authority-privileged-override candidate-authority-ordinary-override \
     candidate-authority-cas-superseded candidate-authority-cas-promoted \
+    candidate-ownership-transfer candidate-ownership-repair \
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl delete pgr candidate-authority-policy candidate-authority-root-parent \
-    --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    candidate-ownership-policy --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  pg_query "DROP SCHEMA IF EXISTS cow_onboarding CASCADE;" >/dev/null 2>&1 || true
   kubectl delete secret candidate-authority-credentials --ignore-not-found >/dev/null 2>&1 || true
-  for role in cau_member cau_executor cau_grantor cau_group cau_repair cat_member cat_grantor cat_group; do
+  for role in cau_member cau_executor cau_grantor cau_group cau_repair cat_member cat_grantor cat_group \
+    cow_live_owner cow_new_owner cow_group cow_member; do
     pg_query "DROP ROLE IF EXISTS $role;" >/dev/null 2>&1 || true
   done
 }
@@ -79,10 +82,11 @@ spec:
         exclusive: true
         members: [{name: cau_grantor, admin: true}]
 YAML
-wait_for_candidate_condition candidate-authority-preview Ready False ExecutorAuthority
+wait_for_candidate_condition candidate-authority-preview Ready False ExecutionBlocked
 test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.phase}')" = Planned
-test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = Blocked
-test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.issues[0].code}')" = ForeignGrantorMembershipRevoke
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.eligibility}')" = Blocked
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.issues[0].guard}')" = ExecutorAuthority
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.issues[0].code}')" = ForeignGrantorMembershipRevoke
 plan="$(wait_for_candidate_plan_ref candidate-authority-preview)"
 sql="$(review_sql "$plan")"
 [[ "$sql" == *'REVOKE "cau_group" FROM "cau_member" GRANTED BY "cau_grantor";'* ]]
@@ -108,7 +112,7 @@ spec:
         members: [{name: cau_grantor, admin: true}]
 YAML_OVERRIDE
 wait_for_candidate_condition candidate-authority-privileged-override Ready True Planned
-test "$(kubectl get pgcand candidate-authority-privileged-override -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
+test "$(kubectl get pgcand candidate-authority-privileged-override -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
 kubectl delete pgcand candidate-authority-privileged-override --wait=true
 
 # Converse: a privileged parent must not lend its authority to an ordinary
@@ -149,9 +153,9 @@ spec:
         members: [{name: cat_grantor, admin: true}]
 YAML_CONVERSE
 wait_for_ready_status_reason candidate-authority-root-parent True Reconciled
-wait_for_candidate_condition candidate-authority-ordinary-override Ready False ExecutorAuthority
-[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executorAuthority.issues[0].message}')" == *'cau_executor'* ]]
-[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executorAuthority.issues[0].message}')" == *'cat_grantor'* ]]
+wait_for_candidate_condition candidate-authority-ordinary-override Ready False ExecutionBlocked
+[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executionPreflight.issues[0].message}')" == *'cau_executor'* ]]
+[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executionPreflight.issues[0].message}')" == *'cat_grantor'* ]]
 kubectl delete pgcand candidate-authority-ordinary-override --wait=true
 kubectl delete pgr candidate-authority-root-parent --wait=true
 pg_query 'DROP ROLE cat_member; DROP ROLE cat_grantor; DROP ROLE cat_group;'
@@ -159,8 +163,8 @@ pg_query 'DROP ROLE cat_member; DROP ROLE cat_grantor; DROP ROLE cat_group;'
 # Granting authority changes eligibility, without executing the candidate.
 pg_query 'GRANT cau_grantor TO cau_executor WITH INHERIT TRUE, SET FALSE;'
 wait_for_candidate_condition candidate-authority-preview Ready True Planned
-test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
-test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.issues[*].code}')" = ""
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.issues[*].code}')" = ""
 assert_review_unchanged() {
   test "$(wait_for_candidate_plan_ref candidate-authority-preview)" = "$plan"
   test "$(review_sql "$plan")" = "$sql"
@@ -168,21 +172,21 @@ assert_review_unchanged() {
 }
 assert_unavailable() {
   wait_for_candidate_condition candidate-authority-preview Ready False BlockedByActivePolicy
-  test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority}')" = ""
+  test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight}')" = ""
   assert_review_unchanged
 }
 # The result names the parent generation and state it was computed against.
 assert_evaluated_against() {
   local candidate="$1" state="$2"
-  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.parentState}')" = "$state"
-  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.parentGeneration}')" = \
+  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executionPreflight.parentState}')" = "$state"
+  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executionPreflight.parentGeneration}')" = \
     "$(kubectl get pgr candidate-authority-policy -o jsonpath='{.metadata.generation}')"
-  test -n "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.evaluatedAt}')"
+  test -n "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executionPreflight.evaluatedAt}')"
 }
 assert_fresh() {
   wait_for_ready_status_reason candidate-authority-policy True Reconciled
   wait_for_candidate_condition candidate-authority-preview Ready True Planned
-  test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
+  test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
   assert_evaluated_against candidate-authority-preview Converged
   assert_review_unchanged
 }
@@ -211,9 +215,9 @@ pg_query 'GRANT cau_group TO cau_member WITH INHERIT TRUE GRANTED BY cau_grantor
 wait_for_ready_status_reason candidate-authority-policy False ExecutorAuthority
 parent_plan="$(wait_for_current_plan_ref candidate-authority-policy)"
 wait_for_plan_phase "$parent_plan" Pending
-wait_for_candidate_condition candidate-authority-preview Ready False ExecutorAuthority
-test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = Blocked
-assert_evaluated_against candidate-authority-preview ExecutorAuthorityBlocked
+wait_for_candidate_condition candidate-authority-preview Ready False ExecutionBlocked
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executionPreflight.eligibility}')" = Blocked
+assert_evaluated_against candidate-authority-preview ExecutionBlocked
 assert_review_unchanged
 # A repair keeps the live INHERIT option instead of rewriting a membership the
 # executor cannot touch, and adds a grant it can make. Its own preview has no
@@ -240,8 +244,8 @@ spec:
         members: [{name: cau_member}]
 YAML_REPAIR
 wait_for_candidate_condition candidate-authority-repair Ready True Planned
-test "$(kubectl get pgcand candidate-authority-repair -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
-assert_evaluated_against candidate-authority-repair ExecutorAuthorityBlocked
+test "$(kubectl get pgcand candidate-authority-repair -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
+assert_evaluated_against candidate-authority-repair ExecutionBlocked
 [[ "$(kubectl get pgcand candidate-authority-repair -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')" == *'replaces the blocked content'* ]]
 repair_sql="$(review_sql "$(wait_for_candidate_plan_ref candidate-authority-repair)")"
 [[ "$repair_sql" == *'GRANT "cau_repair" TO "cau_member"'* ]]
@@ -263,11 +267,11 @@ for phase in Superseded Promoted; do
   race_plan="$(wait_for_candidate_plan_ref "$race")"
   approve_plan "$race_plan"
   kubectl get pgcand "$race" -o json > /tmp/candidate-authority-cas-before.json
-  kubectl patch pgcand "$race" --subresource=status --type=merge -p="{\"status\":{\"phase\":\"$phase\",\"executorAuthority\":null}}"
+  kubectl patch pgcand "$race" --subresource=status --type=merge -p="{\"status\":{\"phase\":\"$phase\",\"executionPreflight\":null}}"
   python3 - <<'PY_CAS' > /tmp/candidate-authority-cas-patch.json
 import json
 c=json.load(open('/tmp/candidate-authority-cas-before.json'))
-s=c['status'].copy(); s.pop('executorAuthority',None)
+s=c['status'].copy(); s.pop('executionPreflight',None)
 s['phase']='Planned'
 print(json.dumps([
  {'op':'test','path':'/metadata/uid','value':c['metadata']['uid']},
@@ -285,4 +289,72 @@ PY_CAS
   kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"suspend":false}}'
   assert_fresh
 done
-echo 'Candidate shared preflight, retained review SQL, parent failure freshness and recovery passed.'
+
+# Schema ownership, as in the onboarding incident: staging allowed the
+# transfer, production refused it, and a preview computed without the
+# production policy's settings passed. Candidates run apply's guards with their
+# parent's settings. The superuser connection keeps executor authority out of
+# the picture, so the only guard in play is the ownership refusal.
+pg_query 'CREATE ROLE cow_live_owner; CREATE ROLE cow_new_owner; CREATE ROLE cow_group;
+  CREATE ROLE cow_member; CREATE SCHEMA cow_onboarding AUTHORIZATION cow_live_owner;'
+ownership_roles='[{"name":"cow_live_owner","external":true},{"name":"cow_new_owner","external":true},{"name":"cow_group","external":true},{"name":"cow_member","external":true}]'
+ownership_membership=',"memberships":[{"role":"cow_group","members":[{"name":"cow_member"}]}]'
+ownership_content() {
+  local extra=""
+  if [ -n "${2:-}" ]; then extra="$ownership_membership"; fi
+  printf '{"reconciliation_mode":"adopt","roles":%s,"schemas":[{"name":"cow_onboarding","owner":"%s"}]%s}' \
+    "$ownership_roles" "$1" "$extra"
+}
+ownership_candidate() {
+  printf '{"apiVersion":"pgroles.io/v1alpha1","kind":"PostgresPolicyCandidate","metadata":{"name":"%s"},"spec":{"policyRef":{"name":"candidate-ownership-policy"},"content":%s}}' \
+    "$1" "$2" | kubectl apply -f -
+}
+schema_owner() { pg_query "SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'cow_onboarding';"; }
+printf '{"apiVersion":"pgroles.io/v1alpha1","kind":"PostgresPolicy","metadata":{"name":"candidate-ownership-policy"},"spec":%s}' \
+  "$(ownership_content cow_live_owner | python3 -c 'import json,sys; c=json.load(sys.stdin); c.update({"connection":{"secretRef":{"name":"postgres-credentials"}},"interval":"2s","mode":"apply","approval":"auto"}); print(json.dumps(c))')" \
+  | kubectl apply -f -
+wait_for_ready_status_reason candidate-ownership-policy True Reconciled
+# The proposal transfers the schema and adds an unrelated membership.
+ownership_candidate candidate-ownership-transfer "$(ownership_content cow_new_owner with-membership)"
+wait_for_candidate_condition candidate-ownership-transfer Ready False ExecutionBlocked
+test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.eligibility}')" = Blocked
+test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.issues[*].guard}')" = SchemaOwnerTransfer
+[[ "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.issues[0].message}')" == *'cow_onboarding'* ]]
+test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.parentState}')" = Converged
+[[ "$(review_sql "$(wait_for_candidate_plan_ref candidate-ownership-transfer)")" == *'ALTER SCHEMA "cow_onboarding" OWNER TO "cow_new_owner"'* ]]
+# The same content against a parent that allows transfers — staging's
+# setting — has no known blockers.
+kubectl patch pgr candidate-ownership-policy --type=merge -p='{"spec":{"allow_schema_owner_transfers":true}}'
+wait_for_candidate_condition candidate-ownership-transfer Ready True Planned
+test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
+kubectl patch pgr candidate-ownership-policy --type=merge -p='{"spec":{"allow_schema_owner_transfers":false}}'
+wait_for_candidate_condition candidate-ownership-transfer Ready False ExecutionBlocked
+kubectl delete pgcand candidate-ownership-transfer --wait=true
+test "$(schema_owner)" = cow_live_owner
+# Merging it anyway blocks the whole policy, and the unrelated membership
+# waits with the transfer: the guard precedes the plan's one transaction.
+kubectl patch pgr candidate-ownership-policy --type=merge -p="{\"spec\":$(ownership_content cow_new_owner with-membership)}"
+wait_for_ready_status_reason candidate-ownership-policy False OwnerTransferBlocked
+test "$(schema_owner)" = cow_live_owner
+test "$(pg_query "SELECT pg_has_role('cow_member','cow_group','MEMBER');")" = f
+# A repair keeps the live owner and the membership. It is previewed while the
+# policy is blocked, against the unchanged database, and has no blockers.
+ownership_candidate candidate-ownership-repair "$(ownership_content cow_live_owner with-membership)"
+wait_for_candidate_condition candidate-ownership-repair Ready True Planned
+test "$(kubectl get pgcand candidate-ownership-repair -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers
+test "$(kubectl get pgcand candidate-ownership-repair -o jsonpath='{.status.executionPreflight.parentState}')" = ExecutionBlocked
+test "$(kubectl get pgcand candidate-ownership-repair -o jsonpath='{.status.executionPreflight.parentGeneration}')" = \
+  "$(kubectl get pgr candidate-ownership-policy -o jsonpath='{.metadata.generation}')"
+[[ "$(kubectl get pgcand candidate-ownership-repair -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')" == *'replaces the blocked content'* ]]
+ownership_repair_sql="$(review_sql "$(wait_for_candidate_plan_ref candidate-ownership-repair)")"
+[[ "$ownership_repair_sql" == *'GRANT "cow_group" TO "cow_member"'* ]]
+[[ "$ownership_repair_sql" != *'ALTER SCHEMA'* ]]
+test "$(pg_query "SELECT pg_has_role('cow_member','cow_group','MEMBER');")" = f
+kubectl delete pgcand candidate-ownership-repair --wait=true
+# Merging the repair converges, and the schema keeps its owner.
+kubectl patch pgr candidate-ownership-policy --type=merge -p="{\"spec\":$(ownership_content cow_live_owner with-membership)}"
+wait_for_ready_status_reason candidate-ownership-policy True Reconciled
+test "$(pg_query "SELECT pg_has_role('cow_member','cow_group','MEMBER');")" = t
+test "$(schema_owner)" = cow_live_owner
+kubectl delete pgr candidate-ownership-policy --wait=true
+echo 'Candidate shared preflight, retained review SQL, parent failure freshness, ownership guard and recovery passed.'

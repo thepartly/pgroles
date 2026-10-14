@@ -2556,17 +2556,12 @@ fn enforce_adopt_owner_transfer_guard(
     allow_schema_owner_transfers: bool,
     changes: &[pgroles_core::diff::Change],
 ) -> Result<()> {
-    if mode != ReconciliationMode::Adopt || allow_schema_owner_transfers {
+    if allow_schema_owner_transfers {
         return Ok(());
     }
-    let transfers: Vec<String> = changes
-        .iter()
-        .filter_map(|change| match change {
-            pgroles_core::diff::Change::AlterSchemaOwner { name, owner } => {
-                Some(format!("\"{name}\" -> \"{owner}\""))
-            }
-            _ => None,
-        })
+    let transfers: Vec<String> = pgroles_core::diff::adopt_schema_owner_transfers(mode, changes)
+        .into_iter()
+        .map(|(name, owner)| format!("\"{name}\" -> \"{owner}\""))
         .collect();
     if transfers.is_empty() {
         return Ok(());

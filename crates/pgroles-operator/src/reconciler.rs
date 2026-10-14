@@ -292,17 +292,12 @@ pub(crate) fn adopt_owner_transfer_blocker(
     allow_schema_owner_transfers: bool,
     changes: &[pgroles_core::diff::Change],
 ) -> Option<String> {
-    if mode != pgroles_core::diff::ReconciliationMode::Adopt || allow_schema_owner_transfers {
+    if allow_schema_owner_transfers {
         return None;
     }
-    let transfers: Vec<String> = changes
-        .iter()
-        .filter_map(|change| match change {
-            pgroles_core::diff::Change::AlterSchemaOwner { name, owner } => {
-                Some(format!("\"{name}\" -> \"{owner}\""))
-            }
-            _ => None,
-        })
+    let transfers: Vec<String> = pgroles_core::diff::adopt_schema_owner_transfers(mode, changes)
+        .into_iter()
+        .map(|(name, owner)| format!("\"{name}\" -> \"{owner}\""))
         .collect();
     if transfers.is_empty() {
         return None;
@@ -313,6 +308,121 @@ pub(crate) fn adopt_owner_transfer_blocker(
         transfers.len(),
         transfers.join(", ")
     ))
+}
+
+/// What the apply guards found for one plan, before any of it executes.
+///
+/// A policy's apply and a candidate's preview both come from
+/// [`evaluate_execution_guards`], so a preview cannot pass a plan the apply it
+/// predicts would refuse.
+#[derive(Debug, Default)]
+pub(crate) struct ExecutionGuardFindings {
+    /// The adopt-mode transfers apply refuses, as `(schema, new owner)`.
+    pub schema_owner_transfers: Vec<(String, String)>,
+    pub owner_transfer_blocker: Option<String>,
+    pub drop_safety: pgroles_inspect::DropRoleSafetyAssessment,
+    pub authority: Vec<pgroles_inspect::AuthorityIssue>,
+}
+
+impl ExecutionGuardFindings {
+    /// Every blocker, one per affected schema, role or statement, in the order
+    /// apply reports them.
+    pub(crate) fn blockers(&self) -> Vec<crate::crd::ExecutionBlocker> {
+        use crate::crd::{ExecutionBlocker, ExecutionGuard};
+        let transfers = self
+            .schema_owner_transfers
+            .iter()
+            .map(|(name, owner)| ExecutionBlocker {
+                guard: ExecutionGuard::SchemaOwnerTransfer,
+                code: "AdoptSchemaOwnerTransfer".to_string(),
+                message: format!(
+                    "adopt mode would transfer ownership of schema \"{name}\" to \
+                         \"{owner}\", and the policy does not set \
+                         spec.allow_schema_owner_transfers"
+                ),
+            });
+        let drops = self
+            .drop_safety
+            .blockers
+            .issues
+            .iter()
+            .map(|issue| ExecutionBlocker {
+                guard: ExecutionGuard::RoleDropSafety,
+                code: "UnsafeRoleDrop".to_string(),
+                message: pgroles_inspect::DropRoleSafetyReport {
+                    issues: vec![issue.clone()],
+                }
+                .to_string(),
+            });
+        let authority = self.authority.iter().map(|issue| ExecutionBlocker {
+            guard: ExecutionGuard::ExecutorAuthority,
+            code: issue.code().to_string(),
+            message: issue.to_string(),
+        });
+        transfers.chain(drops).chain(authority).collect()
+    }
+}
+
+/// The adopt-mode transfers `policy`'s apply refuses, and the refusal message.
+///
+/// Only a policy that executes SQL refuses them; observe-mode policies keep
+/// producing plans for review either way.
+fn refused_schema_owner_transfers(
+    policy: &PostgresPolicy,
+    reconciliation_mode: pgroles_core::diff::ReconciliationMode,
+    changes: &[pgroles_core::diff::Change],
+) -> (Vec<(String, String)>, Option<String>) {
+    let allowed = !matches!(policy.spec.mode, crate::crd::PolicyMode::Apply)
+        || policy.spec.allow_schema_owner_transfers;
+    if allowed {
+        return (Vec::new(), None);
+    }
+    let transfers = pgroles_core::diff::adopt_schema_owner_transfers(reconciliation_mode, changes)
+        .into_iter()
+        .map(|(name, owner)| (name.to_string(), owner.to_string()))
+        .collect();
+    (
+        transfers,
+        adopt_owner_transfer_blocker(reconciliation_mode, false, changes),
+    )
+}
+
+/// Run every guard apply runs before it executes a plan, against `changes` as
+/// they would be applied to `current` under `policy`'s execution settings.
+///
+/// The guards only read the catalog. The ownership guard applies only when SQL
+/// will actually run (`mode: apply`); the others apply in every mode, as they
+/// always have for the policy itself.
+pub(crate) async fn evaluate_execution_guards(
+    pool: &sqlx::PgPool,
+    policy: &PostgresPolicy,
+    reconciliation_mode: pgroles_core::diff::ReconciliationMode,
+    changes: &[pgroles_core::diff::Change],
+    current: &pgroles_core::model::RoleGraph,
+    retirements: &[pgroles_core::manifest::RoleRetirement],
+) -> Result<ExecutionGuardFindings, ReconcileError> {
+    let (schema_owner_transfers, owner_transfer_blocker) =
+        refused_schema_owner_transfers(policy, reconciliation_mode, changes);
+
+    let dropped_roles: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            pgroles_core::diff::Change::DropRole { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let drop_safety = pgroles_inspect::inspect_drop_role_safety(pool, &dropped_roles)
+        .await?
+        .assess(retirements);
+
+    let authority = pgroles_inspect::preflight_authority_issues(pool, changes, current).await?;
+
+    Ok(ExecutionGuardFindings {
+        schema_owner_transfers,
+        owner_transfer_blocker,
+        drop_safety,
+        authority,
+    })
 }
 
 async fn bounded_k8s_call<T, F>(call: &'static str, future: F) -> Result<T, ReconcileError>
@@ -966,11 +1076,24 @@ fn candidate_parent_outcome(
             Some(ParentOutcome::Converged)
         }
         Ok(_) => Some(ParentOutcome::Unstable),
-        // Raised only after the locked phase ran inspection, diff and the
-        // authority preflight, and before any SQL: candidates are planned.
-        Err(ReconcileError::ExecutorAuthority(_)) => Some(ParentOutcome::ExecutorAuthorityBlocked),
+        Err(err) if is_execution_guard_refusal(err) => Some(ParentOutcome::ExecutionBlocked),
         Err(_) => None,
     }
+}
+
+/// Whether an apply guard refused the parent's plan.
+///
+/// Each of these is raised only after the locked phase ran inspection, diff
+/// and [`evaluate_execution_guards`], and before any SQL: none of the plan
+/// executed, the database is as inspected, and both locks are still held. That
+/// is the state a repair is previewed against, so candidates are planned.
+fn is_execution_guard_refusal(err: &ReconcileError) -> bool {
+    matches!(
+        err,
+        ReconcileError::ExecutorAuthority(_)
+            | ReconcileError::OwnerTransferBlocked(_)
+            | ReconcileError::UnsafeRoleDrops(_)
+    )
 }
 
 /// Whether the reconcile ended without a current candidate evaluation, so an
@@ -985,15 +1108,17 @@ fn candidate_parent_outcome(
 fn candidate_evaluation_unavailable(
     result: &Result<(Action, ReconcileOutcome), ReconcileError>,
 ) -> bool {
-    !matches!(
-        result,
+    match result {
         Ok((
             _,
             ReconcileOutcome::Reconciled
-                | ReconcileOutcome::Planned
-                | ReconcileOutcome::LockContention
-        )) | Err(ReconcileError::ExecutorAuthority(_) | ReconcileError::LockContention(_, _))
-    )
+            | ReconcileOutcome::Planned
+            | ReconcileOutcome::LockContention,
+        )) => false,
+        Ok(_) => true,
+        Err(ReconcileError::LockContention(_, _)) => false,
+        Err(err) => !is_execution_guard_refusal(err),
+    }
 }
 
 async fn invalidate_candidate_results_best_effort(ctx: &OperatorContext, policy: &PostgresPolicy) {
@@ -1573,20 +1698,6 @@ async fn apply_under_lock(
         tracing::warn!(name, namespace, warnings = ?plan_warnings, "plan advisory warnings");
     }
 
-    // Adopt-mode ownership transfer refusal: the operator executes without a
-    // human reviewing the plan, so the CLI's flag-gated refusal applies here
-    // too — but only when SQL will actually run. Observe policies keep
-    // producing plans for review regardless.
-    if matches!(resource.spec.mode, crate::crd::PolicyMode::Apply)
-        && let Some(blocker) = adopt_owner_transfer_blocker(
-            reconciliation_mode,
-            resource.spec.allow_schema_owner_transfers,
-            &changes,
-        )
-    {
-        return Err(ReconcileError::OwnerTransferBlocked(blocker));
-    }
-
     ctx.observability
         .record_processing_phase("diff", diff_started.elapsed());
 
@@ -1596,16 +1707,33 @@ async fn apply_under_lock(
     if !password_changes.is_empty() {
         changes = pgroles_core::diff::inject_password_changes(changes, &password_changes);
     }
-    let dropped_roles: Vec<String> = changes
-        .iter()
-        .filter_map(|change| match change {
-            pgroles_core::diff::Change::DropRole { name } => Some(name.clone()),
-            _ => None,
-        })
-        .collect();
-    let drop_safety = pgroles_inspect::inspect_drop_role_safety(pool, &dropped_roles)
-        .await?
-        .assess(&manifest.retirements);
+    // The apply guards, shared with candidate previews so that a preview
+    // reports exactly what this apply would refuse.
+    //
+    // Adopt-mode ownership transfers are refused because the operator executes
+    // without a human reviewing the plan, so the CLI's flag-gated refusal
+    // applies here too — but only when SQL will actually run. Observe policies
+    // keep producing plans for review regardless.
+    //
+    // Planned default-privilege changes and PUBLIC revokes need owner
+    // authority the executor may lack; a PUBLIC revoke without it silently
+    // no-ops and the controller would flap. Only executing is blocked there.
+    // Producing and reviewing a plan needs no authority, and failing here
+    // instead would leave an operator with a Degraded policy and nothing to
+    // look at.
+    let guards = evaluate_execution_guards(
+        pool,
+        resource,
+        reconciliation_mode,
+        &changes,
+        &current,
+        &manifest.retirements,
+    )
+    .await?;
+    if let Some(blocker) = guards.owner_transfer_blocker {
+        return Err(ReconcileError::OwnerTransferBlocked(blocker));
+    }
+    let drop_safety = guards.drop_safety;
     if !drop_safety.warnings.is_empty() {
         tracing::info!(warnings = %drop_safety.warnings, "role-drop cleanup warnings");
     }
@@ -1614,16 +1742,7 @@ async fn apply_under_lock(
             drop_safety.blockers.to_string(),
         ));
     }
-
-    // Planned default-privilege changes and PUBLIC revokes need owner
-    // authority the executor may lack; a PUBLIC revoke without it silently
-    // no-ops and the controller would flap.
-    //
-    // Only executing is blocked. Producing and reviewing a plan needs no
-    // authority, and failing here instead would leave an operator with a
-    // Degraded policy and nothing to look at.
-    let authority_issues =
-        pgroles_inspect::preflight_authority_issues(pool, &changes, &current).await?;
+    let authority_issues = guards.authority;
     let authority_block: Option<String> = if authority_issues.is_empty() {
         None
     } else {
@@ -3879,6 +3998,101 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_a_policy_that_executes_refuses_adopt_schema_owner_transfers() {
+        use pgroles_core::diff::{Change, ReconciliationMode};
+        let changes = vec![Change::AlterSchemaOwner {
+            name: "onboarding".into(),
+            owner: "onboarding_owner".into(),
+        }];
+        let mut policy = (*test_policy("5m", 0)).clone();
+        let (transfers, blocker) =
+            refused_schema_owner_transfers(&policy, ReconciliationMode::Adopt, &changes);
+        assert_eq!(
+            transfers,
+            vec![("onboarding".to_string(), "onboarding_owner".to_string())]
+        );
+        assert!(blocker.unwrap().contains("allow_schema_owner_transfers"));
+
+        // Staging's setting: the same plan is permitted.
+        policy.spec.allow_schema_owner_transfers = true;
+        assert_eq!(
+            refused_schema_owner_transfers(&policy, ReconciliationMode::Adopt, &changes),
+            (Vec::new(), None)
+        );
+
+        policy.spec.allow_schema_owner_transfers = false;
+        policy.spec.mode = crate::crd::PolicyMode::Observe;
+        assert_eq!(
+            refused_schema_owner_transfers(&policy, ReconciliationMode::Adopt, &changes),
+            (Vec::new(), None)
+        );
+        policy.spec.mode = crate::crd::PolicyMode::Apply;
+        assert_eq!(
+            refused_schema_owner_transfers(&policy, ReconciliationMode::Authoritative, &changes),
+            (Vec::new(), None)
+        );
+    }
+
+    #[test]
+    fn guard_findings_name_the_guard_behind_every_blocker_in_apply_order() {
+        use crate::crd::ExecutionGuard;
+        let findings = ExecutionGuardFindings {
+            schema_owner_transfers: vec![("onboarding".into(), "onboarding_owner".into())],
+            owner_transfer_blocker: Some("refused".into()),
+            drop_safety: pgroles_inspect::DropRoleSafetyAssessment {
+                warnings: Default::default(),
+                blockers: pgroles_inspect::DropRoleSafetyReport {
+                    issues: vec![pgroles_inspect::DropRoleSafetyIssue {
+                        role: "retired".into(),
+                        owned_object_count: 1,
+                        owned_object_examples: vec!["table public.t".into()],
+                        shared_owned_object_count: 0,
+                        shared_owned_object_examples: vec![],
+                        external_owned_object_count: 0,
+                        external_owned_object_examples: vec![],
+                        privilege_dependency_count: 0,
+                        privilege_dependency_examples: vec![],
+                        external_privilege_dependency_count: 0,
+                        external_privilege_dependency_examples: vec![],
+                        other_dependency_count: 0,
+                        other_dependency_examples: vec![],
+                        external_other_dependency_count: 0,
+                        external_other_dependency_examples: vec![],
+                        active_session_count: 0,
+                    }],
+                },
+            },
+            authority: vec![
+                pgroles_inspect::AuthorityIssue::MissingDefaultPrivilegeOwner {
+                    owner: "app_owner".into(),
+                },
+            ],
+        };
+        let blockers = findings.blockers();
+        assert_eq!(
+            blockers
+                .iter()
+                .map(|blocker| (blocker.guard, blocker.code.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    ExecutionGuard::SchemaOwnerTransfer,
+                    "AdoptSchemaOwnerTransfer"
+                ),
+                (ExecutionGuard::RoleDropSafety, "UnsafeRoleDrop"),
+                (
+                    ExecutionGuard::ExecutorAuthority,
+                    "MissingDefaultPrivilegeOwner"
+                ),
+            ]
+        );
+        assert!(blockers[0].message.contains("\"onboarding\""));
+        assert!(blockers[1].message.contains("retired"));
+        assert!(blockers[2].message.contains("app_owner"));
+        assert!(ExecutionGuardFindings::default().blockers().is_empty());
     }
 
     #[test]
@@ -6329,16 +6543,22 @@ mod tests {
     }
 
     #[test]
-    fn an_authority_blocked_parent_keeps_the_previews_it_just_evaluated() {
+    fn a_parent_refused_by_an_apply_guard_keeps_the_previews_it_just_evaluated() {
         use crate::candidate::ParentOutcome;
-        let blocked = Err(ReconcileError::ExecutorAuthority("blocked".into()));
-        assert_eq!(
-            candidate_parent_outcome(&blocked),
-            Some(ParentOutcome::ExecutorAuthorityBlocked)
-        );
-        // The inner reconcile planned candidates against the unchanged
-        // database; the outer path must not withdraw those results.
-        assert!(!candidate_evaluation_unavailable(&blocked));
+        for refusal in [
+            ReconcileError::ExecutorAuthority("blocked".into()),
+            ReconcileError::OwnerTransferBlocked("\"onboarding\" -> \"owner\"".into()),
+            ReconcileError::UnsafeRoleDrops("role owns objects".into()),
+        ] {
+            let blocked = Err(refusal);
+            assert_eq!(
+                candidate_parent_outcome(&blocked),
+                Some(ParentOutcome::ExecutionBlocked)
+            );
+            // The inner reconcile planned candidates against the unchanged
+            // database; the outer path must not withdraw those results.
+            assert!(!candidate_evaluation_unavailable(&blocked));
+        }
         assert_eq!(
             candidate_parent_outcome(&Ok((Action::await_change(), ReconcileOutcome::Suspended))),
             Some(ParentOutcome::Unstable)

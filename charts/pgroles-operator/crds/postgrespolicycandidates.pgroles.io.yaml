@@ -890,12 +890,12 @@
                     "nullable": true,
                     "type": "string"
                   },
-                  "executorAuthority": {
-                    "description": "Read-only executor-authority preflight for the current review SQL.\nAbsent when no current check is available. Apply rechecks fresh state;\nNoKnownBlockers describes targeted checks, not guaranteed SQL success.",
+                  "executionPreflight": {
+                    "description": "Read-only apply preflight for the current review SQL: every guard that\nwould refuse to execute it. Absent when no current check is available.\nApply rechecks fresh state; NoKnownBlockers describes targeted checks,\nnot guaranteed SQL success.",
                     "nullable": true,
                     "properties": {
                       "eligibility": {
-                        "description": "Whether the shared apply preflight found any known authority blockers.",
+                        "description": "Whether any apply guard would refuse to execute this SQL.",
                         "enum": [
                           "NoKnownBlockers",
                           "Blocked"
@@ -907,12 +907,21 @@
                         "type": "string"
                       },
                       "issues": {
-                        "description": "Known blockers, with stable diagnostic codes and readable details.",
+                        "description": "Known blockers, each naming the guard that raised it.",
                         "items": {
-                          "description": "One known executor-authority blocker.",
+                          "description": "One known reason apply would refuse a candidate's SQL.",
                           "properties": {
                             "code": {
-                              "description": "Stable kind returned by the shared authority preflight.",
+                              "description": "Stable kind within the guard.",
+                              "type": "string"
+                            },
+                            "guard": {
+                              "description": "The apply guard that raised this blocker.",
+                              "enum": [
+                                "ExecutorAuthority",
+                                "SchemaOwnerTransfer",
+                                "RoleDropSafety"
+                              ],
                               "type": "string"
                             },
                             "message": {
@@ -922,6 +931,7 @@
                           },
                           "required": [
                             "code",
+                            "guard",
                             "message"
                           ],
                           "type": "object"
@@ -938,7 +948,7 @@
                         "description": "The parent policy's state during evaluation.",
                         "enum": [
                           "Converged",
-                          "ExecutorAuthorityBlocked"
+                          "ExecutionBlocked"
                         ],
                         "type": "string"
                       }

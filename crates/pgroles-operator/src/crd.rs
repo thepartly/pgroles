@@ -2895,11 +2895,12 @@ pub struct PostgresPolicyCandidateStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<PlanReference>,
 
-    /// Read-only executor-authority preflight for the current review SQL.
-    /// Absent when no current check is available. Apply rechecks fresh state;
-    /// NoKnownBlockers describes targeted checks, not guaranteed SQL success.
+    /// Read-only apply preflight for the current review SQL: every guard that
+    /// would refuse to execute it. Absent when no current check is available.
+    /// Apply rechecks fresh state; NoKnownBlockers describes targeted checks,
+    /// not guaranteed SQL success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executor_authority: Option<CandidateExecutorAuthority>,
+    pub execution_preflight: Option<CandidateExecutionPreflight>,
 
     #[serde(default)]
     #[schemars(length(max = 16))]
@@ -2912,18 +2913,21 @@ pub struct PostgresPolicyCandidateStatus {
     pub observed_generation: Option<i64>,
 }
 
-/// Targeted executor-authority check for a candidate's current review SQL.
+/// The apply preflight for a candidate's current review SQL.
 ///
-/// The evaluation fields bind the result to when, and against which parent
-/// state, it was computed, so a consumer can reject an old answer instead of
-/// inferring freshness from whether the object happens to be present.
+/// It runs the guards the parent policy's apply runs, with the parent's
+/// execution settings, so a preview reports what promoting the candidate would
+/// meet. The evaluation fields bind the result to when, and against which
+/// parent state, it was computed, so a consumer can reject an old answer
+/// instead of inferring freshness from whether the object happens to be
+/// present.
 #[derive(KubeSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct CandidateExecutorAuthority {
-    /// Whether the shared apply preflight found any known authority blockers.
-    pub eligibility: ExecutorAuthorityEligibility,
-    /// Known blockers, with stable diagnostic codes and readable details.
-    pub issues: Vec<ExecutorAuthorityDiagnostic>,
+pub struct CandidateExecutionPreflight {
+    /// Whether any apply guard would refuse to execute this SQL.
+    pub eligibility: ExecutionEligibility,
+    /// Known blockers, each naming the guard that raised it.
+    pub issues: Vec<ExecutionBlocker>,
     /// RFC 3339 time the preflight ran. A consumer that needs a result newer
     /// than some event (its own start, a migration, a restore) compares this.
     pub evaluated_at: String,
@@ -2941,27 +2945,42 @@ pub enum ParentEvaluationState {
     /// The parent reconciled and holds no other actionable plan; the preview
     /// is computed against the state the parent enforced.
     Converged,
-    /// The parent's own plan stopped at the executor-authority preflight, so
-    /// none of it ran. The preview is computed against the unchanged database,
-    /// and promoting the candidate replaces the blocked content: this is the
-    /// state in which a repair is reviewed.
-    ExecutorAuthorityBlocked,
+    /// An apply guard refused the parent's own plan before any of it ran. The
+    /// preview is computed against the unchanged database, and promoting the
+    /// candidate replaces the blocked content: this is the state in which a
+    /// repair is reviewed.
+    ExecutionBlocked,
 }
 
-/// Execution eligibility established by targeted read-only authority checks.
+/// Whether the apply guards would let a candidate's SQL execute.
 #[derive(JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ExecutorAuthorityEligibility {
-    /// The shared apply preflight returned no issues; apply still rechecks.
+pub enum ExecutionEligibility {
+    /// No apply guard reported a blocker; apply still rechecks.
     NoKnownBlockers,
-    /// Known executor-authority issues prevent this SQL from being applied.
+    /// At least one apply guard would refuse to execute this SQL.
     Blocked,
 }
 
-/// One known executor-authority blocker.
+/// The apply guard that raised a blocker.
+#[derive(JsonSchema, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionGuard {
+    /// The executor lacks privileges a planned statement needs.
+    ExecutorAuthority,
+    /// Adopt mode would transfer schema ownership and the policy does not set
+    /// `allow_schema_owner_transfers`.
+    SchemaOwnerTransfer,
+    /// A planned role drop is unsafe: the role still owns objects, holds
+    /// privileges or has sessions that its retirement does not handle.
+    RoleDropSafety,
+}
+
+/// One known reason apply would refuse a candidate's SQL.
 #[derive(KubeSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ExecutorAuthorityDiagnostic {
-    /// Stable kind returned by the shared authority preflight.
+pub struct ExecutionBlocker {
+    /// The apply guard that raised this blocker.
+    pub guard: ExecutionGuard,
+    /// Stable kind within the guard.
     pub code: String,
     /// Readable explanation naming the affected roles or objects.
     pub message: String,
@@ -3003,8 +3022,8 @@ impl CandidatePhase {
 pub mod candidate_reason {
     /// `Ready=True` — a current plan exists for this candidate.
     pub const PLANNED: &str = "Planned";
-    /// `Ready=False` — review SQL exists, but executor authority blocks apply.
-    pub const EXECUTOR_AUTHORITY: &str = "ExecutorAuthority";
+    /// `Ready=False` — review SQL exists, but an apply guard would refuse it.
+    pub const EXECUTION_BLOCKED: &str = "ExecutionBlocked";
     /// `Ready=True` — the content is already the database's state, so there is
     /// nothing to review. Not terminal: the content may diverge again.
     pub const NO_EFFECTS: &str = "NoEffects";

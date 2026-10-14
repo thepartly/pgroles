@@ -239,6 +239,30 @@ pub fn filter_changes(changes: Vec<Change>, mode: ReconciliationMode) -> Vec<Cha
     }
 }
 
+/// The schema ownership transfers an adopt-mode plan makes, as `(schema, new owner)`.
+///
+/// Adopt filters role drops, not ownership convergence: a binding whose
+/// declared owner differs from the live one is still transferred, which has
+/// surprised adopters whose schemas another system owned. Apply refuses these
+/// unless they were explicitly allowed. Every surface that applies or previews
+/// a plan reads the rule from here, so a preview cannot pass what the apply it
+/// predicts would refuse.
+pub fn adopt_schema_owner_transfers(
+    mode: ReconciliationMode,
+    changes: &[Change],
+) -> Vec<(&str, &str)> {
+    if mode != ReconciliationMode::Adopt {
+        return Vec::new();
+    }
+    changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::AlterSchemaOwner { name, owner } => Some((name.as_str(), owner.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether additive reconciliation will ignore declarative absence assertions.
 ///
 /// The desired graph retains absence assertions — `ensure: absent` grants and
@@ -3191,6 +3215,31 @@ memberships:
         ];
         let filtered = filter_changes(changes, ReconciliationMode::Additive);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn only_adopt_mode_reports_schema_owner_transfers() {
+        let changes = vec![
+            Change::CreateSchema {
+                name: "fresh".into(),
+                owner: Some("app".into()),
+            },
+            Change::AlterSchemaOwner {
+                name: "onboarding".into(),
+                owner: "onboarding_owner".into(),
+            },
+        ];
+        assert_eq!(
+            adopt_schema_owner_transfers(ReconciliationMode::Adopt, &changes),
+            vec![("onboarding", "onboarding_owner")],
+            "a created schema has no previous owner to transfer from"
+        );
+        for mode in [
+            ReconciliationMode::Authoritative,
+            ReconciliationMode::Additive,
+        ] {
+            assert!(adopt_schema_owner_transfers(mode, &changes).is_empty());
+        }
     }
 
     #[test]
