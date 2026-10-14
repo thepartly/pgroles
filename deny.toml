@@ -1,3 +1,15 @@
+[advisories]
+# Each ignore names why it is safe to carry and what removes it. Revisit them
+# whenever the dependency they cover is upgraded.
+ignore = [
+    # unsafe-libyaml is unmaintained (no known vulnerability). It arrives only
+    # through serde_yaml, which pgroles uses to parse manifests and which
+    # kube-client 3.x uses for kubeconfig. kube 4.x replaced serde_yaml with
+    # serde-saphyr; remove this entry once kube is upgraded and pgroles-core,
+    # pgroles-cli and pgroles-operator parse YAML without serde_yaml.
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained, reached only via serde_yaml; removed by the kube 4 / serde-saphyr migration" },
+]
+
 [licenses]
 allow = [
     "MIT",

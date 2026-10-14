@@ -111,12 +111,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny@0.19.0 --locked
-
-      - name: Check dependencies
-        run: cargo deny check
-
       - name: CRD drift check
         run: scripts/check-crd-drift.sh
 
@@ -149,6 +143,15 @@ jobs:
             uvx --from skills-ref==0.1.1 \
               agentskills validate "$(dirname "$skill_file")"
           done < /tmp/pgroles-agent-skills
+
+      # Last on purpose: the advisory database changes independently of this
+      # repository, so a newly published advisory must not stop the drift and
+      # skill checks above from reporting on the change under review.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny@0.19.0 --locked
+
+      - name: Check dependencies
+        run: cargo deny check
 
   monitoring:
     name: Monitoring examples
