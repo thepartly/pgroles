@@ -78,19 +78,31 @@ The `analyze` request's `current` field is only the managed, password-free snaps
 Role configuration accepts arbitrary strings and can contain credentials;
 remove sensitive values before importing or sharing a snapshot. Its grants may include a
 `grantors` map and memberships a `grantors` list when an exporter knows
-PostgreSQL 16+ attribution. `inherent_grants` records owner-held ACL entries as
+PostgreSQL 16+ attribution. PG16+ memberships may also carry `grantor_options`,
+a map from each grantor to `{ inherit, admin, set }` booleans. Option changes
+require complete, consistent options for every listed grantor; missing facts
+return a planning error instead of an unattributed revoke/regrant. Unchanged
+effective options retain independent values. `inherent_grants` records owner-held ACL entries as
 `{ role, object_type, schema, name }`; they are preserved according to the native planner rules.
 Duplicate entries for one target merge the way native inspection aggregates catalog rows:
 grant and default-privilege privileges union, grantor maps union per grantor, and duplicate
 `(role, member)` memberships become one edge whose `inherit` and `admin` apply if any entry
-sets them, with the union of their grantors.
+sets them, with the union of their grantors and per-grantor options.
+
+Resolved option changes bind the executor, selected grantor, expected tuple or
+absence, every independent tuple, and explicit SET effect. An increase preserves
+an existing attribution's SET or creates a usable attribution with SET FALSE.
+Reductions require the original attribution's authority and use RESTRICT.
+Snapshot claims remain hypothetical; live apply preflight rechecks them.
 
 The executor is separate auxiliary context:
 `memberships` records `{ role, member, set_role, inherit, admin_option }`,
 where each authority option is `allowed`, `denied`, or `unknown`. The executor
 also accepts `createrole`, `new_membership_set_role`, `new_role_set_role`,
 `new_role_inherit`, and `new_role_admin_option` with the same tri-state semantics
-(each defaults to `unknown`), and `superuser` (default `false`).
+(each defaults to `unknown`), and `superuser` (default `false`). For superuser
+option planning, `bootstrap_role` supplies the catalog-proven name of role OID
+10. SUPERUSER alone does not identify PostgreSQL's grant attribution.
 
 ## Optional analysis context
 
@@ -132,8 +144,9 @@ role then apply to later steps.
   `createrole` attribute for the executor role, and stays unknown when the role is absent.
 - In `memberships`, an explicit `allowed` or `denied` `inherit` or `admin_option` overrides what
   a snapshot edge for the same `(role, member)` records. `unknown`, including an omitted option,
-  never overrides it. From PostgreSQL 16, snapshot edges never prove SET ROLE, so `set_role`
-  comes only from executor facts; before 16, every membership proves it, and an `unknown`
+  never overrides it. From PostgreSQL 16, complete per-grantor `set` options can
+  prove SET ROLE or its absence; otherwise SET stays unknown unless supplied by
+  executor facts. Before 16 every membership proves SET ROLE, and an `unknown`
   `set_role` resolves to `allowed`.
 
 ## Analysis response

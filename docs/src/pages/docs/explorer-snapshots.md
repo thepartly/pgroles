@@ -14,7 +14,11 @@ Snapshots use the `pgroles.explorer.v1` request format. The
 [pgroles-wasm README](https://github.com/thepartly/pgroles/blob/main/crates/pgroles-wasm/README.md)
 is the only specification of it. This page does not restate the field list.
 The analyzer decodes requests strictly and rejects unknown fields, so a typo
-fails loudly rather than being ignored.
+fails loudly rather than being ignored. For PG16+ option changes, include complete
+`grantors` and `grantor_options` membership facts from the catalog. A complete
+authority graph does not substitute for missing per-grantor options: those
+changes fail closed until the snapshot is refreshed. Superuser option planning
+also needs the catalog-proven `executor.bootstrap_role` name for OID 10.
 
 The explorer accepts either a bare `current` snapshot or a whole request
 envelope:
@@ -95,11 +99,14 @@ proves about `SET ROLE`:
   membership in a superuser role (`superuser_required`).
 - **Before PostgreSQL 16**, there is no per-membership `SET` option, so every
   membership in the snapshot, in executor facts, or added by the plan proves
-  `SET ROLE` to the granted role. **From PostgreSQL 16**, a membership without
-  a `set_role` executor fact is a possible path but not a proven one.
+  `SET ROLE` to the granted role. **From PostgreSQL 16**, complete per-grantor
+  SET options or a `set_role` executor fact can prove that path; otherwise it
+  remains unproven.
 
-It does not change how the `INHERIT` option is modelled, grantor attribution,
-or which changes are planned.
+PG16+ option changes use the recorded grantor options and proven ADMIN
+attribution. Their SET effects are preserved for existing tuples; a new
+attribution used only for an option increase has SET FALSE. See
+[Flag changes](/docs/memberships#flag-changes).
 
 `executor.createrole` (`allowed`, `denied`, or `unknown`, the default) is
 consulted only below PostgreSQL 16. `allowed` or `denied` overrides the
