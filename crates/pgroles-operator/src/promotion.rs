@@ -1327,6 +1327,9 @@ mod tests {
             executor_authority: Some(crate::crd::CandidateExecutorAuthority {
                 eligibility: crate::crd::ExecutorAuthorityEligibility::NoKnownBlockers,
                 issues: vec![],
+                evaluated_at: "2026-10-14T00:00:00Z".to_string(),
+                parent_generation: Some(1),
+                parent_state: crate::crd::ParentEvaluationState::Converged,
             }),
             ..Default::default()
         });

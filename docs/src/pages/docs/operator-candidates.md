@@ -62,20 +62,36 @@ and the review SQL remain available. No privileges are changed by this check.
 not a guarantee that SQL will execute. Apply rechecks fresh authority.
 The structured `status.executorAuthority` object reports `eligibility` as
 `Blocked` or `NoKnownBlockers`, plus an `issues` array of stable `code` and
-readable `message` diagnostics. It is absent when no current authority check is
-available, including a parent block or planning failure. For a preview with SQL,
-CI should require a current, converged, unsuspended parent plus candidate
-`Ready=True` and `executorAuthority.eligibility=NoKnownBlockers`;
-missing or blocked results fail the gate. `Ready=True/NoEffects` separately
-reports that there is no SQL to execute. Phase `Planned` records review SQL
-availability even when authority blocks execution.
+readable `message` diagnostics. It also records what the answer was computed
+against: `evaluatedAt` (RFC 3339), `parentGeneration` (the parent policy's
+`metadata.generation`), and `parentState`, which is `Converged` or
+`ExecutorAuthorityBlocked`. It is absent when no current authority check is
+available, including a parent block or planning failure. `Ready=True/NoEffects`
+separately reports that there is no SQL to execute. Phase `Planned` records
+review SQL availability even when authority blocks execution.
+
+A CI gate for a preview with SQL should pass only when all of these hold:
+
+- candidate `Ready=True` with reason `Planned`, and
+  `executorAuthority.eligibility=NoKnownBlockers`;
+- `executorAuthority.parentGeneration` equals the parent's current
+  `metadata.generation`;
+- `executorAuthority.evaluatedAt` is not older than the gate's own start, or
+  than any event the result must follow, such as a migration or restore;
+- `executorAuthority.parentState` is `Converged`, or `ExecutorAuthorityBlocked`
+  when the change under review is a repair of that blocked policy.
+
+A missing or `Blocked` result fails the gate.
 
 Explicit target overrides retain their own connection and execution identity,
 even when the parent already holds the locks for the same database.
 
-Parent failures, suspension and unavailable planning clear previous eligibility
-and mark nonterminal previews unready through status only; their review SQL and
-plan reference remain available. If the API cannot accept that status update,
+Parent failures other than executor authority, suspension and unavailable
+planning clear previous eligibility and mark nonterminal previews unready
+through status only; their review SQL and plan reference remain available. Lock
+contention does not: it is routine when policies share a database, and the
+stamped `evaluatedAt` and `parentGeneration` already let a consumer reject a
+result that is too old. If the API cannot accept that status update,
 consumers must also reject the unhealthy parent. Promotion clears preview
 eligibility because it no longer describes current candidate review SQL.
 Status updates test the candidate UID and resourceVersion; conflicting
@@ -211,6 +227,15 @@ interval would have run — but no effect of the candidate itself executes.
 If the active policy is failing or awaiting its own approval, the candidate
 reports `Ready=False` with reason `BlockedByActivePolicy` and is re-planned
 when the parent recovers.
+
+One failure is the exception: a parent whose own plan stopped at the
+executor-authority preflight. None of that plan ran, so the database is not
+about to change under the candidate, and a candidate is usually how the
+policy gets repaired. Candidates are still planned against the unchanged
+database, report `executorAuthority.parentState=ExecutorAuthorityBlocked`, and
+say in their `Ready` message that promoting them replaces the blocked content.
+A repair whose own preview has no known blockers can therefore be reviewed and
+gated normally while the policy it fixes is degraded.
 
 ```text
 NAME                  POLICY   PHASE     CHANGES   PLAN                              AGE
@@ -556,7 +581,7 @@ database and still inspects for itself.
 | `Ready=True, reason=Planned` | A current plan exists and executor-authority preflight found no known blockers |
 | `Ready=False, reason=ExecutorAuthority` | Review SQL exists, but execution is blocked by known executor-authority issues; the message lists them |
 | `Ready=True, reason=NoEffects` | The content is already the database's state, so there is nothing to review. Not terminal — the content may diverge again |
-| `Ready=False, reason=BlockedByActivePolicy` | Parent is failing or awaiting its own approval; will re-plan |
+| `Ready=False, reason=BlockedByActivePolicy` | Parent is failing (other than on executor authority) or awaiting its own approval; will re-plan |
 | `Ready=False, reason=OverlayOverlap` | An ephemeral grant overlaps this candidate's effects; fresh review required |
 | `Ready=False, reason=PlanningFailed` | The candidate could not be planned at all; the message carries the error |
 | `Ready=False, reason=CandidateBudgetExceeded` | The policy is at its open-candidate budget and older proposals are ahead in the queue. Not terminal, and nothing is deleted — it plans once they are decided or expire |

@@ -5,6 +5,21 @@ source "$(dirname "$0")/e2e-helpers.sh"
 if [ -n "${PGROLES_TEST_PG_CONTAINER:-}" ]; then
   pg_query() { docker exec "$PGROLES_TEST_PG_CONTAINER" psql -U postgres -d pgroles_test -tAc "$1"; }
 fi
+# Later scripts share this fixture, so a failed assertion must not leave
+# policies reconciling or the roles behind.
+cleanup() {
+  kubectl delete pgcand candidate-authority-preview candidate-authority-repair \
+    candidate-authority-privileged-override candidate-authority-ordinary-override \
+    candidate-authority-cas-superseded candidate-authority-cas-promoted \
+    --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl delete pgr candidate-authority-policy candidate-authority-root-parent \
+    --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl delete secret candidate-authority-credentials --ignore-not-found >/dev/null 2>&1 || true
+  for role in cau_member cau_executor cau_grantor cau_group cau_repair cat_member cat_grantor cat_group; do
+    pg_query "DROP ROLE IF EXISTS $role;" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
 review_sql() {
   local name="$1"
   for attempt in 1 2 3 4 5; do
@@ -15,8 +30,10 @@ review_sql() {
 }
 pg_query "CREATE ROLE cau_group; CREATE ROLE cau_member; CREATE ROLE cau_grantor;
   CREATE ROLE cau_executor LOGIN PASSWORD 'cau-test-password';
+  CREATE ROLE cau_repair;
   GRANT cau_group TO cau_grantor WITH ADMIN TRUE;
-  GRANT cau_group TO cau_member WITH INHERIT FALSE, SET FALSE GRANTED BY cau_grantor;"
+  GRANT cau_group TO cau_member WITH INHERIT FALSE, SET FALSE GRANTED BY cau_grantor;
+  GRANT cau_repair TO cau_executor WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;"
 python3 - <<'PY_SECRET' | kubectl apply -f -
 import base64, json, subprocess
 from urllib.parse import urlsplit, urlunsplit
@@ -154,10 +171,19 @@ assert_unavailable() {
   test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority}')" = ""
   assert_review_unchanged
 }
+# The result names the parent generation and state it was computed against.
+assert_evaluated_against() {
+  local candidate="$1" state="$2"
+  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.parentState}')" = "$state"
+  test "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.parentGeneration}')" = \
+    "$(kubectl get pgr candidate-authority-policy -o jsonpath='{.metadata.generation}')"
+  test -n "$(kubectl get pgcand "$candidate" -o jsonpath='{.status.executorAuthority.evaluatedAt}')"
+}
 assert_fresh() {
   wait_for_ready_status_reason candidate-authority-policy True Reconciled
   wait_for_candidate_condition candidate-authority-preview Ready True Planned
   test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
+  assert_evaluated_against candidate-authority-preview Converged
   assert_review_unchanged
 }
 assert_review_unchanged
@@ -175,16 +201,55 @@ kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"connecti
 assert_unavailable
 kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"connection":{"secretRef":{"name":"candidate-authority-credentials"}}}}'
 assert_fresh
-# Induce external drift without changing the parent content/base pin. Losing
-# grantor authority blocks enforcement and invalidates the old preview. Recovery
-# must apply the parent plan normally; deleting or canceling it would mask the
-# lifecycle behavior this regression depends on.
+# Induce external drift without changing the parent content/base pin: the
+# INC-168 shape. Losing grantor authority blocks the parent's option change.
+# Nothing from its plan ran, so candidates are still planned against the
+# unchanged database and say so. Recovery must apply the parent plan normally;
+# deleting or canceling it would mask the lifecycle behavior this depends on.
 pg_query 'REVOKE cau_grantor FROM cau_executor GRANTED BY postgres;'
 pg_query 'GRANT cau_group TO cau_member WITH INHERIT TRUE GRANTED BY cau_grantor;'
 wait_for_ready_status_reason candidate-authority-policy False ExecutorAuthority
-assert_unavailable
 parent_plan="$(wait_for_current_plan_ref candidate-authority-policy)"
 wait_for_plan_phase "$parent_plan" Pending
+wait_for_candidate_condition candidate-authority-preview Ready False ExecutorAuthority
+test "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.executorAuthority.eligibility}')" = Blocked
+assert_evaluated_against candidate-authority-preview ExecutorAuthorityBlocked
+assert_review_unchanged
+# A repair keeps the live INHERIT option instead of rewriting a membership the
+# executor cannot touch, and adds a grant it can make. Its own preview has no
+# known blockers while the policy it repairs is still degraded.
+kubectl apply -f - <<'YAML_REPAIR'
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicyCandidate
+metadata: {name: candidate-authority-repair}
+spec:
+  policyRef: {name: candidate-authority-policy}
+  content:
+    roles:
+      - {name: cau_group, external: true}
+      - {name: cau_member, external: true}
+      - {name: cau_grantor, external: true}
+      - {name: cau_repair, external: true}
+    memberships:
+      - role: cau_group
+        exclusive: true
+        members:
+          - {name: cau_grantor, admin: true}
+          - {name: cau_member, inherit: true}
+      - role: cau_repair
+        members: [{name: cau_member}]
+YAML_REPAIR
+wait_for_candidate_condition candidate-authority-repair Ready True Planned
+test "$(kubectl get pgcand candidate-authority-repair -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
+assert_evaluated_against candidate-authority-repair ExecutorAuthorityBlocked
+[[ "$(kubectl get pgcand candidate-authority-repair -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')" == *'replaces the blocked content'* ]]
+repair_sql="$(review_sql "$(wait_for_candidate_plan_ref candidate-authority-repair)")"
+[[ "$repair_sql" == *'GRANT "cau_repair" TO "cau_member"'* ]]
+[[ "$repair_sql" != *'REVOKE'* ]]
+# Previewing executed nothing; the parent is still blocked on its own plan.
+test "$(pg_query "SELECT pg_has_role('cau_member','cau_repair','MEMBER');")" = f
+test "$(kubectl get pgplan "$parent_plan" -o jsonpath='{.status.phase}')" = Pending
+kubectl delete pgcand candidate-authority-repair --wait=true
 pg_query 'GRANT cau_grantor TO cau_executor WITH INHERIT TRUE, SET FALSE;'
 assert_fresh
 wait_for_plan_phase "$parent_plan" Applied
@@ -220,8 +285,4 @@ PY_CAS
   kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"suspend":false}}'
   assert_fresh
 done
-kubectl delete pgcand candidate-authority-preview --wait=true
-kubectl delete pgr candidate-authority-policy --wait=true
-kubectl delete secret candidate-authority-credentials
-pg_query 'DROP ROLE cau_member; DROP ROLE cau_executor; DROP ROLE cau_grantor; DROP ROLE cau_group;'
 echo 'Candidate shared preflight, retained review SQL, parent failure freshness and recovery passed.'

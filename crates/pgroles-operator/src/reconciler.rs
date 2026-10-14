@@ -879,10 +879,9 @@ async fn reconcile_apply(
     let identity = DatabaseIdentity::from_connection(&namespace, &resource.spec.connection);
 
     let result = reconcile_apply_inner(resource, ctx, &identity).await;
-    // Connection/spec/authority failures and early suspended/conflict exits
-    // never reach candidate planning under the database locks. Invalidate an
-    // earlier successful preview through status alone, including contention
-    // where this replica cannot establish a current result.
+    // Connection/spec failures and early suspended/conflict exits never reach
+    // candidate planning under the database locks. Invalidate an earlier
+    // successful preview through status alone.
     if candidate_evaluation_unavailable(&result) {
         invalidate_candidate_results_best_effort(ctx, resource).await;
     }
@@ -956,12 +955,44 @@ async fn reconcile_apply(
     }
 }
 
+/// How the parent's reconcile ended, for candidate planning, if it reached the
+/// locked phase in a state candidates can be gated on at all.
+fn candidate_parent_outcome(
+    result: &Result<(Action, ReconcileOutcome), ReconcileError>,
+) -> Option<crate::candidate::ParentOutcome> {
+    use crate::candidate::ParentOutcome;
+    match result {
+        Ok((_, ReconcileOutcome::Reconciled | ReconcileOutcome::Planned)) => {
+            Some(ParentOutcome::Converged)
+        }
+        Ok(_) => Some(ParentOutcome::Unstable),
+        // Raised only after the locked phase ran inspection, diff and the
+        // authority preflight, and before any SQL: candidates are planned.
+        Err(ReconcileError::ExecutorAuthority(_)) => Some(ParentOutcome::ExecutorAuthorityBlocked),
+        Err(_) => None,
+    }
+}
+
+/// Whether the reconcile ended without a current candidate evaluation, so an
+/// earlier one must be withdrawn.
+///
+/// Lock contention is deliberately excluded. It is routine when several
+/// policies share a database, and the policy holding the lock can change the
+/// database at any time whether or not this one is contended, so clearing on
+/// contention bought no freshness — it only made healthy previews flap.
+/// Every result carries `evaluatedAt` and `parentGeneration` instead, and a
+/// consumer that needs a newer answer compares them.
 fn candidate_evaluation_unavailable(
     result: &Result<(Action, ReconcileOutcome), ReconcileError>,
 ) -> bool {
     !matches!(
         result,
-        Ok((_, ReconcileOutcome::Reconciled | ReconcileOutcome::Planned))
+        Ok((
+            _,
+            ReconcileOutcome::Reconciled
+                | ReconcileOutcome::Planned
+                | ReconcileOutcome::LockContention
+        )) | Err(ReconcileError::ExecutorAuthority(_) | ReconcileError::LockContention(_, _))
     )
 }
 
@@ -1266,13 +1297,10 @@ async fn reconcile_apply_inner(
     // post-enforcement state rather than the drift the policy just removed.
     // A candidate is a proposal, so nothing it does may break enforcement —
     // failures are recorded on the candidate and swallowed here.
-    if let Ok((_, outcome)) = &result
+    let parent_outcome = candidate_parent_outcome(&result);
+    if let Some(parent_outcome) = parent_outcome
         && let Some(target_identity) = handoff.target_identity.as_ref()
     {
-        let converged = matches!(
-            outcome,
-            ReconcileOutcome::Reconciled | ReconcileOutcome::Planned
-        );
         // An API failure here is not "no plan": treating it as one would open
         // the gate while the parent may in fact hold an actionable plan, and
         // the candidate would be planned against a state the database is not
@@ -1284,7 +1312,7 @@ async fn reconcile_apply_inner(
                     identity,
                     target_identity,
                     overlay_edges: &handoff.overlay_edges,
-                    gate: crate::candidate::parent_gate(converged, actionable.is_some()),
+                    gate: crate::candidate::parent_gate(parent_outcome, actionable.is_some()),
                 };
                 if let Err(err) =
                     crate::candidate::reconcile_candidates(ctx, resource, &planning).await
@@ -1303,7 +1331,7 @@ async fn reconcile_apply_inner(
                 );
             }
         }
-    } else if result.is_ok() {
+    } else if parent_outcome.is_some() {
         // No target handoff means there was no evaluation context in which
         // an earlier candidate result could have been revalidated.
         invalidate_candidate_results_best_effort(ctx, resource).await;
@@ -6273,12 +6301,11 @@ mod tests {
         }
     }
     #[test]
-    fn all_parent_failure_and_early_exit_paths_invalidate_candidate_eligibility() {
+    fn parent_failure_and_early_exit_paths_invalidate_candidate_eligibility() {
         for outcome in [
             ReconcileOutcome::Suspended,
             ReconcileOutcome::Conflict,
             ReconcileOutcome::TargetIdentityBlocked,
-            ReconcileOutcome::LockContention,
         ] {
             assert!(candidate_evaluation_unavailable(&Ok((
                 Action::await_change(),
@@ -6286,10 +6313,8 @@ mod tests {
             ))));
         }
         for error in [
-            ReconcileError::ExecutorAuthority("blocked".into()),
             ReconcileError::SqlExec(sqlx::Error::PoolTimedOut),
             ReconcileError::InvalidSpec("bad".into()),
-            ReconcileError::LockContention("db".into(), "busy".into()),
         ] {
             assert!(candidate_evaluation_unavailable(&Err(error)));
         }
@@ -6299,5 +6324,37 @@ mod tests {
                 outcome
             ))));
         }
+    }
+
+    #[test]
+    fn an_authority_blocked_parent_keeps_the_previews_it_just_evaluated() {
+        use crate::candidate::ParentOutcome;
+        let blocked = Err(ReconcileError::ExecutorAuthority("blocked".into()));
+        assert_eq!(
+            candidate_parent_outcome(&blocked),
+            Some(ParentOutcome::ExecutorAuthorityBlocked)
+        );
+        // The inner reconcile planned candidates against the unchanged
+        // database; the outer path must not withdraw those results.
+        assert!(!candidate_evaluation_unavailable(&blocked));
+        assert_eq!(
+            candidate_parent_outcome(&Ok((Action::await_change(), ReconcileOutcome::Suspended))),
+            Some(ParentOutcome::Unstable)
+        );
+        assert_eq!(
+            candidate_parent_outcome(&Err(ReconcileError::InvalidSpec("bad".into()))),
+            None
+        );
+    }
+
+    #[test]
+    fn lock_contention_does_not_withdraw_a_stamped_preview() {
+        assert!(!candidate_evaluation_unavailable(&Ok((
+            Action::await_change(),
+            ReconcileOutcome::LockContention
+        ))));
+        assert!(!candidate_evaluation_unavailable(&Err(
+            ReconcileError::LockContention("db".into(), "busy".into())
+        )));
     }
 }
