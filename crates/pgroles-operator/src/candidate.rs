@@ -280,7 +280,7 @@ pub(crate) async fn invalidate_parent_evaluation(
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
     for mut candidate in api.list(&ListParams::default()).await? {
         if candidate_belongs_to(&candidate, policy) && needs_parent_invalidation(&candidate) {
-            block_candidate(ctx, &mut candidate, BlockCause::Unstable).await?;
+            invalidate_if_current(ctx, policy, &mut candidate).await?;
         }
     }
     Ok(())
@@ -288,14 +288,66 @@ pub(crate) async fn invalidate_parent_evaluation(
 
 async fn invalidate_candidate_best_effort(
     ctx: &OperatorContext,
+    policy: &PostgresPolicy,
     candidate: &mut PostgresPolicyCandidate,
 ) {
     if needs_parent_invalidation(candidate)
-        && let Err(err) = block_candidate(ctx, candidate, BlockCause::Unstable).await
+        && let Err(err) = invalidate_if_current(ctx, policy, candidate).await
     {
         tracing::warn!(candidate = %candidate.name_any(), %err,
             "could not clear unavailable candidate eligibility");
     }
+}
+
+async fn invalidate_if_current(
+    ctx: &OperatorContext,
+    policy: &PostgresPolicy,
+    candidate: &mut PostgresPolicyCandidate,
+) -> Result<(), ReconcileError> {
+    let original_uid = candidate.metadata.uid.clone();
+    let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
+    let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
+    for _ in 0..3 {
+        if !invalidation_still_current(original_uid.as_deref(), candidate, policy) {
+            return Ok(());
+        }
+        match block_candidate(ctx, candidate, BlockCause::Unstable).await {
+            Ok(()) => return Ok(()),
+            Err(ReconcileError::Kube(kube::Error::Api(error)))
+                if error.code == 409 || error.code == 422 =>
+            {
+                let Some(fresh) = api.get_opt(&candidate.name_any()).await? else {
+                    return Ok(());
+                };
+                // A validation error with unchanged preconditions is not a
+                // concurrency conflict and must not be hidden by retries.
+                if fresh.metadata.uid == candidate.metadata.uid
+                    && fresh.metadata.resource_version == candidate.metadata.resource_version
+                {
+                    return Err(ReconcileError::Kube(kube::Error::Api(error)));
+                }
+                *candidate = fresh;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !invalidation_still_current(original_uid.as_deref(), candidate, policy) {
+        return Ok(());
+    }
+    Err(ReconcileError::InvalidSpec(
+        "candidate status changed repeatedly; retry from fresh state".into(),
+    ))
+}
+
+fn invalidation_still_current(
+    uid: Option<&str>,
+    candidate: &PostgresPolicyCandidate,
+    policy: &PostgresPolicy,
+) -> bool {
+    uid.is_some()
+        && candidate.metadata.uid.as_deref() == uid
+        && candidate_belongs_to(candidate, policy)
+        && needs_parent_invalidation(candidate)
 }
 
 fn needs_parent_invalidation(candidate: &PostgresPolicyCandidate) -> bool {
@@ -363,7 +415,7 @@ pub async fn reconcile_candidates(
                 %err,
                 "failed to adopt candidate; current eligibility is unavailable"
             );
-            invalidate_candidate_best_effort(ctx, candidate).await;
+            invalidate_candidate_best_effort(ctx, policy, candidate).await;
             continue;
         }
 
@@ -408,7 +460,7 @@ pub async fn reconcile_candidates(
                     %err,
                     "failed to read this candidate's plans; current eligibility is unavailable"
                 );
-                invalidate_candidate_best_effort(ctx, candidate).await;
+                invalidate_candidate_best_effort(ctx, policy, candidate).await;
                 continue;
             }
         };
@@ -888,7 +940,7 @@ enum CandidateTargetContext<'a> {
         pool: sqlx::PgPool,
         identity: DatabaseIdentity,
         target_identity: pgroles_core::approval::TargetIdentity,
-        _db_lock: crate::context::DatabaseLockGuard,
+        _db_lock: Option<crate::context::DatabaseLockGuard>,
         advisory_lock: Option<crate::advisory::AdvisoryLock>,
     },
 }
@@ -957,12 +1009,6 @@ async fn resolve_target<'a>(
 
     let connection = override_connection_spec(target);
     let identity = DatabaseIdentity::from_connection(namespace, &connection);
-    if identity.as_str() == planning.identity.as_str() {
-        // The override resolves to the parent's own target. Reusing the
-        // parent's context is not an optimisation — taking the same lock twice
-        // in one reconcile would deadlock against ourselves.
-        return Ok(CandidateTargetContext::Parent(planning));
-    }
 
     let pool = ctx
         .get_or_create_pool(namespace, &connection)
@@ -983,25 +1029,22 @@ async fn resolve_target<'a>(
         .await
         .map_err(Box::new)?;
 
-    // The override aliases the parent's own database only on proof of
-    // *endpoint* identity: the resolved host, port and database fingerprint.
-    // The physical identity deliberately plays no part here — it names a
-    // storage lineage, not an endpoint, so a streaming replica or a restored
-    // clone shares it (and the database name) with the parent while being
-    // exactly the different endpoint the override exists to preview. When the
-    // fingerprints match, the parent already holds both locks for this
-    // database, so reuse its context — like the string-identity fast path.
+    // Endpoint identity can share the parent's database locks, but says
+    // nothing about execution identity: credentials are deliberately omitted
+    // from this fingerprint. Always retain the resolved override pool.
     let same_logical_fingerprint =
         planning.target_identity.logical.as_deref() == Some(logical.as_str());
     if same_logical_fingerprint {
-        tracing::info!(
-            candidate = %candidate.name_any(),
-            policy = %policy.name_any(),
-            target = %identity.as_str(),
-            "candidate target override aliases the parent's own database; \
-             reusing the parent's context and locks"
-        );
-        return Ok(CandidateTargetContext::Parent(planning));
+        return Ok(CandidateTargetContext::Override {
+            pool,
+            identity,
+            target_identity: pgroles_core::approval::TargetIdentity {
+                physical,
+                logical: Some(logical),
+            },
+            _db_lock: None,
+            advisory_lock: None,
+        });
     }
 
     // Residual: an alias this detection cannot prove — a different hostname
@@ -1051,7 +1094,7 @@ async fn resolve_target<'a>(
             physical,
             logical: Some(logical),
         },
-        _db_lock: db_lock,
+        _db_lock: Some(db_lock),
         advisory_lock,
     })
 }
@@ -1223,24 +1266,44 @@ where
     // keep an eligibility result from an older evaluation of review SQL.
     status.executor_authority = None;
     mutate(&mut status);
-    let patch = candidate_status_patch(&status);
+    let patch = candidate_status_cas_patch(candidate, &status)?;
     let updated = api
         .patch_status(
             &candidate.name_any(),
             &PatchParams::apply("pgroles-operator"),
-            &Patch::Merge(&patch),
+            &Patch::<()>::Json(
+                serde_json::from_value(patch)
+                    .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
+            ),
         )
         .await?;
     *candidate = updated;
     Ok(())
 }
 
-pub(crate) fn candidate_status_patch(status: &PostgresPolicyCandidateStatus) -> serde_json::Value {
-    let mut patch = serde_json::json!({ "status": status });
-    // Optional fields are skipped in serialization; a merge patch needs an
-    // explicit null to clear an old server-side preflight result.
-    patch["status"]["executorAuthority"] = serde_json::json!(status.executor_authority);
-    patch
+pub(crate) fn candidate_status_cas_patch(
+    candidate: &PostgresPolicyCandidate,
+    status: &PostgresPolicyCandidateStatus,
+) -> Result<serde_json::Value, ReconcileError> {
+    let uid = candidate.metadata.uid.as_ref().ok_or_else(|| {
+        ReconcileError::InvalidSpec("persisted candidate UID required for status update".into())
+    })?;
+    let version = candidate
+        .metadata
+        .resource_version
+        .as_ref()
+        .ok_or_else(|| {
+            ReconcileError::InvalidSpec(
+                "persisted candidate resourceVersion required for status update".into(),
+            )
+        })?;
+    Ok(serde_json::json!([
+        {"op":"test","path":"/metadata/uid","value":uid},
+        {"op":"test","path":"/metadata/resourceVersion","value":version},
+        // Replace the complete status object: omitted optional fields clear
+        // previous values rather than surviving a merge patch.
+        {"op":"add","path":"/status","value":status}
+    ]))
 }
 
 async fn record_outcome(
@@ -2565,33 +2628,6 @@ mod tests {
         assert!(content_digest(&candidate).starts_with("sha256:"));
     }
     #[test]
-    fn unavailable_preflight_explicitly_clears_a_previous_eligibility_result() {
-        let mut status = PostgresPolicyCandidateStatus {
-            executor_authority: Some(CandidateExecutorAuthority {
-                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
-                issues: vec![],
-            }),
-            ..Default::default()
-        };
-        let previous = candidate_status_patch(&status);
-        assert_eq!(
-            previous["status"]["executorAuthority"]["eligibility"],
-            "NoKnownBlockers"
-        );
-        status.executor_authority = None;
-        let patch = candidate_status_patch(&status);
-        assert!(
-            patch["status"]
-                .as_object()
-                .unwrap()
-                .contains_key("executorAuthority")
-        );
-        assert!(
-            patch["status"]["executorAuthority"].is_null(),
-            "omission would leave the old result in the API server's merge patch"
-        );
-    }
-    #[test]
     fn parent_invalidation_covers_ready_and_blocked_authority_without_touching_terminal_history() {
         let mut object = candidate("preview", PolicyContent::default());
         assert!(!needs_parent_invalidation(&object));
@@ -2619,7 +2655,7 @@ mod tests {
             ),
         );
         assert_eq!(status.plan_ref.as_ref().unwrap().name, "review-sql");
-        assert!(candidate_status_patch(status)["status"]["executorAuthority"].is_null());
+
         assert!(
             !needs_parent_invalidation(&object),
             "repeated parent failures must not churn status"
@@ -2635,5 +2671,93 @@ mod tests {
         );
         object.status.as_mut().unwrap().phase = CandidatePhase::Promoted;
         assert!(!needs_parent_invalidation(&object));
+    }
+    #[test]
+    fn invalidation_rechecks_identity_ownership_and_terminal_state() {
+        let parent = policy("orders");
+        let mut current = candidate("preview", PolicyContent::default());
+        current.metadata.uid = Some("preview-uid".into());
+        current.status = Some(PostgresPolicyCandidateStatus {
+            phase: CandidatePhase::Planned,
+            conditions: vec![ready_condition(true, candidate_reason::PLANNED, "ready")],
+            ..Default::default()
+        });
+        current.metadata.owner_references = Some(vec![policy_owner_reference(&parent)]);
+        assert!(invalidation_still_current(
+            Some("preview-uid"),
+            &current,
+            &parent
+        ));
+        let mut replacement_parent = parent.clone();
+        replacement_parent.metadata.uid = Some("replacement-parent".into());
+        assert!(!invalidation_still_current(
+            Some("preview-uid"),
+            &current,
+            &replacement_parent
+        ));
+        assert!(!invalidation_still_current(
+            Some("old-preview-uid"),
+            &current,
+            &parent
+        ));
+        current.status.as_mut().unwrap().phase = CandidatePhase::Promoted;
+        assert!(!invalidation_still_current(
+            Some("preview-uid"),
+            &current,
+            &parent
+        ));
+    }
+    #[test]
+    fn stale_invalidation_cannot_restore_a_superseded_or_promoted_candidate() {
+        let mut stale = candidate("c1", PolicyContent::default());
+        stale.metadata.uid = Some("c1-uid".into());
+        stale.metadata.resource_version = Some("10".into());
+        stale.status = Some(PostgresPolicyCandidateStatus {
+            phase: CandidatePhase::Planned,
+            executor_authority: Some(CandidateExecutorAuthority {
+                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
+                issues: vec![],
+            }),
+            conditions: vec![ready_condition(
+                true,
+                candidate_reason::PLANNED,
+                "review ready",
+            )],
+            ..Default::default()
+        });
+        let mut blocked = stale.status.clone().unwrap();
+        blocked.executor_authority = None;
+        blocked.conditions = vec![ready_condition(
+            false,
+            candidate_reason::BLOCKED_BY_ACTIVE_POLICY,
+            "unavailable",
+        )];
+        let operations: json_patch::Patch =
+            serde_json::from_value(candidate_status_cas_patch(&stale, &blocked).unwrap()).unwrap();
+        for phase in [CandidatePhase::Superseded, CandidatePhase::Promoted] {
+            // Replica A has already listed Planned C1; replica B retires it
+            // before A's unlocked invalidation writes. Use the actual emitted
+            // RFC6902 operations, not a second implementation of the writer.
+            let mut fresh = stale.clone();
+            fresh.metadata.resource_version = Some("11".into());
+            fresh.status.as_mut().unwrap().phase = phase;
+            fresh.status.as_mut().unwrap().executor_authority = None;
+            let mut document = serde_json::to_value(&fresh).unwrap();
+            let before = document.clone();
+            assert!(json_patch::patch(&mut document, &operations).is_err());
+            assert_eq!(
+                document, before,
+                "a failed CAS must not reopen a retired approval"
+            );
+            assert!(!needs_parent_invalidation(&fresh));
+        }
+        // Name reuse is also rejected, independently of resourceVersion.
+        let mut reused = serde_json::to_value(&stale).unwrap();
+        reused["metadata"]["uid"] = serde_json::json!("replacement-c1-uid");
+        assert!(json_patch::patch(&mut reused, &operations).is_err());
+        // A successful status replacement clears all omitted optional fields.
+        let mut original = serde_json::to_value(&stale).unwrap();
+        json_patch::patch(&mut original, &operations).unwrap();
+        assert!(original["status"].get("executorAuthority").is_none());
     }
 }

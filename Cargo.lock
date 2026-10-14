@@ -2272,6 +2272,7 @@ dependencies = [
  "flate2",
  "futures",
  "jiff",
+ "json-patch",
  "jsonschema",
  "k8s-openapi",
  "kube",

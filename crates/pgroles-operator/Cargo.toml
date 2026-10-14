@@ -67,6 +67,7 @@ required-features = ["cluster-e2e"]
 [dev-dependencies]
 # Port-forwarding to the cluster's PostgreSQL in tests/cluster_e2e.
 kube = { workspace = true, features = ["ws"] }
+json-patch = "=4.2.0" # already locked by kube; tests execute the real CAS operations
 jsonschema = { version = "0.49.9", default-features = false }
 proptest = "1.11.0"
 # start_paused lets the index readiness timeout be asserted without the test

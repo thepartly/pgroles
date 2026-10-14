@@ -236,7 +236,10 @@ Interpretation:
   parent settles.
 - Candidate planning filters undeclared object-grant revokes using the proposed roles' `preserve_undeclared_grants` setting, before SQL and approval digest generation. Explicit absence, default privileges, and memberships retain their normal semantics.
 - Candidate planning runs apply's read-only executor-authority preflight on the
-  final filtered changes and actual target. Known blockers leave the review
+  final filtered changes and actual target. Same-database overrides keep their
+  own executor pool while sharing only database locks. Status writes use UID
+  and resourceVersion preconditions; conflicting invalidation rechecks current
+  ownership and terminal state. Known blockers leave the review
   SQL and plan reference available with `Ready=False/ExecutorAuthority` and
   phase `Planned`. `status.executorAuthority` carries `Blocked` or
   `NoKnownBlockers` eligibility and code/message diagnostics. For SQL previews,
