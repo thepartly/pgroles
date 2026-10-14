@@ -49,10 +49,17 @@ async fn fixture() -> (PgPool, String, String) {
     let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    // The tests in this file run concurrently, and two of them can read the
+    // same clock value; the counter keeps their schemas and roles apart.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let suffix = format!(
+        "{}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let schema = format!("routine_{suffix}");
     let role = format!("routine_role_{suffix}");
     pool.execute(
