@@ -62,6 +62,19 @@ fn rendering_preserves_omitted_options_and_refuses_legacy_contexts() {
         render(&change).unwrap(),
         "REVOKE ADMIN OPTION FOR \"group\"\"role\" FROM \"app\" GRANTED BY \"grant\"\"or\" RESTRICT;"
     );
+    let mut both = change.clone();
+    if let Change::UpdateMemberOptions { inherit, .. } = &mut both {
+        *inherit = Some(false);
+    }
+    let sql = render(&both).unwrap();
+    assert!(sql.find("REVOKE INHERIT").unwrap() < sql.find("REVOKE ADMIN").unwrap());
+    if let Change::UpdateMemberOptions { admin, .. } = &mut both {
+        *admin = Some(true);
+    }
+    assert_eq!(
+        render(&both).unwrap_err(),
+        pgroles_core::sql::SqlRenderError::MixedMembershipOptions
+    );
     let legacy = SqlContext {
         pg_major_version: 15,
         ..Default::default()

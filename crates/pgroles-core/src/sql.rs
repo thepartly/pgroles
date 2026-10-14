@@ -147,6 +147,8 @@ pub enum SqlRenderError {
     UnattributedMembershipReplacement,
     #[error("membership option change has no explicit options")]
     EmptyMembershipOptions,
+    #[error("membership option reductions and increases must be separate reviewed changes")]
+    MixedMembershipOptions,
     #[error("an absent membership tuple cannot have options revoked")]
     InvalidMembershipExpectation,
     #[error("membership option changes require a resolved executor/grantor binding")]
@@ -164,6 +166,11 @@ fn validate_membership_options(change: &Change, ctx: &SqlContext) -> Result<(), 
     {
         if !ctx.supports_grant_with_options() {
             return Err(SqlRenderError::UnsupportedMembershipOptions);
+        }
+        if (*inherit == Some(false) || *admin == Some(false))
+            && (*inherit == Some(true) || *admin == Some(true))
+        {
+            return Err(SqlRenderError::MixedMembershipOptions);
         }
         if inherit.is_none() && admin.is_none() {
             return Err(SqlRenderError::EmptyMembershipOptions);
@@ -394,7 +401,9 @@ fn render_unscoped_statements(change: &Change, ctx: &SqlContext) -> Vec<String> 
             binding,
         } => {
             let mut statements = Vec::new();
-            for (name, value) in [("ADMIN", admin), ("INHERIT", inherit)] {
+            // Retain execution authority until the final statement when the
+            // executor is itself the member losing both options.
+            for (name, value) in [("INHERIT", inherit), ("ADMIN", admin)] {
                 if *value == Some(false) {
                     statements.push(format!(
                         "REVOKE {name} OPTION FOR {} FROM {} GRANTED BY {} RESTRICT;",
