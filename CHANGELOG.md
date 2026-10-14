@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-15
+
 ### Upgrade notes
 
+- **Apply the 0.14 CRDs before upgrading the controller.** They add status fields only: `PostgresPolicy.status.lastAttemptedReconcileAt`, `PostgresPolicyCandidate.status.executionPreflight`, and a `members_options_changed` count in policy and plan change summaries. Chart values are unchanged.
 - **Blocked auto-apply plans stay `Pending`.** Under `approval: auto`, a plan the executor lacks the authority to apply is no longer marked `Approved`; it waits as `Pending`, referenced by `status.current_plan_ref`, until authority exists. Alerts or dashboards that read an `Approved` plan as "about to apply" should treat a `Pending` plan on a policy with `Ready=False/ExecutorAuthority` as blocked. A reviewer can deny it; under `approval: auto` that cancels the one plan, and use `approval: manual` or `suspend` to stop automatic execution.
 - **Recorded reviews are format v3.** `pgroles diff --review-out` writes `pgroles.review-artifact.v3`, which adds the `schema_owner_transfer` preflight check. The explorer and `pgroles_core::review_artifact` still open v2 files from 0.13. Tools that validate artifacts against the published JSON Schema need the regenerated one.
 - **`pgroles diff` warns about what `apply` would refuse.** It runs the same guards as `apply` and prints `Warning: apply would refuse this plan: …` for an adopt-mode ownership transfer that was not allowed. Pass `--allow-schema-owner-transfers` to `diff` when the apply it previews will pass it. Exit codes are unchanged.

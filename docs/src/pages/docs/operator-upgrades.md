@@ -11,10 +11,10 @@ Read the target release's upgrade notes. Save your current chart version, values
 and policy manifests in your deployment repository. Keep database recovery
 procedures separate: rolling back a controller does not reverse committed SQL.
 
-Set the exact release you reviewed, for example `VERSION=0.13.0`. Render and review its resources using your existing values:
+Set the exact release you reviewed, for example `VERSION=0.14.0`. Render and review its resources using your existing values:
 
 ```bash
-VERSION=0.13.0
+VERSION=0.14.0
 helm template pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --include-crds \
   --values values.yaml > operator-rendered.yaml
@@ -44,6 +44,14 @@ kubectl apply --server-side -f operator-crds.yaml
 helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --values values.yaml --wait
 ```
+
+## Moving from 0.13 to 0.14
+
+- The CRDs add status fields only: `status.lastAttemptedReconcileAt` on policies, `status.executionPreflight` on candidates, and a `members_options_changed` count in change summaries. Apply the version-matched CRDs before the controller. Chart values are unchanged.
+- Under `approval: auto`, a plan the executor lacks the authority to apply stays `Pending` instead of being marked `Approved`. Alerts that read an `Approved` plan as about to apply should treat a `Pending` plan on a policy with `Ready=False/ExecutorAuthority` as blocked.
+- Candidates are checked against every guard apply runs. A candidate that apply would refuse, such as an adopt-mode schema ownership transfer the policy does not allow, now reports `Ready=False/ExecutionBlocked` with its issues in `status.executionPreflight`.
+- On PostgreSQL 16+, membership option changes are planned per grantor. Expect replanned SQL for policies whose `inherit` or `admin` options differ from the database.
+- `pgroles diff --review-out` writes review format v3. The explorer still opens v2 files written by 0.13.
 
 ## Moving from 0.12 to 0.13
 
