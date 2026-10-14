@@ -838,6 +838,77 @@
           "nullable": true,
           "type": "string"
         },
+        "executionPreflight": {
+          "description": "Read-only apply preflight for the current review SQL: every guard that\nwould refuse to execute it. Absent when no current check is available.\nApply rechecks fresh state; NoKnownBlockers describes targeted checks,\nnot guaranteed SQL success.",
+          "nullable": true,
+          "properties": {
+            "eligibility": {
+              "description": "Whether any apply guard would refuse to execute this SQL.",
+              "enum": [
+                "NoKnownBlockers",
+                "Blocked"
+              ],
+              "type": "string"
+            },
+            "evaluatedAt": {
+              "description": "RFC 3339 time the preflight ran. A consumer that needs a result newer\nthan some event (its own start, a migration, a restore) compares this.",
+              "type": "string"
+            },
+            "issues": {
+              "description": "Known blockers, each naming the guard that raised it.",
+              "items": {
+                "description": "One known reason apply would refuse a candidate's SQL.",
+                "properties": {
+                  "code": {
+                    "description": "Stable kind within the guard.",
+                    "type": "string"
+                  },
+                  "guard": {
+                    "description": "The apply guard that raised this blocker.",
+                    "enum": [
+                      "ExecutorAuthority",
+                      "SchemaOwnerTransfer",
+                      "RoleDropSafety"
+                    ],
+                    "type": "string"
+                  },
+                  "message": {
+                    "description": "Readable explanation naming the affected roles or objects.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "guard",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "parentGeneration": {
+              "description": "The parent policy's `metadata.generation` during evaluation. A result\nfor an older generation does not describe the current parent.",
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            },
+            "parentState": {
+              "description": "The parent policy's state during evaluation.",
+              "enum": [
+                "Converged",
+                "ExecutionBlocked"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "eligibility",
+            "evaluatedAt",
+            "issues",
+            "parentState"
+          ],
+          "type": "object"
+        },
         "observedGeneration": {
           "description": "The `.metadata.generation` that was last observed. A candidate spec is\nimmutable, so this advances at most once.",
           "format": "int64",

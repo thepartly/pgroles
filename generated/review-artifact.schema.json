@@ -22,7 +22,7 @@
       "$ref": "#/$defs/RecordedReview"
     },
     "schema_version": {
-      "const": "pgroles.review-artifact.v2"
+      "const": "pgroles.review-artifact.v3"
     }
   },
   "additionalProperties": false,
@@ -43,7 +43,8 @@
         "grantor_reachability",
         "revoke_acl_ownership",
         "plan_order_authority",
-        "drop_role_safety"
+        "drop_role_safety",
+        "schema_owner_transfer"
       ]
     },
     "EvidenceCoverage": {
@@ -149,11 +150,20 @@
       ]
     },
     "PreflightCheck": {
-      "type": "string",
-      "enum": [
-        "executor_authority",
-        "role_drop_safety",
-        "server_compatibility"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "executor_authority",
+            "role_drop_safety",
+            "server_compatibility"
+          ]
+        },
+        {
+          "description": "Whether apply refuses an adopt-mode schema ownership transfer the run\ndid not allow.",
+          "type": "string",
+          "const": "schema_owner_transfer"
+        }
       ]
     },
     "PreflightEvidence": {
