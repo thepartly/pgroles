@@ -235,11 +235,17 @@ Interpretation:
   has its own plan awaiting a decision; the candidate is planned once the
   parent settles.
 - Candidate planning filters undeclared object-grant revokes using the proposed roles' `preserve_undeclared_grants` setting, before SQL and approval digest generation. Explicit absence, default privileges, and memberships retain their normal semantics.
-- Candidate planning still omits executor-authority preflight, advisory warnings,
-  and the adopt-mode schema-owner-transfer guard. `Ready=True` does not prove
-  apply will succeed. Check executor authority and parent execution settings
-  separately. Changed effects require a replacement plan at promotion; the
-  approved digest does not bypass execution checks.
+- Candidate planning runs apply's read-only executor-authority preflight on the
+  final filtered changes and actual target. Known blockers leave the review
+  SQL and plan reference available with `Ready=False/ExecutorAuthority` and
+  phase `Planned`. `status.executorAuthority` carries `Blocked` or
+  `NoKnownBlockers` eligibility and code/message diagnostics. For SQL previews,
+  CI requires current parent readiness/convergence, candidate Ready=True and NoKnownBlockers; absence of a current result must
+  fail the gate. NoEffects is the separate no-SQL outcome. Apply
+  still rechecks fresh authority. Advisory warnings and the adopt-mode
+  schema-owner-transfer guard remain outside preview coverage. Check parent
+  execution settings separately. Changed effects require a replacement plan
+  at promotion; the approved digest does not bypass execution checks.
 - The spec is immutable. Revise by filing a successor that names this
   candidate in `spec.replaces`.
 - Approving the candidate's plan executes nothing by itself. Execution happens

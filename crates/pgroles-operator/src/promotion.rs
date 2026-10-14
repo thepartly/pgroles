@@ -772,20 +772,11 @@ pub async fn record_promotion(
     );
     let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    let mut status = candidate.status.clone().unwrap_or_default();
-    status.phase = CandidatePhase::Promoted;
-    set_condition_in(
-        &mut status.conditions,
-        promoted_condition(true, candidate_reason::PROMOTED, &message),
-    );
-    set_condition_in(
-        &mut status.conditions,
-        ready_condition(true, candidate_reason::PROMOTED, &message),
-    );
+    let status = promoted_status(candidate, &message);
     api.patch_status(
         &promoted_name,
         &PatchParams::apply("pgroles-operator"),
-        &Patch::Merge(&serde_json::json!({ "status": status })),
+        &Patch::Merge(&crate::candidate::candidate_status_patch(&status)),
     )
     .await?;
     crate::events::publish_candidate_event(
@@ -803,6 +794,24 @@ pub async fn record_promotion(
         "candidate promoted"
     );
     Ok(())
+}
+
+fn promoted_status(
+    candidate: &PostgresPolicyCandidate,
+    message: &str,
+) -> crate::crd::PostgresPolicyCandidateStatus {
+    let mut status = candidate.status.clone().unwrap_or_default();
+    status.phase = CandidatePhase::Promoted;
+    status.executor_authority = None;
+    set_condition_in(
+        &mut status.conditions,
+        promoted_condition(true, candidate_reason::PROMOTED, message),
+    );
+    set_condition_in(
+        &mut status.conditions,
+        ready_condition(true, candidate_reason::PROMOTED, message),
+    );
+    status
 }
 
 async fn report(
@@ -848,11 +857,12 @@ async fn set_candidate_condition(
     let namespace = candidate.namespace().ok_or(ReconcileError::NoNamespace)?;
     let api: Api<PostgresPolicyCandidate> = Api::namespaced(ctx.kube_client.clone(), &namespace);
     let mut status = candidate.status.clone().unwrap_or_default();
+    status.executor_authority = None;
     set_condition_in(&mut status.conditions, condition);
     api.patch_status(
         &candidate.name_any(),
         &PatchParams::apply("pgroles-operator"),
-        &Patch::Merge(&serde_json::json!({ "status": status })),
+        &Patch::Merge(&crate::candidate::candidate_status_patch(&status)),
     )
     .await?;
     if !already {
@@ -1295,5 +1305,27 @@ mod tests {
                 }
             );
         }
+    }
+    #[test]
+    fn promotion_clears_previous_executor_authority_before_becoming_terminal() {
+        let mut object = PostgresPolicyCandidate::new(
+            "preview",
+            serde_json::from_value(serde_json::json!({"policyRef":{"name":"orders"},"content":{}}))
+                .unwrap(),
+        );
+        object.status = Some(crate::crd::PostgresPolicyCandidateStatus {
+            executor_authority: Some(crate::crd::CandidateExecutorAuthority {
+                eligibility: crate::crd::ExecutorAuthorityEligibility::NoKnownBlockers,
+                issues: vec![],
+            }),
+            ..Default::default()
+        });
+        let status = promoted_status(&object, "applied");
+        assert_eq!(status.phase, CandidatePhase::Promoted);
+        assert!(status.executor_authority.is_none());
+        assert!(
+            crate::candidate::candidate_status_patch(&status)["status"]["executorAuthority"]
+                .is_null()
+        );
     }
 }

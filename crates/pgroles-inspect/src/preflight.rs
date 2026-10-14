@@ -162,6 +162,23 @@ pub enum AuthorityIssue {
     GrantorAuthorityRemovedByPlan { grantor: String, executor: String },
 }
 
+impl AuthorityIssue {
+    /// Stable diagnostic kind for consumers of read-only authority preflight.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DefaultPrivilegeOwner { .. } => "DefaultPrivilegeOwner",
+            Self::MissingDefaultPrivilegeOwner { .. } => "MissingDefaultPrivilegeOwner",
+            Self::PredefinedRoleGrant { .. } => "PredefinedRoleGrant",
+            Self::MissingPredefinedRole { .. } => "MissingPredefinedRole",
+            Self::PublicRevoke { .. } => "PublicRevoke",
+            Self::ForeignGrantorRevoke { .. } => "ForeignGrantorRevoke",
+            Self::ForeignGrantorMembershipRevoke { .. } => "ForeignGrantorMembershipRevoke",
+            Self::RevokeGrantorUnavailable { .. } => "RevokeGrantorUnavailable",
+            Self::GrantorAuthorityRemovedByPlan { .. } => "GrantorAuthorityRemovedByPlan",
+        }
+    }
+}
+
 impl std::fmt::Display for AuthorityIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

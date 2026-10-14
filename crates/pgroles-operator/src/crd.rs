@@ -2895,6 +2895,12 @@ pub struct PostgresPolicyCandidateStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<PlanReference>,
 
+    /// Read-only executor-authority preflight for the current review SQL.
+    /// Absent when no current check is available. Apply rechecks fresh state;
+    /// NoKnownBlockers describes targeted checks, not guaranteed SQL success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_authority: Option<CandidateExecutorAuthority>,
+
     #[serde(default)]
     #[schemars(length(max = 16))]
     /// Controller observations about candidate validity, planning, approval, and promotion.
@@ -2904,6 +2910,35 @@ pub struct PostgresPolicyCandidateStatus {
     /// immutable, so this advances at most once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+}
+
+/// Targeted executor-authority check for a candidate's current review SQL.
+#[derive(KubeSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateExecutorAuthority {
+    /// Whether the shared apply preflight found any known authority blockers.
+    pub eligibility: ExecutorAuthorityEligibility,
+    /// Known blockers, with stable diagnostic codes and readable details.
+    pub issues: Vec<ExecutorAuthorityDiagnostic>,
+}
+
+/// Execution eligibility established by targeted read-only authority checks.
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutorAuthorityEligibility {
+    /// The shared apply preflight returned no issues; apply still rechecks.
+    NoKnownBlockers,
+    /// Known executor-authority issues prevent this SQL from being applied.
+    Blocked,
+}
+
+/// One known executor-authority blocker.
+#[derive(KubeSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorAuthorityDiagnostic {
+    /// Stable kind returned by the shared authority preflight.
+    pub code: String,
+    /// Readable explanation naming the affected roles or objects.
+    pub message: String,
 }
 
 /// Printable lifecycle summary for a candidate.
@@ -2942,6 +2977,8 @@ impl CandidatePhase {
 pub mod candidate_reason {
     /// `Ready=True` — a current plan exists for this candidate.
     pub const PLANNED: &str = "Planned";
+    /// `Ready=False` — review SQL exists, but executor authority blocks apply.
+    pub const EXECUTOR_AUTHORITY: &str = "ExecutorAuthority";
     /// `Ready=True` — the content is already the database's state, so there is
     /// nothing to review. Not terminal: the content may diverge again.
     pub const NO_EFFECTS: &str = "NoEffects";

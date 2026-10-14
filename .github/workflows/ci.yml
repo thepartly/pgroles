@@ -6,8 +6,8 @@ on:
     # so the commit a release tag will point at has a successful push run for
     # release.yml's candidate-ci gate to find.
     branches: [main, "release/**"]
+  # Dependent drafts targeting a stack parent need the same checks as main.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -1611,6 +1611,8 @@ jobs:
       # ==================================================================
       - name: Run the cluster scenarios
         run: cargo test -p pgroles-operator --features cluster-e2e --test cluster_e2e -- --test-threads=1
+      - name: Verify candidate executor authority and freshness
+        run: bash scripts/e2e-candidate-authority.sh
 
       - name: Verify candidate grant preservation
         run: scripts/e2e-candidate-preservation.sh
