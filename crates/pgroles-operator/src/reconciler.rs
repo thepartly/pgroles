@@ -1314,11 +1314,13 @@ async fn reconcile_apply_inner(
                     overlay_edges: &handoff.overlay_edges,
                     gate: crate::candidate::parent_gate(parent_outcome, actionable.is_some()),
                 };
+                // Candidates written earlier in the pass hold current results,
+                // and the rest keep stamped ones a consumer can judge by age,
+                // so a failure partway through withdraws nothing.
                 if let Err(err) =
                     crate::candidate::reconcile_candidates(ctx, resource, &planning).await
                 {
                     tracing::warn!(name, namespace, %err, "candidate planning failed");
-                    invalidate_candidate_results_best_effort(ctx, resource).await;
                 }
             }
             Err(err) => {
