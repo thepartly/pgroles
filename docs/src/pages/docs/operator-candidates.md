@@ -70,11 +70,17 @@ missing or blocked results fail the gate. `Ready=True/NoEffects` separately
 reports that there is no SQL to execute. Phase `Planned` records review SQL
 availability even when authority blocks execution.
 
+Explicit target overrides retain their own connection and execution identity,
+even when the parent already holds the locks for the same database.
+
 Parent failures, suspension and unavailable planning clear previous eligibility
 and mark nonterminal previews unready through status only; their review SQL and
 plan reference remain available. If the API cannot accept that status update,
 consumers must also reject the unhealthy parent. Promotion clears preview
 eligibility because it no longer describes current candidate review SQL.
+Status updates test the candidate UID and resourceVersion; conflicting
+invalidation re-reads ownership and terminal state so an older snapshot cannot
+reopen a superseded or promoted proposal.
 
 Candidate planning still omits plan advisory warnings and the adopt-mode
 schema-owner-transfer guard. Execution settings such as

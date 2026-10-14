@@ -776,7 +776,12 @@ pub async fn record_promotion(
     api.patch_status(
         &promoted_name,
         &PatchParams::apply("pgroles-operator"),
-        &Patch::Merge(&crate::candidate::candidate_status_patch(&status)),
+        &Patch::<()>::Json(
+            serde_json::from_value(crate::candidate::candidate_status_cas_patch(
+                candidate, &status,
+            )?)
+            .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
+        ),
     )
     .await?;
     crate::events::publish_candidate_event(
@@ -862,7 +867,12 @@ async fn set_candidate_condition(
     api.patch_status(
         &candidate.name_any(),
         &PatchParams::apply("pgroles-operator"),
-        &Patch::Merge(&crate::candidate::candidate_status_patch(&status)),
+        &Patch::<()>::Json(
+            serde_json::from_value(crate::candidate::candidate_status_cas_patch(
+                candidate, &status,
+            )?)
+            .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?,
+        ),
     )
     .await?;
     if !already {
@@ -1323,9 +1333,9 @@ mod tests {
         let status = promoted_status(&object, "applied");
         assert_eq!(status.phase, CandidatePhase::Promoted);
         assert!(status.executor_authority.is_none());
-        assert!(
-            crate::candidate::candidate_status_patch(&status)["status"]["executorAuthority"]
-                .is_null()
-        );
+        object.metadata.uid = Some("preview-uid".into());
+        object.metadata.resource_version = Some("10".into());
+        let patch = crate::candidate::candidate_status_cas_patch(&object, &status).unwrap();
+        assert!(patch[2]["value"].get("executorAuthority").is_none());
     }
 }

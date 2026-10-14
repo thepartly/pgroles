@@ -71,6 +71,74 @@ sql="$(review_sql "$plan")"
 [[ "$sql" == *'REVOKE "cau_group" FROM "cau_member" GRANTED BY "cau_grantor";'* ]]
 [[ "$(kubectl get pgcand candidate-authority-preview -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')" == *'cau_grantor'* ]]
 test "$(pg_query "SELECT pg_has_role('cau_member','cau_group','MEMBER');")" = t
+# Same endpoint, distinct executor: an ordinary parent must not downgrade
+# an explicitly privileged override to the parent pool.
+kubectl apply -f - <<'YAML_OVERRIDE'
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicyCandidate
+metadata: {name: candidate-authority-privileged-override}
+spec:
+  policyRef: {name: candidate-authority-policy}
+  target: {connectionRef: {secretName: postgres-credentials, key: DATABASE_URL}}
+  content:
+    roles:
+      - {name: cau_group, external: true}
+      - {name: cau_member, external: true}
+      - {name: cau_grantor, external: true}
+    memberships:
+      - role: cau_group
+        exclusive: true
+        members: [{name: cau_grantor, admin: true}]
+YAML_OVERRIDE
+wait_for_candidate_condition candidate-authority-privileged-override Ready True Planned
+test "$(kubectl get pgcand candidate-authority-privileged-override -o jsonpath='{.status.executorAuthority.eligibility}')" = NoKnownBlockers
+kubectl delete pgcand candidate-authority-privileged-override --wait=true
+
+# Converse: a privileged parent must not lend its authority to an ordinary
+# override at the same host/port/database. Use separate role claims.
+pg_query 'CREATE ROLE cat_group; CREATE ROLE cat_member; CREATE ROLE cat_grantor; GRANT cat_group TO cat_grantor WITH ADMIN TRUE; GRANT cat_group TO cat_member WITH INHERIT FALSE, SET FALSE GRANTED BY cat_grantor;'
+kubectl apply -f - <<'YAML_CONVERSE'
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata: {name: candidate-authority-root-parent}
+spec:
+  connection: {secretRef: {name: postgres-credentials}}
+  interval: 2s
+  mode: apply
+  approval: auto
+  roles:
+    - {name: cat_group, external: true}
+    - {name: cat_member, external: true}
+    - {name: cat_grantor, external: true}
+  memberships:
+    - role: cat_group
+      exclusive: true
+      members: [{name: cat_grantor, admin: true}, {name: cat_member, inherit: false}]
+---
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicyCandidate
+metadata: {name: candidate-authority-ordinary-override}
+spec:
+  policyRef: {name: candidate-authority-root-parent}
+  target: {connectionRef: {secretName: candidate-authority-credentials, key: DATABASE_URL}}
+  content:
+    roles:
+      - {name: cat_group, external: true}
+      - {name: cat_member, external: true}
+      - {name: cat_grantor, external: true}
+    memberships:
+      - role: cat_group
+        exclusive: true
+        members: [{name: cat_grantor, admin: true}]
+YAML_CONVERSE
+wait_for_ready_status_reason candidate-authority-root-parent True Reconciled
+wait_for_candidate_condition candidate-authority-ordinary-override Ready False ExecutorAuthority
+[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executorAuthority.issues[0].message}')" == *'cau_executor'* ]]
+[[ "$(kubectl get pgcand candidate-authority-ordinary-override -o jsonpath='{.status.executorAuthority.issues[0].message}')" == *'cat_grantor'* ]]
+kubectl delete pgcand candidate-authority-ordinary-override --wait=true
+kubectl delete pgr candidate-authority-root-parent --wait=true
+pg_query 'DROP ROLE cat_member; DROP ROLE cat_grantor; DROP ROLE cat_group;'
+
 # Granting authority changes eligibility, without executing the candidate.
 pg_query 'GRANT cau_grantor TO cau_executor WITH INHERIT TRUE, SET FALSE;'
 wait_for_candidate_condition candidate-authority-preview Ready True Planned
@@ -120,6 +188,38 @@ wait_for_plan_phase "$parent_plan" Pending
 pg_query 'GRANT cau_grantor TO cau_executor WITH INHERIT TRUE, SET FALSE;'
 assert_fresh
 wait_for_plan_phase "$parent_plan" Applied
+# Replay each stale-list interleaving against the real Kubernetes apiserver
+# using a distinct disposable candidate; terminal objects are never reopened.
+for phase in Superseded Promoted; do
+  suffix="$(printf '%s' "$phase" | tr '[:upper:]' '[:lower:]')"
+  race="candidate-authority-cas-$suffix"
+  kubectl get pgcand candidate-authority-preview -o json | python3 -c 'import json,sys; c=json.load(sys.stdin); print(json.dumps({"apiVersion":c["apiVersion"],"kind":c["kind"],"metadata":{"name":sys.argv[1]},"spec":c["spec"]}))' "$race" | kubectl apply -f -
+  wait_for_candidate_condition "$race" Ready True Planned
+  race_plan="$(wait_for_candidate_plan_ref "$race")"
+  approve_plan "$race_plan"
+  kubectl get pgcand "$race" -o json > /tmp/candidate-authority-cas-before.json
+  kubectl patch pgcand "$race" --subresource=status --type=merge -p="{\"status\":{\"phase\":\"$phase\",\"executorAuthority\":null}}"
+  python3 - <<'PY_CAS' > /tmp/candidate-authority-cas-patch.json
+import json
+c=json.load(open('/tmp/candidate-authority-cas-before.json'))
+s=c['status'].copy(); s.pop('executorAuthority',None)
+s['phase']='Planned'
+print(json.dumps([
+ {'op':'test','path':'/metadata/uid','value':c['metadata']['uid']},
+ {'op':'test','path':'/metadata/resourceVersion','value':c['metadata']['resourceVersion']},
+ {'op':'add','path':'/status','value':s}]))
+PY_CAS
+  if kubectl patch pgcand "$race" --subresource=status --type=json --patch-file=/tmp/candidate-authority-cas-patch.json; then
+    echo '::error::stale invalidation restored terminal candidate state'; exit 1
+  fi
+  kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"suspend":true}}'
+  sleep 4
+  test "$(kubectl get pgcand "$race" -o jsonpath='{.status.phase}')" = "$phase"
+  test "$(kubectl get pgplan "$race_plan" -o jsonpath='{.status.conditions[?(@.type=="Approved")].status}')" = True
+  kubectl delete pgcand "$race" --wait=true
+  kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"suspend":false}}'
+  assert_fresh
+done
 kubectl delete pgcand candidate-authority-preview --wait=true
 kubectl delete pgr candidate-authority-policy --wait=true
 kubectl delete secret candidate-authority-credentials
