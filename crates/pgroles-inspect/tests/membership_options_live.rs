@@ -8,6 +8,11 @@ use pgroles_inspect::{
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use std::str::FromStr;
+use std::sync::{LazyLock, Mutex};
+
+/// Every test here recreates the same cluster-wide `mop_*` roles, and the
+/// harness runs a binary's tests in parallel by default, so they serialize.
+static ONE_AT_A_TIME: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const ROLES: &[&str] = &[
     "mop_child",
@@ -121,6 +126,10 @@ async fn table_access(root: &PgPool) -> bool {
 #[test]
 #[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
 fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
+    // Declared first so the cleanup guard drops before the lock is released.
+    let _serial = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _cleanup = Cleanup;
     runtime(async {
         let root = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
@@ -567,5 +576,46 @@ fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
         );
         executor.close().await;
         root.close().await;
+    });
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
+fn an_increase_without_usable_admin_is_an_executor_authority_blocker() {
+    // Declared first so the cleanup guard drops before the lock is released.
+    let _serial = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _cleanup = Cleanup;
+    runtime(async {
+        let root = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        // INC-168 without the executor's own ADMIN: only the provider can
+        // attribute the edge, and the ordinary login cannot act as it.
+        reset(&root).await;
+        root.execute("GRANT mop_role TO mop_alloydbadmin WITH ADMIN TRUE, INHERIT FALSE, SET FALSE; GRANT mop_role TO mop_member WITH INHERIT FALSE, SET TRUE GRANTED BY mop_alloydbadmin").await.unwrap();
+        let executor = ordinary_executor().await;
+        let before = current(&executor).await;
+        let raw = diff(&before, &desired(&before, true, false));
+        let error = resolve_membership_options(&executor, raw, &before)
+            .await
+            .expect_err("no grantor the executor can use holds ADMIN");
+        // Callers report this as missing executor authority, so a degraded
+        // policy keeps its candidate previews instead of failing planning.
+        let message = error
+            .executor_authority_blocker()
+            .expect("an authority blocker, not a planning fault");
+        assert!(message.contains("mop_member") && message.contains("mop_exec"));
+        assert_eq!(
+            pgroles_inspect::MembershipPlanningError::NO_USABLE_GRANTOR,
+            "NoUsableGrantor"
+        );
+        // Nothing ran: the provider-attributed edge is untouched.
+        assert_eq!(
+            rows(&root).await,
+            vec![("mop_alloydbadmin".into(), false, false, true)]
+        );
+        executor.close().await;
     });
 }

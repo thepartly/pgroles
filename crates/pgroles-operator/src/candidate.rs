@@ -1510,9 +1510,14 @@ async fn record_outcome(
             message,
             issues,
         } => {
-            let message = format!(
-                "Plan {plan_name} holds {changes} change(s) for review; execution is blocked{parent_note}:\n{message}"
-            );
+            let message = match &plan_name {
+                Some(plan_name) => format!(
+                    "Plan {plan_name} holds {changes} change(s) for review; execution is blocked{parent_note}:\n{message}"
+                ),
+                None => format!(
+                    "{changes} change(s) cannot be rendered for review; execution is blocked{parent_note}:\n{message}"
+                ),
+            };
             write_status(ctx, candidate, |status| {
                 status.execution_preflight =
                     Some(evaluation.preflight(ExecutionEligibility::Blocked, issues.clone()));
