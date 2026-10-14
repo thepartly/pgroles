@@ -47,7 +47,7 @@ otherwise.
 No CLI command writes an explorer snapshot. `pgroles inspect` prints a
 summary, `pgroles generate` writes a policy manifest, and
 `pgroles diff --review-out` writes a
-[recorded review](/docs/recorded-reviews) (`pgroles.review-artifact.v2`).
+[recorded review](/docs/recorded-reviews) (`pgroles.review-artifact.v3`).
 A recorded review is a different format: the explorer displays it read-only
 and cannot replan it, because the export deliberately omits the inputs.
 

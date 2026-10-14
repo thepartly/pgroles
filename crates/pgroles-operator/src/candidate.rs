@@ -935,7 +935,7 @@ async fn plan_against_target(
     // effects, under the parent's execution settings — the settings promotion
     // keeps. Preserve the review plan even when execution would be refused;
     // promotion's apply still rechecks against fresh state.
-    let blockers = crate::reconciler::evaluate_execution_guards(
+    let findings = crate::reconciler::evaluate_execution_guards(
         target.pool(),
         policy,
         reconciliation_mode,
@@ -943,8 +943,15 @@ async fn plan_against_target(
         &current,
         &manifest.retirements,
     )
-    .await?
-    .blockers();
+    .await?;
+    if !findings.drop_safety.warnings.is_empty() {
+        tracing::info!(candidate = %candidate.name_any(), warnings = %findings.drop_safety.warnings, "role-drop cleanup warnings");
+    }
+    let blockers: Vec<ExecutionBlocker> = findings
+        .blockers()
+        .into_iter()
+        .map(crate::reconciler::status_blocker)
+        .collect();
 
     let candidate_pairs = effect_pairs(&changes);
     let overlapping = intersecting_pairs(&candidate_pairs, overlay_pairs);
@@ -1480,7 +1487,7 @@ async fn record_outcome(
     match outcome {
         CandidateOutcome::Planned { plan_name, changes } => {
             let message = format!(
-                "Plan {plan_name} holds {changes} change(s) for review; executor-authority preflight found no known blockers (apply rechecks before execution){parent_note}"
+                "Plan {plan_name} holds {changes} change(s) for review; execution preflight found no known blockers under the current parent settings (apply rechecks before execution){parent_note}"
             );
             write_status(ctx, candidate, |status| {
                 status.execution_preflight =
@@ -1526,6 +1533,9 @@ async fn record_outcome(
             write_status(ctx, candidate, |status| {
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = None;
+                // There is no SQL to execute, so an earlier result about
+                // executing some no longer describes this candidate.
+                status.execution_preflight = None;
                 set_condition_in(
                     &mut status.conditions,
                     ready_condition(true, candidate_reason::NO_EFFECTS, &message),
@@ -2387,11 +2397,10 @@ mod tests {
 
     #[test]
     fn a_parent_refused_by_an_apply_guard_still_previews_its_repair() {
-        // INC-168 (executor authority) and the onboarding schema-ownership
-        // refusal: the parent's plan could not run, and the repair was a policy
-        // change. An open plan of its own is the blocked one, so it must not
-        // hold the gate shut the way an executable plan awaiting a decision
-        // does.
+        // Lost grantor authority or a disallowed schema transfer prevents
+        // the parent's plan from running; a repair changes the policy. Its
+        // open plan is the blocked one, so it must not hold the gate shut as
+        // an executable plan awaiting a decision would.
         for has_actionable_plan in [false, true] {
             assert_eq!(
                 parent_gate(ParentOutcome::ExecutionBlocked, has_actionable_plan),

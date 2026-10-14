@@ -18,5 +18,5 @@ it supersedes.
 
 - [ADR-001: PostgresPolicyCandidate API](adr-001-candidate-api.md) — bound the
   shared policy-content schema instead of forking it; whole-spec CEL
-  immutability; candidate ownership, planning context, and overlay-overlap
-  rules.
+  immutability; candidate ownership, planning context, overlay-overlap rules,
+  and the execution preflight a preview runs with its parent's settings.

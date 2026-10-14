@@ -15,7 +15,7 @@ import {
 // PGROLES_REVIEW_FIXTURE points the importer tests at another exported artifact.
 const fixturePath = process.env.PGROLES_REVIEW_FIXTURE ?? fileURLToPath(new URL('./fixtures/recorded-review.json', import.meta.url))
 const schemaPath = fileURLToPath(new URL('../public/generated/review-artifact.schema.json', import.meta.url))
-const CURRENT_VERSION = 'pgroles.review-artifact.v2'
+const CURRENT_VERSION = 'pgroles.review-artifact.v3'
 
 // Local runs skip until the generated inputs exist; CI never skips.
 const skipOutsideCi = (reason) => (process.env.CI ? false : reason)
@@ -41,9 +41,16 @@ test('accepts the CLI-generated fixture unchanged', { skip: fixtureSkip }, () =>
   assert.deepEqual(artifact, fixture)
 })
 
+test('opens a version 2 review exported by 0.13', () => {
+  // Version 3 only adds the schema_owner_transfer check.
+  const v2 = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/recorded-review-v2.json', import.meta.url)), 'utf8'))
+  assert.equal(v2.schema_version, 'pgroles.review-artifact.v2')
+  assert.deepEqual(reviewArtifactImport(structuredClone(v2)), v2)
+})
+
 test('rejects retired and unknown schema versions, and oversized files', { skip: fixtureSkip }, () => {
-  rejects((artifact) => { artifact.schema_version = 'pgroles.review-artifact.v1' }, /no longer supported; re-export the review with the current pgroles CLI to produce pgroles\.review-artifact\.v2/)
-  rejects((artifact) => { artifact.schema_version = 'pgroles.review-artifact.v3' }, /unsupported review artifact schema version: pgroles\.review-artifact\.v3/)
+  rejects((artifact) => { artifact.schema_version = 'pgroles.review-artifact.v1' }, /no longer supported; re-export the review with the current pgroles CLI to produce pgroles\.review-artifact\.v3/)
+  rejects((artifact) => { artifact.schema_version = 'pgroles.review-artifact.v4' }, /unsupported review artifact schema version: pgroles\.review-artifact\.v4/)
   rejects((artifact) => { delete artifact.schema_version }, /unsupported review artifact schema version: missing/)
   assert.doesNotThrow(() => validateReviewArtifactFileSize(MAX_SNAPSHOT_FILE_BYTES))
   assert.throws(() => validateReviewArtifactFileSize(MAX_SNAPSHOT_FILE_BYTES + 1), /review artifact file is 4194305 bytes; limit is 4194304 bytes/)

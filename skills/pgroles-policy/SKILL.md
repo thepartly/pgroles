@@ -165,7 +165,10 @@ reconciliation, role attributes, or other convergence behavior. Review those
 changes separately before applying an adoption plan. Remove the flag once the
 manifest declares the role's full object-grant surface. Adopt mode refuses to
 transfer schema ownership away from the live owner unless apply passes
-`--allow-schema-owner-transfers`.
+`--allow-schema-owner-transfers`. `diff` runs the same apply guards and warns
+`apply would refuse this plan`; pass it the same flag the apply will get, and
+its recorded review reports the `schema_owner_transfer` check (format v3; v2
+files from 0.13 still open).
 
 ## Ownership And ACLs
 

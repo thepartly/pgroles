@@ -1,8 +1,8 @@
 {
-  "schema_version": "pgroles.review-artifact.v2",
+  "schema_version": "pgroles.review-artifact.v3",
   "provenance": {
     "tool_version": "0.13.0",
-    "captured_at": "2026-09-23T19:35:41.3063163Z",
+    "captured_at": "2026-10-14T22:48:05.539107261Z",
     "policy": {
       "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
     },
@@ -57,6 +57,23 @@
           1,
           2
         ]
+      }
+    },
+    {
+      "check": "schema_owner_transfer",
+      "status": "passed",
+      "issue_count": 0,
+      "coverage": {
+        "kind": "complete",
+        "checks_performed": [
+          "schema_owner_transfer"
+        ],
+        "checked_change_indices": [
+          0,
+          1,
+          2
+        ],
+        "unchecked_change_indices": []
       }
     },
     {
@@ -264,7 +281,7 @@
       "status": "available",
       "sql": "CREATE ROLE \"review_app\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nCREATE ROLE \"review_app_reader\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;\nGRANT \"review_app_reader\" TO \"review_app\" WITH INHERIT TRUE;"
     },
-    "review_fingerprint": "sha256:6c4151d7c7d47e6eb9db844d6a46b0de3ff60469c675d69d25e5e32af3580299"
+    "review_fingerprint": "sha256:a9971befabb3e3482731b1198d4477fa63bdf157e5800f20adcab254a03f3e86"
   },
   "exploration": {
     "status": "omitted",

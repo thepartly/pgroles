@@ -3035,7 +3035,7 @@ roles:
             .clone();
 
         let rendered = std::fs::read_to_string(artifact.path()).expect("read review artifact");
-        assert!(rendered.contains("pgroles.review-artifact.v2"));
+        assert!(rendered.contains("pgroles.review-artifact.v3"));
         assert!(rendered.contains("recorded_only_export"));
         assert!(rendered.contains("test-pg16"));
         assert!(rendered.contains("intended_executor"));
@@ -5938,6 +5938,93 @@ schemas:
         );
 
         // Cleanup
+        execute_sql(&format!(
+            r#"
+            DROP SCHEMA IF EXISTS "{schema}" CASCADE;
+            DROP ROLE IF EXISTS "{live_owner}";
+            DROP ROLE IF EXISTS "{declared_owner}";
+            "#
+        ));
+    }
+
+    /// `diff` previews what `apply` would refuse: an adopt-mode transfer
+    /// without `--allow-schema-owner-transfers` is a failed preflight check in
+    /// the recorded review and a warning, and passes once the flag is given.
+    #[test]
+    #[ignore]
+    fn adopt_diff_records_the_schema_transfer_apply_would_refuse() {
+        let schema = unique_name("preview_schema");
+        let live_owner = unique_name("preview_live_owner");
+        let declared_owner = unique_name("preview_decl_owner");
+        execute_sql(&format!(
+            r#"
+            CREATE ROLE "{live_owner}" NOLOGIN;
+            CREATE ROLE "{declared_owner}" NOLOGIN;
+            CREATE SCHEMA "{schema}" AUTHORIZATION "{live_owner}";
+            "#
+        ));
+        let manifest_file = write_temp_manifest(&format!(
+            r#"
+schemas:
+  - name: {schema}
+    owner: {declared_owner}
+"#
+        ));
+        let review_dir = tempfile::tempdir().expect("temporary directory");
+        let ownership_check = |allow: bool| {
+            let review = review_dir.path().join(format!("review-{allow}.json"));
+            let mut args = vec![
+                "diff".to_string(),
+                "--file".into(),
+                manifest_file.path().to_str().unwrap().into(),
+                "--database-url".into(),
+                database_url(),
+                "--mode".into(),
+                "adopt".into(),
+                "--format".into(),
+                "summary".into(),
+                "--no-exit-code".into(),
+                "--review-out".into(),
+                review.to_str().unwrap().into(),
+            ];
+            if allow {
+                args.push("--allow-schema-owner-transfers".into());
+            }
+            let output = pgroles_cmd()
+                .args(&args)
+                .assert()
+                .success()
+                .get_output()
+                .clone();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let artifact: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&review).unwrap()).unwrap();
+            let check = artifact["preflight"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|evidence| evidence["check"] == "schema_owner_transfer")
+                .expect("the review records the ownership check")
+                .clone();
+            (stderr, check)
+        };
+
+        let (stderr, refused) = ownership_check(false);
+        assert!(stderr.contains("apply would refuse this plan"), "{stderr}");
+        assert_eq!(refused["status"], "failed");
+        assert_eq!(refused["issue_count"], 1);
+        assert_eq!(refused["issues"][0]["role"], declared_owner.as_str());
+
+        let (stderr, allowed) = ownership_check(true);
+        assert!(!stderr.contains("apply would refuse this plan"), "{stderr}");
+        assert_eq!(allowed["status"], "passed");
+        assert_eq!(allowed["issue_count"], 0);
+        assert_eq!(
+            query_schema_owner(&schema),
+            Some(live_owner.clone()),
+            "diff executes nothing"
+        );
+
         execute_sql(&format!(
             r#"
             DROP SCHEMA IF EXISTS "{schema}" CASCADE;

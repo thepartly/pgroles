@@ -6,6 +6,7 @@
 
 pub mod cloud;
 mod defaults;
+mod guards;
 mod identity;
 mod memberships;
 mod preflight;
@@ -30,6 +31,10 @@ use pgroles_core::ownership::ManagedScope;
 
 // Re-export the sub-modules' public items for testing / advanced use.
 pub use cloud::{CloudProvider, PrivilegeLevel, detect_privilege_level};
+pub use guards::{
+    ExecutionBlocker, ExecutionGuard, ExecutionGuardFindings, ExecutionSettings,
+    evaluate_execution_guards, refused_schema_owner_transfers,
+};
 pub use identity::detect_system_identifier;
 pub use memberships::{
     MembershipRow, fetch_memberships, fetch_predefined_memberships, format_predefined_memberships,

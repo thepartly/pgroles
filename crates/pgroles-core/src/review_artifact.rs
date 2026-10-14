@@ -31,10 +31,14 @@ use crate::visual::{
     VisualSource,
 };
 
-/// Version 2 records each phase's executor reachability as a delta from the
-/// previous phase (see [`RecordedPhase`]); version 1 repeated every role in
-/// every phase.
-pub const REVIEW_ARTIFACT_SCHEMA_VERSION: &str = "pgroles.review-artifact.v2";
+/// Version 3 adds the `schema_owner_transfer` preflight check; version 2
+/// records each phase's executor reachability as a delta from the previous
+/// phase (see [`RecordedPhase`]); version 1 repeated every role in every phase.
+pub const REVIEW_ARTIFACT_SCHEMA_VERSION: &str = "pgroles.review-artifact.v3";
+/// Older versions this reader still opens. Version 2 is version 3 without the
+/// ownership check, so a version 2 file reads as one that never recorded it.
+pub const READABLE_REVIEW_ARTIFACT_SCHEMA_VERSIONS: &[&str] =
+    &[REVIEW_ARTIFACT_SCHEMA_VERSION, "pgroles.review-artifact.v2"];
 pub const MAX_REVIEW_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -205,6 +209,7 @@ pub enum EvidenceCheck {
     RevokeAclOwnership,
     PlanOrderAuthority,
     DropRoleSafety,
+    SchemaOwnerTransfer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -229,6 +234,9 @@ pub enum PreflightCheck {
     ExecutorAuthority,
     RoleDropSafety,
     ServerCompatibility,
+    /// Whether apply refuses an adopt-mode schema ownership transfer the run
+    /// did not allow.
+    SchemaOwnerTransfer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -898,7 +906,7 @@ pub fn parse_review_artifact(json: &[u8]) -> Result<ReviewArtifact, ReviewArtifa
     }
     let probe: VersionProbe =
         serde_json::from_slice(json).map_err(ReviewArtifactError::Malformed)?;
-    if probe.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
+    if !READABLE_REVIEW_ARTIFACT_SCHEMA_VERSIONS.contains(&probe.schema_version.as_str()) {
         return Err(ReviewArtifactError::UnsupportedSchemaVersion(
             probe.schema_version,
         ));
@@ -1773,8 +1781,9 @@ mod tests {
     #[test]
     fn docs_fixture_matches_the_rust_contract() {
         // The explorer importer's fixture is CLI output; if the Rust contract
-        // drifts, regenerate it with `pgroles diff --review-out` (see
-        // docs/tests/fixtures/recorded-review.yaml).
+        // drifts, regenerate it with `pgroles diff --review-out --mode adopt
+        // --executor-role review_deployer` from
+        // docs/tests/fixtures/recorded-review.yaml against PostgreSQL 16.
         let fixture = include_str!("../../../docs/tests/fixtures/recorded-review.json");
         let artifact = parse_review_artifact(fixture.as_bytes())
             .expect("docs fixture is a valid current review artifact");
@@ -1786,6 +1795,22 @@ mod tests {
         );
         let folded = artifact.recorded.phase_reachability().unwrap();
         assert_eq!(folded.len(), artifact.recorded.phases.len());
+    }
+
+    #[test]
+    fn a_version_2_review_still_opens() {
+        // Exported by 0.13.0. Version 3 only adds the ownership check, so the
+        // older file reads as one that never recorded it.
+        let fixture = include_str!("../../../docs/tests/fixtures/recorded-review-v2.json");
+        let artifact = parse_review_artifact(fixture.as_bytes())
+            .expect("a version 2 review artifact still opens");
+        assert_eq!(artifact.schema_version, "pgroles.review-artifact.v2");
+        assert!(
+            artifact
+                .preflight
+                .iter()
+                .all(|evidence| evidence.check != PreflightCheck::SchemaOwnerTransfer)
+        );
     }
 
     #[test]

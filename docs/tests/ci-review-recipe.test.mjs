@@ -21,7 +21,7 @@ const dockerStub = `#!/bin/sh
 printf "%s\\n" "$@" > "$ARGS_OUTPUT"
 cat "$REPORT_SOURCE"
 case "$ARTIFACT" in
-  write) printf '{"schema_version":"pgroles.review-artifact.v2"}' > "$GITHUB_WORKSPACE/review.pgroles.json" ;;
+  write) printf '{"schema_version":"pgroles.review-artifact.v3"}' > "$GITHUB_WORKSPACE/review.pgroles.json" ;;
   empty) : > "$GITHUB_WORKSPACE/review.pgroles.json" ;;
 esac
 exit "$DIFF_EXIT"
@@ -34,7 +34,7 @@ function literalStepEnv(step) {
 function runGenerate(directory, { status, artifact, stale = false }) {
   const reviewPath = join(directory, 'review.pgroles.json')
   rmSync(reviewPath, { force: true })
-  if (stale) writeFileSync(reviewPath, '{"schema_version":"pgroles.review-artifact.v2"}')
+  if (stale) writeFileSync(reviewPath, '{"schema_version":"pgroles.review-artifact.v3"}')
   return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', generate.run], {
     cwd: directory,
     encoding: 'utf8',

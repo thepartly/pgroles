@@ -18,5 +18,7 @@
 //! Scenarios share one database, so they run one at a time, name every role
 //! and resource with their own prefix, and clean up even when they fail.
 
+mod candidate_authority;
+mod candidate_guards;
 mod harness;
 mod plan_authority;

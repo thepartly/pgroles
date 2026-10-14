@@ -17,8 +17,8 @@ use pgroles_cli::{
     PlanSummary, candidate, format_bundle_plan_json, format_bundle_validation_result,
     format_managed_scope_summary, format_plan_json, format_plan_sql_with_context,
     format_rendered_bundle, format_role_graph_summary, format_validation_result,
-    inject_password_changes, planned_role_drops, read_manifest_file, resolve_passwords,
-    validate_bundle_file, validate_manifest,
+    inject_password_changes, read_manifest_file, resolve_passwords, validate_bundle_file,
+    validate_manifest,
 };
 use pgroles_core::diff::{ReconciliationMode, additive_ignores_absence_assertions, plan_changes};
 use pgroles_core::explorer::ExecutorFacts;
@@ -31,7 +31,7 @@ use pgroles_core::review_artifact::{
     build_review_artifact,
 };
 use pgroles_core::visual::{self, VisualManagedScope, VisualSource};
-use pgroles_inspect::{InspectConfig, inspect_drop_role_safety};
+use pgroles_inspect::InspectConfig;
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -96,6 +96,12 @@ enum Commands {
         /// Disable non-zero exit when drift is detected.
         #[arg(long, action = clap::ArgAction::SetTrue, overrides_with = "exit_code")]
         no_exit_code: bool,
+
+        /// Evaluate the plan as `apply --allow-schema-owner-transfers` would.
+        /// Without it, an adopt-mode schema ownership transfer is reported as
+        /// one apply refuses, in a warning and in the review artifact.
+        #[arg(long)]
+        allow_schema_owner_transfers: bool,
 
         /// Write a sanitized, review-only plan artifact to this file.
         #[arg(long)]
@@ -458,6 +464,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             mode,
             exit_code,
             no_exit_code,
+            allow_schema_owner_transfers,
             review_out,
             target_label,
             policy_commit,
@@ -468,7 +475,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 bundle.as_deref(),
                 &database_url,
                 &format,
-                mode.into(),
+                ApplySettings {
+                    mode: mode.into(),
+                    allow_schema_owner_transfers,
+                },
                 exit_code && !no_exit_code,
                 DiffReviewOptions {
                     review_out: review_out.as_deref(),
@@ -1048,8 +1058,7 @@ struct ReviewArtifactBuildInput<'a> {
     changes: &'a [pgroles_core::diff::Change],
     change_sources: Option<&'a [pgroles_core::report::BundleChangeOwner]>,
     sql_context: &'a pgroles_core::sql::SqlContext,
-    authority_issues: &'a [pgroles_inspect::AuthorityIssue],
-    drop_safety: &'a pgroles_inspect::DropRoleSafetyAssessment,
+    guards: &'a pgroles_inspect::ExecutionGuardFindings,
 }
 
 /// A grantor-less object revoke is checked only for the objects
@@ -1175,9 +1184,10 @@ fn build_cli_review_artifact(input: ReviewArtifactBuildInput<'_>) -> Result<Revi
         changes,
         change_sources,
         sql_context,
-        authority_issues,
-        drop_safety,
+        guards,
     } = input;
+    let authority_issues = &guards.authority;
+    let drop_safety = &guards.drop_safety;
     let intended_executor = intended_executor.unwrap_or(&inspector.user_name);
     let intended_is_inspector = intended_executor == inspector.user_name;
     let authority_coverage = targeted_authority_coverage(
@@ -1231,6 +1241,36 @@ fn build_cli_review_artifact(input: ReviewArtifactBuildInput<'_>) -> Result<Revi
                 },
                 checked_change_indices: drop_checked,
                 unchecked_change_indices: drop_unchecked,
+            },
+        },
+        // The ownership rule is exact, not a probe: every change is covered,
+        // and only an adopt-mode transfer the run did not allow fails it.
+        PreflightEvidence {
+            check: PreflightCheck::SchemaOwnerTransfer,
+            status: if guards.refused_schema_owner_transfers.is_empty() {
+                EvidenceStatus::Passed
+            } else {
+                EvidenceStatus::Failed
+            },
+            actor_role: None,
+            issue_count: guards.refused_schema_owner_transfers.len(),
+            issues: guards
+                .refused_schema_owner_transfers
+                .iter()
+                .map(|(schema, owner)| PreflightFinding {
+                    code: "adopt_schema_owner_transfer".to_string(),
+                    message: format!(
+                        "adopt mode would transfer ownership of schema \"{schema}\"; apply \
+                         refuses it without --allow-schema-owner-transfers"
+                    ),
+                    role: Some(owner.clone()),
+                })
+                .collect(),
+            coverage: EvidenceCoverage {
+                kind: EvidenceCoverageKind::Complete,
+                checks_performed: vec![EvidenceCheck::SchemaOwnerTransfer],
+                checked_change_indices: (0..changes.len()).collect(),
+                unchecked_change_indices: Vec::new(),
             },
         },
         PreflightEvidence {
@@ -1395,6 +1435,12 @@ fn drop_safety_concern_count(issue: &pgroles_inspect::DropRoleSafetyIssue) -> us
 }
 
 #[derive(Clone, Copy)]
+/// How the apply that `diff` previews would run.
+struct ApplySettings {
+    mode: ReconciliationMode,
+    allow_schema_owner_transfers: bool,
+}
+
 struct DiffReviewOptions<'a> {
     review_out: Option<&'a Path>,
     target_label: Option<&'a str>,
@@ -1503,10 +1549,14 @@ async fn cmd_diff(
     bundle: Option<&Path>,
     database_url: &str,
     format: &OutputFormat,
-    mode: ReconciliationMode,
+    apply: ApplySettings,
     use_exit_code: bool,
     review: DiffReviewOptions<'_>,
 ) -> Result<ExitCode> {
+    let ApplySettings {
+        mode,
+        allow_schema_owner_transfers,
+    } = apply;
     let DiffReviewOptions {
         review_out,
         target_label,
@@ -1541,9 +1591,17 @@ async fn cmd_diff(
             &changes,
             &validated.composed.managed_change_surface,
         )?;
-        let authority_issues = preflight_authority(&pool, &changes, &current, false).await?;
-        let drop_safety =
-            inspect_drop_safety(&pool, &changes, &validated.composed.manifest.retirements).await?;
+        let guards = evaluate_apply_guards(
+            &pool,
+            mode,
+            allow_schema_owner_transfers,
+            &changes,
+            &current,
+            &validated.composed.manifest.retirements,
+        )
+        .await?;
+        warn_apply_refusals(&guards);
+        let drop_safety = &guards.drop_safety;
         let summary = PlanSummary::from_changes(&changes);
         let sql_context = if matches!(format, OutputFormat::Sql) || review_out.is_some() {
             Some(detect_sql_context_with_config(&pool, &inspect_config).await?)
@@ -1583,8 +1641,7 @@ async fn cmd_diff(
                         sql_context: sql_context
                             .as_ref()
                             .expect("review artifact requested SQL context"),
-                        authority_issues: &authority_issues,
-                        drop_safety: &drop_safety,
+                        guards: &guards,
                     })?;
                     write_review_artifact(review_path, &artifact)
                 }
@@ -1599,7 +1656,7 @@ async fn cmd_diff(
                 format,
                 changes: &changes,
                 summary: &summary,
-                drop_safety: &drop_safety,
+                drop_safety,
                 sql_context: sql_context.as_ref(),
                 review_fingerprint: export.as_ref().and_then(|result| result.as_deref().ok()),
             },
@@ -1644,8 +1701,17 @@ async fn cmd_diff(
         &validated.expanded.roles,
     );
     let changes = diff_password_changes(changes, &validated.expanded, format)?;
-    let authority_issues = preflight_authority(&pool, &changes, &current, false).await?;
-    let drop_safety = inspect_drop_safety(&pool, &changes, &validated.manifest.retirements).await?;
+    let guards = evaluate_apply_guards(
+        &pool,
+        mode,
+        allow_schema_owner_transfers,
+        &changes,
+        &current,
+        &validated.manifest.retirements,
+    )
+    .await?;
+    warn_apply_refusals(&guards);
+    let drop_safety = &guards.drop_safety;
     let summary = PlanSummary::from_changes(&changes);
     let sql_context = if matches!(format, OutputFormat::Sql) || review_out.is_some() {
         Some(detect_sql_context(&pool, &validated.expanded).await?)
@@ -1672,8 +1738,7 @@ async fn cmd_diff(
                     sql_context: sql_context
                         .as_ref()
                         .expect("review artifact requested SQL context"),
-                    authority_issues: &authority_issues,
-                    drop_safety: &drop_safety,
+                    guards: &guards,
                 })?;
                 write_review_artifact(review_path, &artifact)
             }
@@ -1687,7 +1752,7 @@ async fn cmd_diff(
             format,
             changes: &changes,
             summary: &summary,
-            drop_safety: &drop_safety,
+            drop_safety,
             sql_context: sql_context.as_ref(),
             review_fingerprint: export.as_ref().and_then(|result| result.as_deref().ok()),
         },
@@ -1743,7 +1808,6 @@ async fn cmd_apply(
             &validated.composed.expanded,
             mode,
         );
-        enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
         warn_adopt_schema_owner_transfers(mode, &changes);
         warn_undeclared_default_owner(
             validated.composed.manifest.default_owner.as_deref(),
@@ -1767,8 +1831,19 @@ async fn cmd_apply(
             }
         }
 
-        let drop_safety =
-            inspect_drop_safety(&pool, &changes, &validated.composed.manifest.retirements).await?;
+        let guards = evaluate_apply_guards(
+            &pool,
+            mode,
+            allow_schema_owner_transfers,
+            &changes,
+            &current,
+            &validated.composed.manifest.retirements,
+        )
+        .await?;
+        if let Some(refusal) = guards.owner_transfer_refusal() {
+            anyhow::bail!("{refusal}");
+        }
+        let drop_safety = &guards.drop_safety;
         let summary = PlanSummary::from_changes(&changes);
 
         if summary.is_empty() {
@@ -1782,14 +1857,14 @@ async fn cmd_apply(
             println!("-- DRY RUN: the following SQL would be executed:\n");
             print!("{sql_output}");
             eprintln!("\n{}", summary.format_plan());
-            let _ = preflight_authority(&pool, &changes, &current, false).await?;
+            warn_authority_issues(&guards.authority);
             if !drop_safety.is_empty() {
                 eprintln!("\n{drop_safety}");
             }
             return Ok(());
         }
 
-        let _ = preflight_authority(&pool, &changes, &current, true).await?;
+        refuse_authority_issues(&guards.authority)?;
 
         if drop_safety.has_blockers() {
             anyhow::bail!("{}", drop_safety.blockers);
@@ -1837,7 +1912,6 @@ async fn cmd_apply(
         &validated.expanded,
         mode,
     );
-    enforce_adopt_owner_transfer_guard(mode, allow_schema_owner_transfers, &changes)?;
     warn_adopt_schema_owner_transfers(mode, &changes);
     warn_undeclared_default_owner(
         validated.manifest.default_owner.as_deref(),
@@ -1855,7 +1929,19 @@ async fn cmd_apply(
         }
     }
 
-    let drop_safety = inspect_drop_safety(&pool, &changes, &validated.manifest.retirements).await?;
+    let guards = evaluate_apply_guards(
+        &pool,
+        mode,
+        allow_schema_owner_transfers,
+        &changes,
+        &current,
+        &validated.manifest.retirements,
+    )
+    .await?;
+    if let Some(refusal) = guards.owner_transfer_refusal() {
+        anyhow::bail!("{refusal}");
+    }
+    let drop_safety = &guards.drop_safety;
     let summary = PlanSummary::from_changes(&changes);
 
     if summary.is_empty() {
@@ -1869,14 +1955,14 @@ async fn cmd_apply(
         println!("-- DRY RUN: the following SQL would be executed:\n");
         print!("{sql_output}");
         eprintln!("\n{}", summary.format_plan());
-        let _ = preflight_authority(&pool, &changes, &current, false).await?;
+        warn_authority_issues(&guards.authority);
         if !drop_safety.is_empty() {
             eprintln!("\n{drop_safety}");
         }
         return Ok(());
     }
 
-    let _ = preflight_authority(&pool, &changes, &current, true).await?;
+    refuse_authority_issues(&guards.authority)?;
 
     if drop_safety.has_blockers() {
         anyhow::bail!("{}", drop_safety.blockers);
@@ -2498,38 +2584,65 @@ async fn inspect_current_for_plan_with_config(
     Ok(inspection.graph)
 }
 
-/// Report planned default-privilege changes and PUBLIC revokes the executor
-/// lacks the authority to perform. Runs on the final change list, so converged
-/// state never reports anything.
+/// The apply guards, under the settings `pgroles apply` runs with.
 ///
-/// `blocking` is true only where SQL actually runs. `diff` and `apply
-/// --dry-run` execute nothing, so they warn and still produce their plan —
-/// a CI drift check running as a read-only role keeps working. This mirrors
-/// how drop safety is handled, which also warns until the moment of execution.
-async fn preflight_authority(
+/// `diff` and `apply --dry-run` evaluate the same guards and only warn, so a
+/// CI drift check running as a read-only role keeps working while its report
+/// says exactly what the apply would refuse. The operator evaluates a policy
+/// through the same function, with its own settings.
+async fn evaluate_apply_guards(
     pool: &PgPool,
+    mode: ReconciliationMode,
+    allow_schema_owner_transfers: bool,
     changes: &[pgroles_core::diff::Change],
     current: &pgroles_core::model::RoleGraph,
-    blocking: bool,
-) -> Result<Vec<pgroles_inspect::AuthorityIssue>> {
-    let issues = pgroles_inspect::preflight_authority_issues(pool, changes, current)
-        .await
-        .context("failed to check executor authority")?;
-    if issues.is_empty() {
-        return Ok(issues);
+    retirements: &[pgroles_core::manifest::RoleRetirement],
+) -> Result<pgroles_inspect::ExecutionGuardFindings> {
+    pgroles_inspect::evaluate_execution_guards(
+        pool,
+        &pgroles_inspect::ExecutionSettings {
+            executes: true,
+            allow_schema_owner_transfers,
+            transfer_allowance: "pass --allow-schema-owner-transfers",
+        },
+        mode,
+        changes,
+        current,
+        retirements,
+    )
+    .await
+    .context("failed to evaluate the apply guards")
+}
+
+/// Warn, for a command that executes nothing, about everything apply would
+/// refuse. Role-drop safety is reported with the plan itself.
+fn warn_apply_refusals(guards: &pgroles_inspect::ExecutionGuardFindings) {
+    if let Some(refusal) = guards.owner_transfer_refusal() {
+        eprintln!("Warning: apply would refuse this plan: {refusal}");
     }
-    let message = issues
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    if blocking {
-        anyhow::bail!("{message}");
-    }
-    for issue in &issues {
+    warn_authority_issues(&guards.authority);
+}
+
+fn warn_authority_issues(issues: &[pgroles_inspect::AuthorityIssue]) {
+    for issue in issues {
         eprintln!("Warning: {issue}");
     }
-    Ok(issues)
+}
+
+/// Refuse to execute a plan the executor lacks the authority to run. A
+/// PUBLIC revoke without that authority would silently no-op.
+fn refuse_authority_issues(issues: &[pgroles_inspect::AuthorityIssue]) -> Result<()> {
+    if issues.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{}",
+        issues
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 fn warn_additive_absence_assertions(
@@ -2543,36 +2656,6 @@ fn warn_additive_absence_assertions(
              use adopt or authoritative mode to enforce absence"
         );
     }
-}
-
-/// Refuse an adopt-mode apply that would transfer schema ownership.
-///
-/// Adopt filters role drops, not ownership convergence: a binding whose
-/// declared owner differs from the live one is transferred even under adopt,
-/// which has surprised brownfield adopters whose schemas were owned by
-/// another system. `--allow-schema-owner-transfers` acknowledges it.
-fn enforce_adopt_owner_transfer_guard(
-    mode: ReconciliationMode,
-    allow_schema_owner_transfers: bool,
-    changes: &[pgroles_core::diff::Change],
-) -> Result<()> {
-    if allow_schema_owner_transfers {
-        return Ok(());
-    }
-    let transfers: Vec<String> = pgroles_core::diff::adopt_schema_owner_transfers(mode, changes)
-        .into_iter()
-        .map(|(name, owner)| format!("\"{name}\" -> \"{owner}\""))
-        .collect();
-    if transfers.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "adopt mode would transfer ownership of {} schema(s): {}. \
-         Pass --allow-schema-owner-transfers to permit this, use additive mode to skip \
-         transfers, or declare each schema's current owner.",
-        transfers.len(),
-        transfers.join(", ")
-    );
 }
 
 /// Warn when an `ensure: absent` assertion can never converge because the
@@ -2628,18 +2711,6 @@ fn warn_undeclared_default_owner(
              resolves to it. Declare it (external: true) or set the owner per schema."
         );
     }
-}
-
-async fn inspect_drop_safety(
-    pool: &PgPool,
-    changes: &[pgroles_core::diff::Change],
-    retirements: &[pgroles_core::manifest::RoleRetirement],
-) -> Result<pgroles_inspect::DropRoleSafetyAssessment> {
-    let dropped_roles = planned_role_drops(changes);
-    let report = inspect_drop_role_safety(pool, &dropped_roles)
-        .await
-        .context("failed to inspect role-drop safety")?;
-    Ok(report.assess(retirements))
 }
 
 #[cfg(test)]

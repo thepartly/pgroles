@@ -133,6 +133,13 @@ impl Scenario {
             .unwrap_or_else(|error| panic!("query failed: {error}\n{query}"))
     }
 
+    pub async fn query_text(&self, query: &str) -> String {
+        sqlx::query_scalar(query)
+            .fetch_one(&self.db)
+            .await
+            .unwrap_or_else(|error| panic!("query failed: {error}\n{query}"))
+    }
+
     pub async fn is_member(&self, member: &str, role: &str) -> bool {
         self.query_bool(&format!(
             "SELECT pg_has_role('{member}', '{role}', 'MEMBER')"
@@ -143,6 +150,11 @@ impl Scenario {
     pub fn owns_roles(&self, roles: &[&str]) {
         let mut owned = self.roles.lock().unwrap();
         owned.extend(roles.iter().map(|role| role.to_string()));
+    }
+
+    pub fn owns_schemas(&self, schemas: &[&str]) {
+        let mut owned = self.schemas.lock().unwrap();
+        owned.extend(schemas.iter().map(|schema| schema.to_string()));
     }
 
     // -- Kubernetes objects ------------------------------------------------
@@ -179,6 +191,43 @@ impl Scenario {
             .create(&PostParams::default(), &policy)
             .await
             .unwrap()
+    }
+
+    /// File a candidate for `policy` proposing `content`, optionally planned
+    /// against an explicit `target` Secret instead of the parent's connection.
+    pub async fn create_candidate(
+        &self,
+        name: &str,
+        policy: &str,
+        content: Value,
+        target: Option<&str>,
+    ) {
+        let mut spec = json!({"policyRef": {"name": policy}, "content": content});
+        if let Some(secret) = target {
+            spec["target"] =
+                json!({"connectionRef": {"secretName": secret, "key": "DATABASE_URL"}});
+        }
+        let candidate = PostgresPolicyCandidate::new(
+            name,
+            serde_json::from_value(spec).expect("a well-formed candidate spec"),
+        );
+        self.candidates.lock().unwrap().push(name.to_string());
+        self.candidates()
+            .create(&PostParams::default(), &candidate)
+            .await
+            .unwrap();
+    }
+
+    pub async fn delete_candidate(&self, name: &str) {
+        delete_and_wait(&self.candidates(), name).await;
+    }
+
+    pub async fn candidate(&self, name: &str) -> PostgresPolicyCandidate {
+        self.candidates().get(name).await.unwrap()
+    }
+
+    pub async fn delete_policy(&self, name: &str) {
+        delete_and_wait(&self.policies(), name).await;
     }
 
     pub async fn patch_policy_spec(&self, name: &str, spec: Value) {
@@ -232,6 +281,25 @@ impl Scenario {
             &format!("Ready={status}/{reason}"),
             move |policy| {
                 ready(policy.status.as_ref().map(|s| s.conditions.as_slice()))
+                    .is_some_and(|c| c.status == status && c.reason.as_deref() == Some(&reason))
+            },
+        )
+        .await
+    }
+
+    pub async fn wait_candidate_ready(
+        &self,
+        name: &str,
+        status: &str,
+        reason: &str,
+    ) -> PostgresPolicyCandidate {
+        let (status, reason) = (status.to_string(), reason.to_string());
+        self.wait_for(
+            &self.candidates(),
+            name,
+            &format!("Ready={status}/{reason}"),
+            move |candidate| {
+                ready(candidate.status.as_ref().map(|s| s.conditions.as_slice()))
                     .is_some_and(|c| c.status == status && c.reason.as_deref() == Some(&reason))
             },
         )
@@ -469,6 +537,21 @@ pub fn current_plan(policy: &PostgresPolicy) -> Option<String> {
         .current_plan_ref
         .as_ref()
         .map(|reference| reference.name.clone())
+}
+
+pub fn candidate_plan(candidate: &PostgresPolicyCandidate) -> Option<String> {
+    candidate
+        .status
+        .as_ref()?
+        .plan_ref
+        .as_ref()
+        .map(|reference| reference.name.clone())
+}
+
+pub fn ready_message(candidate: &PostgresPolicyCandidate) -> String {
+    ready(candidate.status.as_ref().map(|s| s.conditions.as_slice()))
+        .and_then(|condition| condition.message.clone())
+        .unwrap_or_default()
 }
 
 pub fn is_actionable(plan: &PostgresPolicyPlan) -> bool {

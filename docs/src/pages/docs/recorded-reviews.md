@@ -67,11 +67,15 @@ role. Live preflight failures remain separate from that modelled uncertainty.
 
 ## File format
 
-Recorded reviews use schema `pgroles.review-artifact.v2`, described by the
-generated [JSON Schema](/generated/review-artifact.schema.json). Version 2
-records each phase's executor reachability as changes from the previous phase,
-so large plans stay within the 4 MiB import limit. Re-export files written by
-earlier development builds (`pgroles.review-artifact.v1`).
+Recorded reviews use schema `pgroles.review-artifact.v3`, described by the
+generated [JSON Schema](/generated/review-artifact.schema.json). Version 3
+adds the `schema_owner_transfer` preflight check: `failed`, with one issue per
+schema, when `apply` would refuse an adopt-mode ownership transfer that the
+run did not allow with `--allow-schema-owner-transfers`. Version 2 files,
+written by pgroles 0.13, still open; they never recorded that check. Version 2
+introduced recording each phase's executor reachability as changes from the
+previous phase, so large plans stay within the 4 MiB import limit. Re-export
+files written by earlier development builds (`pgroles.review-artifact.v1`).
 
 ## Before deployment
 

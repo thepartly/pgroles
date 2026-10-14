@@ -3225,13 +3225,13 @@ memberships:
                 owner: Some("app".into()),
             },
             Change::AlterSchemaOwner {
-                name: "onboarding".into(),
-                owner: "onboarding_owner".into(),
+                name: "warehouse".into(),
+                owner: "warehouse_owner".into(),
             },
         ];
         assert_eq!(
             adopt_schema_owner_transfers(ReconciliationMode::Adopt, &changes),
-            vec![("onboarding", "onboarding_owner")],
+            vec![("warehouse", "warehouse_owner")],
             "a created schema has no previous owner to transfer from"
         );
         for mode in [

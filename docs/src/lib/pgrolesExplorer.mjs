@@ -1,5 +1,8 @@
 const SCHEMA_VERSION = 'pgroles.explorer.v1'
-const REVIEW_SCHEMA_VERSION = 'pgroles.review-artifact.v2'
+const REVIEW_SCHEMA_VERSION = 'pgroles.review-artifact.v3'
+// Version 2 is version 3 without the schema_owner_transfer check, so it opens
+// as a review that never recorded that check.
+const READABLE_REVIEW_SCHEMA_VERSIONS = [REVIEW_SCHEMA_VERSION, 'pgroles.review-artifact.v2']
 const RETIRED_REVIEW_SCHEMA_VERSIONS = ['pgroles.review-artifact.v1']
 export const MAX_SNAPSHOT_FILE_BYTES = 4_194_304
 export const DEFAULT_PG_MAJOR_VERSION = 16
@@ -199,12 +202,12 @@ export function describeChange(change) {
 }
 
 // ---------------------------------------------------------------------------
-// Recorded review artifacts (pgroles.review-artifact.v2)
+// Recorded review artifacts (pgroles.review-artifact.v3; v2 still opens)
 // ---------------------------------------------------------------------------
 
 const MODES = ['authoritative', 'additive', 'adopt']
-const PREFLIGHT_CHECKS = ['executor_authority', 'role_drop_safety', 'server_compatibility']
-const EVIDENCE_CHECKS = ['default_privilege_owner', 'predefined_role_membership', 'grantor_reachability', 'revoke_acl_ownership', 'plan_order_authority', 'drop_role_safety']
+const PREFLIGHT_CHECKS = ['executor_authority', 'role_drop_safety', 'server_compatibility', 'schema_owner_transfer']
+const EVIDENCE_CHECKS = ['default_privilege_owner', 'predefined_role_membership', 'grantor_reachability', 'revoke_acl_ownership', 'plan_order_authority', 'drop_role_safety', 'schema_owner_transfer']
 const EVIDENCE_STATUSES = ['passed', 'failed', 'not_run', 'unknown']
 const COVERAGE_KINDS = ['complete', 'targeted']
 const PRIORITIES = ['High', 'Review', 'Informational']
@@ -430,7 +433,7 @@ export function reviewArtifactImport(value) {
   if (RETIRED_REVIEW_SCHEMA_VERSIONS.includes(value.schema_version)) {
     throw new Error(`review artifact schema version ${value.schema_version} is no longer supported; re-export the review with the current pgroles CLI to produce ${REVIEW_SCHEMA_VERSION}`)
   }
-  if (value.schema_version !== REVIEW_SCHEMA_VERSION) {
+  if (!READABLE_REVIEW_SCHEMA_VERSIONS.includes(value.schema_version)) {
     throw new Error(`unsupported review artifact schema version: ${value.schema_version ?? 'missing'}`)
   }
   rejectCredentialFields(value)

@@ -88,6 +88,7 @@ execution.
 
 A CI gate for a preview with SQL should pass only when all of these hold:
 
+- the parent has `spec.mode=apply` when the gate claims apply eligibility;
 - candidate `Ready=True` with reason `Planned`, and
   `executionPreflight.eligibility=NoKnownBlockers`;
 - `executionPreflight.parentGeneration` equals the parent's current
@@ -123,9 +124,32 @@ retries against the fresh object, and abandons the write if that object is a
 different incarnation or became terminal, so an older snapshot cannot reopen a
 superseded or promoted proposal.
 
-Candidate planning still omits plan advisory warnings and the adopt-mode
-schema-owner-transfer guard. Execution settings such as
-`allow_schema_owner_transfers` remain on the parent, outside candidate content.
+The result describes the parent's **current** execution settings. Observe
+continues to execute nothing and does not refuse schema transfers; a passing
+observe preview does not establish eligibility for a future switch to apply.
+Changing mode advances the parent generation and re-evaluates the guards. If
+that switch exposes a disallowed adopt transfer, the fresh preview is blocked.
+A gate claiming apply eligibility must require apply mode, current generation
+and a fresh evaluation, rather than reuse the earlier observe result.
+
+Execution settings such as `allow_schema_owner_transfers` remain on the parent,
+outside candidate content and its digest. Flag-only changes refresh eligibility
+without replacing identical review SQL or its approval. Approvals never bypass
+fresh guards before promotion recognition.
+
+Role-drop safety inspects only retained drops on the actual target, using the
+candidate's own retirements. Covered local hazards are advisory warnings;
+foreign-database dependencies remain blockers. Preview neither terminates
+sessions nor reassigns or drops objects. `NoEffects`, unavailable evaluation,
+supersession and promotion clear old preflight results.
+
+Other plan advisory warnings remain outside preview coverage. Offline
+`validate`, graph analysis and the WASM explorer do not have the parent's
+settings or live role-drop dependencies: these operator checks are uncovered
+there, not passing. `pgroles diff` runs the same guards against a live
+database with the settings its flags give, and records them in a
+[recorded review](/docs/recorded-reviews); it cannot know a policy's settings
+unless you pass the matching flags.
 
 Promotion recomputes effects and checks the approved digest before execution.
 Different effects require a replacement plan; matching effects can still be

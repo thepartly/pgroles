@@ -1611,8 +1611,6 @@ jobs:
       # ==================================================================
       - name: Run the cluster scenarios
         run: cargo test -p pgroles-operator --features cluster-e2e --test cluster_e2e -- --test-threads=1
-      - name: Verify candidate executor authority and freshness
-        run: bash scripts/e2e-candidate-authority.sh
 
       - name: Verify candidate grant preservation
         run: scripts/e2e-candidate-preservation.sh

@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn review_artifact_footer_names_the_fingerprint() {
         let footer = render_review_artifact_footer("sha256:0123abcd");
-        assert!(footer.contains("pgroles.review-artifact.v2"));
+        assert!(footer.contains("pgroles.review-artifact.v3"));
         assert!(footer.contains("`sha256:0123abcd`"));
         let hostile = render_review_artifact_footer("sha256:`x`<b>\n| y");
         assert!(hostile.contains("`sha256:xby`"));

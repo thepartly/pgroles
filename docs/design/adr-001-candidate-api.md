@@ -287,6 +287,62 @@ overlay-change interval.
 state, so the same candidate can flip to `OverlayOverlap` when a new object
 appears. Correct — that is a genuine change in reviewed effects.
 
+## Decision 7 — Execution preflight and the parent gate
+
+*Added after the kind shipped, before the first release that carries
+`status.executionPreflight`.*
+
+**Context.** A candidate's plan was reviewed, approved and promoted, and then
+the parent's apply refused it: once because the executor lacked a grantor's
+authority, once because adopt mode refused a schema ownership transfer the
+production policy did not allow while staging did. Previews had checked only
+executor authority, and when the parent itself was refused, previews were
+withdrawn — so the repair of a blocked policy could not be previewed at all.
+
+**Decision.**
+
+1. A preview runs every guard the apply runs before it executes anything —
+   executor authority, the adopt-mode schema ownership refusal, role-drop
+   safety — with the **parent's** execution settings (`mode`,
+   `allow_schema_owner_transfers`), which are outside the content and its
+   digest and which promotion keeps. The guards are one function in
+   `pgroles-inspect`, called by the operator's apply, its candidate previews,
+   and the CLI's `apply` and `diff`; no surface decides for itself what a
+   guard finds.
+2. The result is one status object, `status.executionPreflight`:
+   `eligibility` (`Blocked`/`NoKnownBlockers`), `issues` that each name their
+   `guard`, `code` and `message`, and the `evaluatedAt`, `parentGeneration`
+   and `parentState` it was computed against. Known blockers report
+   `Ready=False, reason=ExecutionBlocked` and keep the review SQL.
+3. A parent refused by any of those guards has executed nothing — every guard
+   precedes the plan's single transaction — and still holds both locks.
+   Candidates are planned against the unchanged database and report
+   `parentState=ExecutionBlocked`; every other parent failure withdraws the
+   result.
+4. Execution settings stay on the parent. A gate must evaluate each
+   environment's candidate: a preview against one parent is not evidence about
+   another with different settings.
+
+**Rejected alternatives.**
+
+- *A status field per guard* (`executorAuthority`, `ownershipTransfer`, …).
+  Every consumer would have to know every guard, and a new guard would be a
+  new field that old gates silently ignore. One eligibility answer with typed
+  issues lets a gate stay correct as guards are added.
+- *Copying execution settings into candidate content.* It would make the
+  setting reviewable per candidate, but promotion copies content into the
+  policy, so a candidate could grant itself `allow_schema_owner_transfers`. The
+  setting is an environment decision, not part of a proposal.
+- *Keeping previews closed while the parent is blocked.* Safe, but it removes
+  the review exactly when a repair needs one, pushing operators to bypass the
+  gate.
+
+**Consequences.** `status.executorAuthority` (unreleased) became
+`status.executionPreflight`, and `parentState=ExecutorAuthorityBlocked` became
+`ExecutionBlocked`. A guard added later appears as a new `guard` value inside
+the same object. A preview passing under observe mode says nothing about apply
+eligibility; switching mode changes the parent generation and re-evaluates.
+
 ## Related decisions recorded here, with recommendations
 
 - **Rename `mode: plan` → `mode: observe`.** *Recommendation: do it, in the same

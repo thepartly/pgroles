@@ -114,7 +114,9 @@ test('accepts only structurally valid recorded review artifacts', () => {
   }
   assert.equal(reviewArtifactImport(artifact), artifact)
   assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, preflight: [{ check: 'server_compatibility', status: 'passed', issue_count: 0, coverage: { kind: 'targeted', checks_performed: [], checked_change_indices: [], unchecked_change_indices: [] } }] }))
-  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v3' }), /unsupported review artifact schema version/)
+  assert.equal(reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v3' }).schema_version, 'pgroles.review-artifact.v3')
+  assert.doesNotThrow(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v3', preflight: [{ check: 'schema_owner_transfer', status: 'failed', issue_count: 1, issues: [{ code: 'adopt_schema_owner_transfer', message: 'refused', role: 'owner' }], coverage: { kind: 'complete', checks_performed: ['schema_owner_transfer'], checked_change_indices: [], unchecked_change_indices: [] } }] }))
+  assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v4' }), /unsupported review artifact schema version/)
   assert.throws(() => reviewArtifactImport({ ...artifact, schema_version: 'pgroles.review-artifact.v1' }), /no longer supported; re-export the review with the current pgroles CLI/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, changes: {} } }), /recorded collections are malformed/)
   assert.throws(() => reviewArtifactImport({ ...artifact, recorded: { ...artifact.recorded, sql_preview: { status: 'invented' } } }), /SQL preview is malformed/)

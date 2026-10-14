@@ -113,7 +113,7 @@ spec:
   requestedBy:
     username: alice@example.com
   requestedDuration: 30m
-  justification: Investigating INC-1234
+  justification: Investigating a failed background task
 ```
 
 `requestedBy` is required so every request is self-describing, but the API

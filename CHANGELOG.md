@@ -10,16 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - **Blocked auto-apply plans stay `Pending`.** Under `approval: auto`, a plan the executor lacks the authority to apply is no longer marked `Approved`; it waits as `Pending`, referenced by `status.current_plan_ref`, until authority exists. Alerts or dashboards that read an `Approved` plan as "about to apply" should treat a `Pending` plan on a policy with `Ready=False/ExecutorAuthority` as blocked. A reviewer can deny it; under `approval: auto` that cancels the one plan, and use `approval: manual` or `suspend` to stop automatic execution.
+- **Recorded reviews are format v3.** `pgroles diff --review-out` writes `pgroles.review-artifact.v3`, which adds the `schema_owner_transfer` preflight check. The explorer and `pgroles_core::review_artifact` still open v2 files from 0.13. Tools that validate artifacts against the published JSON Schema need the regenerated one.
+- **`pgroles diff` warns about what `apply` would refuse.** It runs the same guards as `apply` and prints `Warning: apply would refuse this plan: …` for an adopt-mode ownership transfer that was not allowed. Pass `--allow-schema-owner-transfers` to `diff` when the apply it previews will pass it. Exit codes are unchanged.
 - **`pgroles reconcile --wait` fails fast.** It used to wait out its timeout when the requested reconcile was refused. Against this operator it now exits with an error naming the policy's `Ready` reason as soon as the request has run without succeeding. Against an older operator it behaves as before.
 
 ### Added
 
+- `pgroles diff --allow-schema-owner-transfers` evaluates the plan as `apply --allow-schema-owner-transfers` would.
 - `status.lastAttemptedReconcileAt` mirrors `reconcile.pgroles.io/requestedAt` once the requested reconcile has run, whatever its outcome, in the same write as that outcome's conditions. `status.lastHandledReconcileAt` keeps its meaning: the request reconciled or produced a plan.
 
 ### Fixed
 
 - Under `approval: auto`, a plan the executor lacks authority to apply stays `Pending` with its review reference instead of being approved and abandoned, and later reconciles reuse it rather than opening an identical plan every few seconds. Once authority exists the same plan is approved and applied; if the changes disappear first it is superseded. A reviewer's denial of a waiting plan is honoured: it is rejected and never executes. When an auto-apply reconcile next plans the same effects, any other identical actionable plan, including duplicates left by earlier versions, is retired as `DuplicateOfActionablePlan`. Manual and observe modes keep their existing reuse and approval rules.
-- Candidate previews run every guard apply runs — executor authority, the adopt-mode schema-ownership-transfer refusal, and role-drop safety — with the parent policy's execution settings. A candidate that would transfer schema ownership the policy does not allow now reports `Ready=False/ExecutionBlocked` instead of passing a preview that apply then refuses. Review SQL is kept for known blockers, and stale eligibility is cleared when evaluation is unavailable. Results are in `status.executionPreflight`: each issue names its guard, and each result records `evaluatedAt`, `parentGeneration` and `parentState`. A parent whose plan an apply guard refused still previews its candidates against the unchanged database (`parentState=ExecutionBlocked`), so a repair can be reviewed and gated while the policy it fixes is degraded. Lock contention no longer withdraws a stamped preview.
+- Candidate previews run every guard apply runs — executor authority, the adopt-mode schema-ownership-transfer refusal, and role-drop safety — with the parent policy's execution settings. A candidate that would transfer schema ownership the policy does not allow now reports `Ready=False/ExecutionBlocked` instead of passing a preview that apply then refuses. Review SQL is kept for known blockers, and stale eligibility is cleared when evaluation is unavailable. Results are in `status.executionPreflight`: each issue names its guard, and each result records `evaluatedAt`, `parentGeneration` and `parentState`. A parent whose plan an apply guard refused still previews its candidates against the unchanged database (`parentState=ExecutionBlocked`), so a repair can be reviewed and gated while the policy it fixes is degraded. A candidate whose effects disappear (`NoEffects`) drops its earlier result. Lock contention no longer withdraws a stamped preview.
+- The operator's apply, its candidate previews, and the CLI's `apply` and `diff` evaluate one set of apply guards, so no preview can pass a plan the apply it predicts would refuse. `diff --review-out` records the ownership refusal as a failed `schema_owner_transfer` check.
+- Role-drop safety no longer describes another database's dependencies with this database's catalog, which could name an unrelated local object; it reports them by catalog and object id.
+
+### For library users
+
+- `pgroles_inspect::evaluate_execution_guards` runs the apply guards with `ExecutionSettings` and returns `ExecutionGuardFindings`, whose `blockers()` name the guard behind each blocker.
+- `pgroles_core::review_artifact::REVIEW_ARTIFACT_SCHEMA_VERSION` is `pgroles.review-artifact.v3`; `READABLE_REVIEW_ARTIFACT_SCHEMA_VERSIONS` lists what `parse_review_artifact` accepts. `PreflightCheck` and `EvidenceCheck` gain `SchemaOwnerTransfer`.
+- `pgroles_core::diff::adopt_schema_owner_transfers` lists the adopt-mode schema ownership transfers in a plan.
 
 ## [0.13.0] - 2026-09-24
 
