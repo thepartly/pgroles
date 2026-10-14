@@ -67,6 +67,7 @@ release or namespace names.
 | `UnsatisfiableWildcardGrant` | A wildcard matched objects the executor cannot grant on. [Check wildcard grants](#wildcard-grants). |
 | `ConflictingPolicy` | Two policies claim overlapping state on the same database. [Resolve the conflict](#policy-conflicts). |
 | `UnsafeRoleDrops` | A role drop is blocked by owned objects or other dependencies. [Plan a safe retirement](#unsafe-role-drops). |
+| `OwnerTransferBlocked` | An adopt-mode apply would transfer schema ownership the policy does not allow. [Decide the owner](#schema-ownership-transfer-refused). |
 | `Planned`, `Drifted=True`, plan `Pending` | A preview or manual approval gate is working. [Inspect the plan](#a-plan-does-not-execute). |
 | `ApprovalIgnored`, `ApprovalUnset` | Approval configuration is ineffective or implicit. [Fix the execution gates](#a-plan-does-not-execute). |
 | `ApplyFailed`, `DatabaseInspectionFailed` | A transient or uncategorized PostgreSQL operation failed. [Check transient failures](#transient-and-infrastructure-failures). |
@@ -184,7 +185,7 @@ Resolve it one of three ways:
 - change the policy so it no longer needs that statement — keep the edge, or
   match the live membership options — and preview the change as a
   [candidate](/docs/operator-candidates) first; candidates are still planned
-  while the policy is blocked on executor authority
+  while an apply guard blocks the policy
 - grant the executor the specific authority named, never broad provider
   administration to get past the check
 - have someone holding that authority run the named statement once, then let
@@ -254,6 +255,32 @@ executor has the required privilege.
 
 Review the generated SQL in observe mode before approving destructive retirement
 steps. Do not remove the safety blocker merely to make the policy green.
+
+## Schema ownership transfer refused
+
+`OwnerTransferBlocked` means an apply-mode policy in `adopt` reconciliation
+would run `ALTER SCHEMA ... OWNER TO` on a schema whose live owner differs from
+the declared one, and the policy does not set
+`spec.allow_schema_owner_transfers`. Adopt mode filters role drops, not
+ownership convergence, so the refusal is what stops pgroles from taking a schema
+away from whatever system owns it now. The guard runs before the plan's single
+transaction: nothing executed, and every other change in the plan waits with it.
+
+Decide who should own the schema, then do one of these:
+
+- declare the current owner, so the policy no longer plans a transfer
+- set `spec.allow_schema_owner_transfers: true` on this policy, when the
+  transfer is intended — the flag is per policy, so allowing it in staging does
+  not allow it in production
+- transfer ownership out of band, with whatever else the transfer needs
+  (`CREATE` on the schema for the incoming owner's objects, for example), and
+  let the next reconcile find nothing to change
+
+Preview the change as a [candidate](/docs/operator-candidates) against each
+environment's policy first. Candidates run the same guard with that policy's
+settings, so a transfer the production policy would refuse shows as
+`ExecutionBlocked` before it merges, and a repair is still previewed while the
+policy is blocked.
 
 ## A plan does not execute
 

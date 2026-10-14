@@ -59,11 +59,11 @@ use pgroles_core::overlap::{
 
 use crate::context::OperatorContext;
 use crate::crd::{
-    CandidateExecutorAuthority, CandidatePhase, CandidateTarget, ConnectionSpec, DatabaseIdentity,
-    ExecutorAuthorityDiagnostic, ExecutorAuthorityEligibility, ParentEvaluationState, PlanPhase,
-    PlanReference, PolicyCondition, PostgresPolicy, PostgresPolicyCandidate,
-    PostgresPolicyCandidateStatus, PostgresPolicyPlan, SecretReference, candidate_reason,
-    is_retention_exempt, ready_condition, set_condition_in, superseded_condition,
+    CandidateExecutionPreflight, CandidatePhase, CandidateTarget, ConnectionSpec, DatabaseIdentity,
+    ExecutionBlocker, ExecutionEligibility, ParentEvaluationState, PlanPhase, PlanReference,
+    PolicyCondition, PostgresPolicy, PostgresPolicyCandidate, PostgresPolicyCandidateStatus,
+    PostgresPolicyPlan, SecretReference, candidate_reason, is_retention_exempt, ready_condition,
+    set_condition_in, superseded_condition,
 };
 use crate::plan::{CandidatePlanBinding, SupersedeCause};
 use crate::reconciler::{ReconcileError, ResolvedPassword};
@@ -163,10 +163,11 @@ pub enum ParentGate {
 pub enum ParentOutcome {
     /// Reconciled, or planned in observe/manual mode.
     Converged,
-    /// Execution stopped at the executor-authority preflight. The plan runs
-    /// in one transaction and the preflight precedes it, so nothing executed,
-    /// and the parent still holds both database locks.
-    ExecutorAuthorityBlocked,
+    /// An apply guard refused the plan: executor authority, an adopt-mode
+    /// schema ownership transfer, or an unsafe role drop. The guards precede
+    /// the plan's single transaction, so nothing executed, and the parent
+    /// still holds both database locks.
+    ExecutionBlocked,
     /// Any other outcome that still reached the locked phase.
     Unstable,
 }
@@ -181,16 +182,16 @@ pub enum ParentOutcome {
 /// the honest reading, since an observe-mode policy never executes and its
 /// "post-enforcement state" is simply the database as it stands.
 ///
-/// A parent blocked on executor authority is the exception, and the case a
-/// repair is filed for. Its actionable plan is the one that cannot run, so the
+/// A parent whose plan an apply guard refused is the exception, and the case a
+/// repair is filed for. Its content is the content that cannot run, so the
 /// database is not about to move under the candidate, and the state it is
 /// planned against is the database as it stands. Blocking candidates here
 /// would leave every repair without a preview exactly when one is needed.
 pub fn parent_gate(parent: ParentOutcome, has_actionable_plan: bool) -> ParentGate {
     match parent {
         ParentOutcome::Unstable => ParentGate::Blocked(BlockCause::Unstable),
-        ParentOutcome::ExecutorAuthorityBlocked => {
-            ParentGate::Open(ParentEvaluationState::ExecutorAuthorityBlocked)
+        ParentOutcome::ExecutionBlocked => {
+            ParentGate::Open(ParentEvaluationState::ExecutionBlocked)
         }
         ParentOutcome::Converged if has_actionable_plan => {
             ParentGate::Blocked(BlockCause::AwaitingDecision)
@@ -208,12 +209,12 @@ struct Evaluation {
 }
 
 impl Evaluation {
-    fn authority(
+    fn preflight(
         &self,
-        eligibility: ExecutorAuthorityEligibility,
-        issues: Vec<ExecutorAuthorityDiagnostic>,
-    ) -> CandidateExecutorAuthority {
-        CandidateExecutorAuthority {
+        eligibility: ExecutionEligibility,
+        issues: Vec<ExecutionBlocker>,
+    ) -> CandidateExecutionPreflight {
+        CandidateExecutionPreflight {
             eligibility,
             issues,
             evaluated_at: self.evaluated_at.clone(),
@@ -227,10 +228,10 @@ impl Evaluation {
     fn parent_note(&self) -> &'static str {
         match self.parent_state {
             ParentEvaluationState::Converged => "",
-            ParentEvaluationState::ExecutorAuthorityBlocked => {
-                "; the active policy is itself blocked by executor authority, so this preview is \
-                 computed against the unchanged database and promoting it replaces the blocked \
-                 content"
+            ParentEvaluationState::ExecutionBlocked => {
+                "; the active policy's own plan was refused before it executed, so this preview \
+                 is computed against the unchanged database and promoting it replaces the \
+                 blocked content"
             }
         }
     }
@@ -257,12 +258,12 @@ pub struct CandidatePlanning<'a> {
 enum CandidateOutcome {
     /// A plan exists (fresh or deduplicated) holding these effects.
     Planned { plan_name: String, changes: i32 },
-    /// SQL remains reviewable, but the apply preflight found known blockers.
-    ExecutorAuthority {
+    /// SQL remains reviewable, but an apply guard would refuse to execute it.
+    ExecutionBlocked {
         plan_name: String,
         changes: i32,
         message: String,
-        issues: Vec<ExecutorAuthorityDiagnostic>,
+        issues: Vec<ExecutionBlocker>,
     },
     /// The content produces no changes at all — nothing to review.
     NoEffects,
@@ -423,7 +424,7 @@ fn invalidation_still_current(
 fn needs_parent_invalidation(candidate: &PostgresPolicyCandidate) -> bool {
     !candidate_phase(candidate).is_terminal()
         && candidate.status.as_ref().is_some_and(|status| {
-            status.executor_authority.is_some()
+            status.execution_preflight.is_some()
                 || status
                     .conditions
                     .iter()
@@ -930,11 +931,20 @@ async fn plan_against_target(
         return Ok(CandidateOutcome::NoEffects);
     }
 
-    // Use the exact read-only preflight apply uses, on this target and these
-    // final filtered effects. Preserve the review plan even when execution
-    // is impossible; promotion/apply still rechecks fresh authority.
-    let authority_issues =
-        pgroles_inspect::preflight_authority_issues(target.pool(), &changes, &current).await?;
+    // Run the guards apply runs, on this target, against these final filtered
+    // effects, under the parent's execution settings — the settings promotion
+    // keeps. Preserve the review plan even when execution would be refused;
+    // promotion's apply still rechecks against fresh state.
+    let blockers = crate::reconciler::evaluate_execution_guards(
+        target.pool(),
+        policy,
+        reconciliation_mode,
+        &changes,
+        &current,
+        &manifest.retirements,
+    )
+    .await?
+    .blockers();
 
     let candidate_pairs = effect_pairs(&changes);
     let overlapping = intersecting_pairs(&candidate_pairs, overlay_pairs);
@@ -988,10 +998,10 @@ async fn plan_against_target(
         .ok();
     }
 
-    if !authority_issues.is_empty() {
-        let mut message = authority_issues
+    if !blockers.is_empty() {
+        let mut message = blockers
             .iter()
-            .map(ToString::to_string)
+            .map(|blocker| blocker.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         if !overlapping.is_empty() {
@@ -1004,17 +1014,11 @@ async fn plan_against_target(
                     .join(", ")
             ));
         }
-        return Ok(CandidateOutcome::ExecutorAuthority {
+        return Ok(CandidateOutcome::ExecutionBlocked {
             plan_name,
             changes: summary.total,
             message,
-            issues: authority_issues
-                .iter()
-                .map(|issue| ExecutorAuthorityDiagnostic {
-                    code: issue.code().to_string(),
-                    message: issue.to_string(),
-                })
-                .collect(),
+            issues: blockers,
         });
     }
 
@@ -1399,7 +1403,7 @@ where
         let mut status = candidate.status.clone().unwrap_or_default();
         // A parent block, planning failure, supersession or promotion must not
         // keep an eligibility result from an older evaluation of review SQL.
-        status.executor_authority = None;
+        status.execution_preflight = None;
         mutate(&mut status);
         let patch = candidate_status_cas_patch(candidate, &status)?;
         let result = api
@@ -1479,9 +1483,8 @@ async fn record_outcome(
                 "Plan {plan_name} holds {changes} change(s) for review; executor-authority preflight found no known blockers (apply rechecks before execution){parent_note}"
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(
-                    evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]),
-                );
+                status.execution_preflight =
+                    Some(evaluation.preflight(ExecutionEligibility::NoKnownBlockers, vec![]));
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -1493,7 +1496,7 @@ async fn record_outcome(
             })
             .await
         }
-        CandidateOutcome::ExecutorAuthority {
+        CandidateOutcome::ExecutionBlocked {
             plan_name,
             changes,
             message,
@@ -1503,16 +1506,15 @@ async fn record_outcome(
                 "Plan {plan_name} holds {changes} change(s) for review; execution is blocked{parent_note}:\n{message}"
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(
-                    evaluation.authority(ExecutorAuthorityEligibility::Blocked, issues.clone()),
-                );
+                status.execution_preflight =
+                    Some(evaluation.preflight(ExecutionEligibility::Blocked, issues.clone()));
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
                 });
                 set_condition_in(
                     &mut status.conditions,
-                    ready_condition(false, candidate_reason::EXECUTOR_AUTHORITY, &message),
+                    ready_condition(false, candidate_reason::EXECUTION_BLOCKED, &message),
                 );
             })
             .await
@@ -1543,9 +1545,8 @@ async fn record_outcome(
                 overlapping.join(", "),
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(
-                    evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]),
-                );
+                status.execution_preflight =
+                    Some(evaluation.preflight(ExecutionEligibility::NoKnownBlockers, vec![]));
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -2362,13 +2363,13 @@ mod tests {
         );
     }
 
-    fn test_authority() -> CandidateExecutorAuthority {
+    fn test_preflight() -> CandidateExecutionPreflight {
         Evaluation {
             evaluated_at: "2026-10-14T00:00:00Z".to_string(),
             parent_generation: Some(1),
             parent_state: ParentEvaluationState::Converged,
         }
-        .authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![])
+        .preflight(ExecutionEligibility::NoKnownBlockers, vec![])
     }
 
     #[test]
@@ -2385,30 +2386,32 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_blocked_on_executor_authority_still_previews_its_repair() {
-        // INC-168: the parent's plan could not run, and the repair was a policy
-        // change. Its open plan is the blocked one, so it must not hold the
-        // gate shut the way an executable plan awaiting a decision does.
+    fn a_parent_refused_by_an_apply_guard_still_previews_its_repair() {
+        // INC-168 (executor authority) and the onboarding schema-ownership
+        // refusal: the parent's plan could not run, and the repair was a policy
+        // change. An open plan of its own is the blocked one, so it must not
+        // hold the gate shut the way an executable plan awaiting a decision
+        // does.
         for has_actionable_plan in [false, true] {
             assert_eq!(
-                parent_gate(ParentOutcome::ExecutorAuthorityBlocked, has_actionable_plan),
-                ParentGate::Open(ParentEvaluationState::ExecutorAuthorityBlocked)
+                parent_gate(ParentOutcome::ExecutionBlocked, has_actionable_plan),
+                ParentGate::Open(ParentEvaluationState::ExecutionBlocked)
             );
         }
     }
 
     #[test]
-    fn every_authority_result_records_when_and_against_what_it_was_evaluated() {
+    fn every_preflight_result_records_when_and_against_what_it_was_evaluated() {
         let evaluation = Evaluation {
             evaluated_at: "2026-10-14T00:00:00Z".to_string(),
             parent_generation: Some(36),
-            parent_state: ParentEvaluationState::ExecutorAuthorityBlocked,
+            parent_state: ParentEvaluationState::ExecutionBlocked,
         };
-        let result = evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]);
+        let result = evaluation.preflight(ExecutionEligibility::NoKnownBlockers, vec![]);
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["evaluatedAt"], "2026-10-14T00:00:00Z");
         assert_eq!(json["parentGeneration"], 36);
-        assert_eq!(json["parentState"], "ExecutorAuthorityBlocked");
+        assert_eq!(json["parentState"], "ExecutionBlocked");
         assert!(
             evaluation
                 .parent_note()
@@ -2871,13 +2874,13 @@ mod tests {
             plan_ref: Some(PlanReference {
                 name: "review-sql".into(),
             }),
-            executor_authority: Some(test_authority()),
+            execution_preflight: Some(test_preflight()),
             conditions: vec![ready_condition(true, candidate_reason::PLANNED, "preview")],
             ..Default::default()
         });
         assert!(needs_parent_invalidation(&object));
         let status = object.status.as_mut().unwrap();
-        status.executor_authority = None;
+        status.execution_preflight = None;
         set_condition_in(
             &mut status.conditions,
             ready_condition(
@@ -2946,7 +2949,7 @@ mod tests {
         stale.metadata.resource_version = Some("10".into());
         stale.status = Some(PostgresPolicyCandidateStatus {
             phase: CandidatePhase::Planned,
-            executor_authority: Some(test_authority()),
+            execution_preflight: Some(test_preflight()),
             conditions: vec![ready_condition(
                 true,
                 candidate_reason::PLANNED,
@@ -2955,7 +2958,7 @@ mod tests {
             ..Default::default()
         });
         let mut blocked = stale.status.clone().unwrap();
-        blocked.executor_authority = None;
+        blocked.execution_preflight = None;
         blocked.conditions = vec![ready_condition(
             false,
             candidate_reason::BLOCKED_BY_ACTIVE_POLICY,
@@ -2970,7 +2973,7 @@ mod tests {
             let mut fresh = stale.clone();
             fresh.metadata.resource_version = Some("11".into());
             fresh.status.as_mut().unwrap().phase = phase;
-            fresh.status.as_mut().unwrap().executor_authority = None;
+            fresh.status.as_mut().unwrap().execution_preflight = None;
             let mut document = serde_json::to_value(&fresh).unwrap();
             let before = document.clone();
             assert!(json_patch::patch(&mut document, &operations).is_err());
@@ -2986,7 +2989,8 @@ mod tests {
         assert!(json_patch::patch(&mut reused, &operations).is_err());
         // A successful status replacement clears all omitted optional fields.
         let mut original = serde_json::to_value(&stale).unwrap();
+        assert!(original["status"].get("executionPreflight").is_some());
         json_patch::patch(&mut original, &operations).unwrap();
-        assert!(original["status"].get("executorAuthority").is_none());
+        assert!(original["status"].get("executionPreflight").is_none());
     }
 }

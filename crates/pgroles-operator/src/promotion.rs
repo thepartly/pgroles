@@ -794,7 +794,7 @@ pub async fn record_promotion(
 
 fn mark_promoted(status: &mut crate::crd::PostgresPolicyCandidateStatus, message: &str) {
     status.phase = CandidatePhase::Promoted;
-    status.executor_authority = None;
+    status.execution_preflight = None;
     set_condition_in(
         &mut status.conditions,
         promoted_condition(true, candidate_reason::PROMOTED, message),
@@ -1302,15 +1302,15 @@ mod tests {
         }
     }
     #[test]
-    fn promotion_clears_previous_executor_authority_before_becoming_terminal() {
+    fn promotion_clears_previous_execution_preflight_before_becoming_terminal() {
         let mut object = PostgresPolicyCandidate::new(
             "preview",
             serde_json::from_value(serde_json::json!({"policyRef":{"name":"orders"},"content":{}}))
                 .unwrap(),
         );
         object.status = Some(crate::crd::PostgresPolicyCandidateStatus {
-            executor_authority: Some(crate::crd::CandidateExecutorAuthority {
-                eligibility: crate::crd::ExecutorAuthorityEligibility::NoKnownBlockers,
+            execution_preflight: Some(crate::crd::CandidateExecutionPreflight {
+                eligibility: crate::crd::ExecutionEligibility::NoKnownBlockers,
                 issues: vec![],
                 evaluated_at: "2026-10-14T00:00:00Z".to_string(),
                 parent_generation: Some(1),
@@ -1320,10 +1320,15 @@ mod tests {
         });
         let status = promoted_status(&object, "applied");
         assert_eq!(status.phase, CandidatePhase::Promoted);
-        assert!(status.executor_authority.is_none());
+        assert!(status.execution_preflight.is_none());
         object.metadata.uid = Some("preview-uid".into());
         object.metadata.resource_version = Some("10".into());
+        assert!(
+            serde_json::to_value(&object).unwrap()["status"]
+                .get("executionPreflight")
+                .is_some()
+        );
         let patch = crate::candidate::candidate_status_cas_patch(&object, &status).unwrap();
-        assert!(patch[2]["value"].get("executorAuthority").is_none());
+        assert!(patch[2]["value"].get("executionPreflight").is_none());
     }
 }

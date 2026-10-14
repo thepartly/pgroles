@@ -54,39 +54,59 @@ and memberships retain their normal reconciliation semantics. If only preserved
 grants differ, the candidate reports `Ready=True` with reason `NoEffects` and
 creates no approval plan.
 
-Candidate planning runs the same read-only executor-authority preflight as
-apply, against its target and final filtered changes. Known authority blockers
-report `Ready=False, reason=ExecutorAuthority`, while phase `Planned`, `planRef`
-and the review SQL remain available. No privileges are changed by this check.
-`Ready=True, reason=Planned` means the preflight found no known blockers; it is
-not a guarantee that SQL will execute. Apply rechecks fresh authority.
-The structured `status.executorAuthority` object reports `eligibility` as
-`Blocked` or `NoKnownBlockers`, plus an `issues` array of stable `code` and
-readable `message` diagnostics. It also records what the answer was computed
-against: `evaluatedAt` (RFC 3339), `parentGeneration` (the parent policy's
-`metadata.generation`), and `parentState`, which is `Converged` or
-`ExecutorAuthorityBlocked`. It is absent when no current authority check is
-available, including a parent block or planning failure. `Ready=True/NoEffects`
-separately reports that there is no SQL to execute. Phase `Planned` records
-review SQL availability even when authority blocks execution.
+Candidate planning runs the guards apply runs before it executes anything,
+against its target and final filtered changes, with the parent policy's
+execution settings — the settings promotion keeps:
+
+| Guard | Refuses |
+| --- | --- |
+| `ExecutorAuthority` | A statement the executor lacks the privileges to run, such as a revoke that needs a grantor the executor cannot act as |
+| `SchemaOwnerTransfer` | An adopt-mode schema ownership transfer, when the parent is `mode: apply` and does not set `allow_schema_owner_transfers` |
+| `RoleDropSafety` | A role drop whose owned objects, privileges or sessions its retirement does not handle |
+
+These are the same functions apply calls, so a preview cannot pass a plan the
+apply it predicts would refuse. Because the parent's settings apply, the same
+content can be eligible against one environment and blocked against another:
+a staging policy that allows ownership transfers says nothing about a
+production policy that does not.
+
+Known blockers report `Ready=False, reason=ExecutionBlocked`, while phase
+`Planned`, `planRef` and the review SQL remain available. No privileges are
+changed by these checks. `Ready=True, reason=Planned` means no guard found a
+known blocker; it is not a guarantee that SQL will execute. Apply reruns every
+guard against fresh state.
+The structured `status.executionPreflight` object reports `eligibility` as
+`Blocked` or `NoKnownBlockers`, plus an `issues` array in which each entry
+names its `guard`, a stable `code`, and a readable `message`. It also records
+what the answer was computed against: `evaluatedAt` (RFC 3339),
+`parentGeneration` (the parent policy's `metadata.generation`), and
+`parentState`, which is `Converged` or `ExecutionBlocked`. It is absent when no
+current check is available, including a parent block or planning failure.
+`Ready=True/NoEffects` separately reports that there is no SQL to execute.
+Phase `Planned` records review SQL availability even when a guard blocks
+execution.
 
 A CI gate for a preview with SQL should pass only when all of these hold:
 
 - candidate `Ready=True` with reason `Planned`, and
-  `executorAuthority.eligibility=NoKnownBlockers`;
-- `executorAuthority.parentGeneration` equals the parent's current
+  `executionPreflight.eligibility=NoKnownBlockers`;
+- `executionPreflight.parentGeneration` equals the parent's current
   `metadata.generation`;
-- `executorAuthority.evaluatedAt` is not older than the gate's own start, or
+- `executionPreflight.evaluatedAt` is not older than the gate's own start, or
   than any event the result must follow, such as a migration or restore;
-- `executorAuthority.parentState` is `Converged`, or `ExecutorAuthorityBlocked`
-  when the change under review is a repair of that blocked policy.
+- `executionPreflight.parentState` is `Converged`, or `ExecutionBlocked` when
+  the change under review is a repair of that blocked policy.
+
+Gate on the candidate for each environment the change will reach. A preview is
+computed against its parent's target and settings, so a passing staging
+candidate is not evidence about production.
 
 A missing or `Blocked` result fails the gate.
 
 Explicit target overrides retain their own connection and execution identity,
 even when the parent already holds the locks for the same database.
 
-Parent failures other than executor authority, suspension and unavailable
+Parent failures other than an apply-guard refusal, suspension and unavailable
 planning clear previous eligibility and mark nonterminal previews unready
 through status only; their review SQL and plan reference remain available. Lock
 contention does not, on the parent or on a target override: it is routine when
@@ -233,14 +253,16 @@ If the active policy is failing or awaiting its own approval, the candidate
 reports `Ready=False` with reason `BlockedByActivePolicy` and is re-planned
 when the parent recovers.
 
-One failure is the exception: a parent whose own plan stopped at the
-executor-authority preflight. None of that plan ran, so the database is not
-about to change under the candidate, and a candidate is usually how the
-policy gets repaired. Candidates are still planned against the unchanged
-database, report `executorAuthority.parentState=ExecutorAuthorityBlocked`, and
-say in their `Ready` message that promoting them replaces the blocked content.
-A repair whose own preview has no known blockers can therefore be reviewed and
-gated normally while the policy it fixes is degraded.
+One kind of failure is the exception: a parent whose own plan an apply guard
+refused — `ExecutorAuthority`, `OwnerTransferBlocked` or `UnsafeRoleDrops` on
+the policy. Every guard runs before the plan's single transaction, so none of
+it ran, the database is not about to change under the candidate, and a
+candidate is usually how the policy gets repaired. Candidates are still planned
+against the unchanged database, report
+`executionPreflight.parentState=ExecutionBlocked`, and say in their `Ready`
+message that promoting them replaces the blocked content. A repair whose own
+preview has no known blockers can therefore be reviewed and gated normally
+while the policy it fixes is degraded.
 
 ```text
 NAME                  POLICY   PHASE     CHANGES   PLAN                              AGE
@@ -583,10 +605,10 @@ database and still inspects for itself.
 
 | Condition | Meaning |
 | --- | --- |
-| `Ready=True, reason=Planned` | A current plan exists and executor-authority preflight found no known blockers |
-| `Ready=False, reason=ExecutorAuthority` | Review SQL exists, but execution is blocked by known executor-authority issues; the message lists them |
+| `Ready=True, reason=Planned` | A current plan exists and no apply guard found a known blocker |
+| `Ready=False, reason=ExecutionBlocked` | Review SQL exists, but an apply guard would refuse to execute it; `status.executionPreflight.issues` and the message list each blocker and its guard |
 | `Ready=True, reason=NoEffects` | The content is already the database's state, so there is nothing to review. Not terminal — the content may diverge again |
-| `Ready=False, reason=BlockedByActivePolicy` | Parent is failing (other than on executor authority) or awaiting its own approval; will re-plan |
+| `Ready=False, reason=BlockedByActivePolicy` | Parent is failing (other than by an apply-guard refusal) or awaiting its own approval; will re-plan |
 | `Ready=False, reason=OverlayOverlap` | An ephemeral grant overlaps this candidate's effects; fresh review required |
 | `Ready=False, reason=PlanningFailed` | The candidate could not be planned at all; the message carries the error |
 | `Ready=False, reason=CandidateBudgetExceeded` | The policy is at its open-candidate budget and older proposals are ahead in the queue. Not terminal, and nothing is deleted — it plans once they are decided or expire |
