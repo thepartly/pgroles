@@ -1252,6 +1252,11 @@
                     ],
                     "type": "object"
                   },
+                  "lastAttemptedReconcileAt": {
+                    "description": "Last force-reconcile annotation value whose reconcile ran, whatever its\noutcome — including a refusal or failure. Lock contention does not\ncount: that reconcile has not evaluated the policy yet.",
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "lastHandledReconcileAt": {
                     "description": "Last force-reconcile annotation value handled by the operator.",
                     "nullable": true,

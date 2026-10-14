@@ -127,10 +127,12 @@ pgroles reconcile postgrespolicy/<name> -n <namespace> --wait --timeout 2m
 kubectl -n <namespace> get postgrespolicy <name> -o yaml
 ```
 
-`--wait` acknowledges that the request reached a successful planning or
-reconciliation outcome through `status.lastHandledReconcileAt`. It does not
-guarantee SQL was applied. Requests blocked by suspension, conflict, contention,
-or failure may remain unacknowledged.
+`--wait` succeeds when `status.lastHandledReconcileAt` shows the request
+reached a successful planning or reconciliation outcome; it does not guarantee
+SQL was applied. It fails with the `Ready` reason as soon as
+`status.lastAttemptedReconcileAt` shows the request ran and was suspended,
+conflicted, refused or failed. Lock contention leaves both unset: that
+reconcile has not run yet.
 
 ## Plans And Approval
 

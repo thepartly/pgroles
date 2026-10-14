@@ -991,6 +991,12 @@ pub struct PostgresPolicyStatus {
     #[serde(default, rename = "lastHandledReconcileAt")]
     pub last_handled_reconcile_at: Option<String>,
 
+    /// Last force-reconcile annotation value whose reconcile ran, whatever its
+    /// outcome — including a refusal or failure. Lock contention does not
+    /// count: that reconcile has not evaluated the policy yet.
+    #[serde(default, rename = "lastAttemptedReconcileAt")]
+    pub last_attempted_reconcile_at: Option<String>,
+
     /// Summary of changes applied in the last reconciliation.
     #[serde(default)]
     pub change_summary: Option<ChangeSummary>,

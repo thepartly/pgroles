@@ -22,6 +22,7 @@ status:
   observed_generation: 3
   last_successful_reconcile_time: "2026-03-06T10:30:00Z"
   lastHandledReconcileAt: "2026-03-06T10:31:00Z"
+  lastAttemptedReconcileAt: "2026-03-06T10:31:00Z"
   transient_failure_count: 0
   change_summary:
     roles_created: 2

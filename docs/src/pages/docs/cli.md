@@ -306,14 +306,14 @@ pgroles reconcile my-policy -n platform
 pgroles reconcile postgrespolicy/my-policy -n platform --wait
 ```
 
-The command patches the policy annotation `reconcile.pgroles.io/requestedAt` with the current RFC 3339 timestamp. The operator treats a new annotation value as an immediate reconcile trigger and mirrors the value to `status.lastHandledReconcileAt` after a successful reconcile or plan.
+The command patches the policy annotation `reconcile.pgroles.io/requestedAt` with the current RFC 3339 timestamp. The operator treats a new annotation value as an immediate reconcile trigger. It mirrors the value to `status.lastAttemptedReconcileAt` once that reconcile has run, whatever its outcome, and to `status.lastHandledReconcileAt` when it reconciled or produced a plan.
 
 ### Options
 
 | Flag | Description |
 |---|---|
 | `-n`, `--namespace` | Kubernetes namespace containing the `PostgresPolicy` (default: `default`) |
-| `--wait` | Poll the policy until `status.lastHandledReconcileAt` reaches the requested timestamp |
+| `--wait` | Wait until the operator has run the request. Succeeds when `status.lastHandledReconcileAt` reaches the requested timestamp; fails with the policy's `Ready` reason and message as soon as `status.lastAttemptedReconcileAt` shows the request ran without succeeding, for example `ExecutorAuthority` |
 | `--timeout` | Maximum wait duration, e.g. `30s`, `2m`, or `1m30s` (default: `2m`). Requires `--wait` |
 
 ## candidate

@@ -880,9 +880,14 @@ async fn reconcile_apply(
 
     match reconcile_apply_inner(resource, ctx, &identity).await {
         Ok((action, outcome)) => {
-            if outcome.marks_requested_reconcile_handled() {
-                mark_requested_reconcile_handled(ctx, resource, requested_reconcile_at.as_deref())
-                    .await?;
+            if !matches!(outcome, ReconcileOutcome::LockContention) {
+                acknowledge_requested_reconcile(
+                    ctx,
+                    resource,
+                    requested_reconcile_at.as_deref(),
+                    outcome.marks_requested_reconcile_handled(),
+                )
+                .await?;
             }
             reconcile_guard.record_result(outcome.result(), outcome.reason());
             Ok(action)
@@ -920,6 +925,8 @@ async fn reconcile_apply(
                 _ => {}
             }
             reconcile_guard.record_result("error", error_reason);
+            // The attempt is acknowledged in the same write as the failure,
+            // so a reader that sees the acknowledgement sees this outcome.
             if let Err(status_err) = update_status(ctx, resource, |status| {
                 mark_reconcile_failure_status(
                     status,
@@ -928,6 +935,9 @@ async fn reconcile_apply(
                     is_transient_failure,
                     clear_current_plan_ref,
                 );
+                if let Some(requested) = requested_reconcile_at.as_deref() {
+                    status.last_attempted_reconcile_at = Some(requested.to_string());
+                }
             })
             .await
             {
@@ -945,17 +955,27 @@ fn requested_reconcile_at(resource: &PostgresPolicy) -> Option<String> {
         .cloned()
 }
 
-async fn mark_requested_reconcile_handled(
+/// Record that the reconcile requested at `requested_reconcile_at` ran.
+///
+/// `lastAttemptedReconcileAt` is written for every outcome that evaluated the
+/// policy, so a script can tell "ran and was refused" from "has not run yet".
+/// `lastHandledReconcileAt` keeps its narrower meaning: the request reconciled
+/// or produced a plan.
+async fn acknowledge_requested_reconcile(
     ctx: &OperatorContext,
     resource: &PostgresPolicy,
     requested_reconcile_at: Option<&str>,
+    handled: bool,
 ) -> Result<(), ReconcileError> {
     let Some(requested_reconcile_at) = requested_reconcile_at else {
         return Ok(());
     };
 
     update_status(ctx, resource, |status| {
-        status.last_handled_reconcile_at = Some(requested_reconcile_at.to_string());
+        status.last_attempted_reconcile_at = Some(requested_reconcile_at.to_string());
+        if handled {
+            status.last_handled_reconcile_at = Some(requested_reconcile_at.to_string());
+        }
     })
     .await
 }

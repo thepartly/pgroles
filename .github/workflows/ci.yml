@@ -1008,6 +1008,19 @@ jobs:
           docker cp "$container:/usr/local/bin/pgroles" /usr/local/bin/pgroles
           pgroles --version
 
+      # The cluster scenarios are Rust tests that drive this cluster through
+      # the Kubernetes API and a port-forward to PostgreSQL. They wait on
+      # watched state and on the operator's acknowledgement of each requested
+      # reconcile, never on elapsed time.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cluster-e2e
+
+      - name: Build the cluster scenarios
+        run: cargo test -p pgroles-operator --features cluster-e2e --test cluster_e2e --no-run
+
       - name: Recover from a Secret-first process crash
         run: scripts/e2e-secret-first-crash.sh
 
@@ -1596,8 +1609,8 @@ jobs:
       # cluster, operator and PostgreSQL, and a second kind cluster would cost
       # several minutes of CI for nothing.
       # ==================================================================
-      - name: Verify blocked auto-apply plan lifecycle
-        run: bash scripts/e2e-plan-authority.sh
+      - name: Run the cluster scenarios
+        run: cargo test -p pgroles-operator --features cluster-e2e --test cluster_e2e -- --test-threads=1
 
       - name: Verify candidate grant preservation
         run: scripts/e2e-candidate-preservation.sh

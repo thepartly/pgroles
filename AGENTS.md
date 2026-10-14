@@ -22,6 +22,12 @@ cargo test --workspace -- --include-ignored
 # Run a single test
 cargo test -p pgroles-core --lib diff::tests::diff_creates_new_roles -- --exact
 
+# Operator scenarios against a live kind cluster (the one
+# .github/actions/setup-e2e creates). They wait on watched state and on the
+# operator's acknowledgement of each requested reconcile, never on elapsed
+# time; write new operator E2E coverage here rather than as bash.
+cargo test -p pgroles-operator --features cluster-e2e --test cluster_e2e -- --test-threads=1
+
 # CRD drift check (CI compares every committed CRD copy — chart and k8s/ —
 # against crdgen output)
 scripts/check-crd-drift.sh
@@ -105,7 +111,7 @@ diff(current, effective desired) → Vec<Change> → sql::render_all_with_contex
 - **Integration Tests** — PG 16/17/18 matrix, `cargo test --workspace -- --include-ignored`
 - **Docker and example smoke tests** — verifies the documented container and example flows work end-to-end
 - **Operator E2E** — kind cluster, deploys the operator plus an OpenTelemetry Collector, runs happy-path plus conflict/invalid/missing-secret/insufficient-privilege/secret-rotation scenarios, verifies roles in the database, and verifies OTLP metrics export
-- **Plan lifecycle and load E2E** — plan approval flows, plus generated-policy convergence at higher object counts and ephemeral-request load
+- **Plan lifecycle and load E2E** — plan approval flows and the Rust cluster scenarios (`crates/pgroles-operator/tests/cluster_e2e`), plus generated-policy convergence at higher object counts and ephemeral-request load
 - **Ephemeral access E2E** — runs twice: once for the trusted-writer posture, once for the Kyverno secure-admission profile in `k8s/security/`
 
 `.github/workflows/docs-pages.yml` builds the documentation site on docs, core,

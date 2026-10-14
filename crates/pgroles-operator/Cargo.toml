@@ -18,6 +18,9 @@ path = "src/lib.rs"
 [features]
 # Only the plan lifecycle E2E image enables this; release builds omit it.
 e2e-fault-injection = []
+# Compiles the cluster scenarios in tests/cluster_e2e. They need the kind
+# cluster `.github/actions/setup-e2e` creates, so ordinary test runs skip them.
+cluster-e2e = []
 
 [dependencies]
 pgroles-core = { workspace = true }
@@ -56,7 +59,14 @@ path = "src/main.rs"
 name = "crdgen"
 path = "src/bin/crdgen.rs"
 
+[[test]]
+name = "cluster_e2e"
+path = "tests/cluster_e2e/main.rs"
+required-features = ["cluster-e2e"]
+
 [dev-dependencies]
+# Port-forwarding to the cluster's PostgreSQL in tests/cluster_e2e.
+kube = { workspace = true, features = ["ws"] }
 jsonschema = { version = "0.49.9", default-features = false }
 proptest = "1.11.0"
 # start_paused lets the index readiness timeout be asserted without the test

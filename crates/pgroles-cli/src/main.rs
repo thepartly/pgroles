@@ -204,7 +204,10 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "default")]
         namespace: String,
 
-        /// Wait until status.lastHandledReconcileAt reflects this request.
+        /// Wait until the operator has run this request. Succeeds once
+        /// status.lastHandledReconcileAt reflects it; fails with the Ready
+        /// reason as soon as status.lastAttemptedReconcileAt shows it ran and
+        /// did not succeed.
         #[arg(long)]
         wait: bool,
 
@@ -439,6 +442,7 @@ async fn main() -> ExitCode {
 const EXIT_DRIFT: u8 = 2;
 const REQUESTED_RECONCILE_ANNOTATION: &str = "reconcile.pgroles.io/requestedAt";
 const LAST_HANDLED_RECONCILE_AT_STATUS_FIELD: &str = "lastHandledReconcileAt";
+const LAST_ATTEMPTED_RECONCILE_AT_STATUS_FIELD: &str = "lastAttemptedReconcileAt";
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -701,6 +705,56 @@ fn handled_reconcile_timestamp(policy: &DynamicObject) -> Option<&str> {
         .as_str()
 }
 
+/// Where a requested reconcile stands, as the policy's status reports it.
+#[derive(Debug, PartialEq, Eq)]
+enum RequestedReconcile {
+    /// The operator has not finished evaluating the request yet.
+    Pending,
+    /// The request reconciled or produced a plan.
+    Handled(String),
+    /// The request ran and did not succeed; the Ready condition says why.
+    Refused { reason: String, message: String },
+}
+
+fn requested_reconcile_state(
+    policy: &DynamicObject,
+    requested: &str,
+) -> Result<RequestedReconcile> {
+    if let Some(handled_at) = handled_reconcile_timestamp(policy)
+        && handled_reconcile_at_least(handled_at, requested)?
+    {
+        return Ok(RequestedReconcile::Handled(handled_at.to_string()));
+    }
+    let status = policy.data.get("status");
+    let attempted = status
+        .and_then(|status| status.get(LAST_ATTEMPTED_RECONCILE_AT_STATUS_FIELD))
+        .and_then(|value| value.as_str());
+    match attempted {
+        Some(attempted_at) if handled_reconcile_at_least(attempted_at, requested)? => {
+            let ready = status
+                .and_then(|status| status.get("conditions"))
+                .and_then(|conditions| conditions.as_array())
+                .and_then(|conditions| {
+                    conditions.iter().find(|condition| {
+                        condition.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                    })
+                });
+            let field = |name: &str| {
+                ready
+                    .and_then(|condition| condition.get(name))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string()
+            };
+            Ok(RequestedReconcile::Refused {
+                reason: field("reason"),
+                message: field("message"),
+            })
+        }
+        _ => Ok(RequestedReconcile::Pending),
+    }
+}
+
 fn handled_reconcile_at_least(handled: &str, requested: &str) -> Result<bool> {
     let handled: jiff::Timestamp = handled.parse().with_context(|| {
         format!("invalid status.{LAST_HANDLED_RECONCILE_AT_STATUS_FIELD} timestamp {handled:?}")
@@ -764,14 +818,21 @@ async fn wait_for_reconcile_handled(
             .get(name)
             .await
             .with_context(|| format!("failed to read postgrespolicy/{name} while waiting"))?;
-        if let Some(handled_at) = handled_reconcile_timestamp(&policy)
-            && handled_reconcile_at_least(handled_at, requested_at)?
-        {
-            println!(
-                "Reconcile request handled at {} for postgrespolicy/{}.",
-                handled_at, name
-            );
-            return Ok(());
+        match requested_reconcile_state(&policy, requested_at)? {
+            RequestedReconcile::Handled(handled_at) => {
+                println!(
+                    "Reconcile request handled at {} for postgrespolicy/{}.",
+                    handled_at, name
+                );
+                return Ok(());
+            }
+            RequestedReconcile::Refused { reason, message } => {
+                anyhow::bail!(
+                    "postgrespolicy/{name} reconciled for this request but did not succeed: \
+                     {reason}: {message}"
+                );
+            }
+            RequestedReconcile::Pending => {}
         }
 
         if started.elapsed() >= timeout {
@@ -2666,6 +2727,63 @@ mod tests {
         assert_eq!(
             parse_cli_duration("1m30s").expect("duration should parse"),
             Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn a_wait_ends_when_the_requested_reconcile_ran_whatever_its_outcome() {
+        let policy = |status: serde_json::Value| -> DynamicObject {
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "pgroles.io/v1alpha1",
+                "kind": "PostgresPolicy",
+                "metadata": {"name": "orders"},
+                "status": status,
+            }))
+            .unwrap()
+        };
+        let requested = "2026-05-15T00:00:00Z";
+        assert_eq!(
+            requested_reconcile_state(&policy(serde_json::json!({})), requested).unwrap(),
+            RequestedReconcile::Pending
+        );
+        assert_eq!(
+            requested_reconcile_state(
+                &policy(serde_json::json!({
+                    "lastHandledReconcileAt": requested,
+                    "lastAttemptedReconcileAt": requested,
+                })),
+                requested
+            )
+            .unwrap(),
+            RequestedReconcile::Handled(requested.to_string())
+        );
+        // An older success with a newer refusal reports the refusal.
+        assert_eq!(
+            requested_reconcile_state(
+                &policy(serde_json::json!({
+                    "lastHandledReconcileAt": "2026-05-14T00:00:00Z",
+                    "lastAttemptedReconcileAt": requested,
+                    "conditions": [{
+                        "type": "Ready", "status": "False",
+                        "reason": "ExecutorAuthority", "message": "cannot revoke"
+                    }],
+                })),
+                requested
+            )
+            .unwrap(),
+            RequestedReconcile::Refused {
+                reason: "ExecutorAuthority".into(),
+                message: "cannot revoke".into()
+            }
+        );
+        // An operator that predates the attempt field keeps waiting.
+        assert_eq!(
+            requested_reconcile_state(
+                &policy(serde_json::json!({"lastHandledReconcileAt": "2026-05-14T00:00:00Z"})),
+                requested
+            )
+            .unwrap(),
+            RequestedReconcile::Pending
         );
     }
 
