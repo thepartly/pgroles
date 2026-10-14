@@ -5,6 +5,14 @@ source "$(dirname "$0")/e2e-helpers.sh"
 if [ -n "${PGROLES_TEST_PG_CONTAINER:-}" ]; then
   pg_query() { docker exec "$PGROLES_TEST_PG_CONTAINER" psql -U postgres -d pgroles_test -tAc "$1"; }
 fi
+# Later scripts share this fixture, so a failed assertion must not leave the
+# policy reconciling or the roles behind.
+cleanup() {
+  kubectl delete pgr plan-authority-policy --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl delete secret plan-authority-credentials --ignore-not-found >/dev/null 2>&1 || true
+  pg_query 'DROP ROLE IF EXISTS pln_member; DROP ROLE IF EXISTS pln_executor; DROP ROLE IF EXISTS pln_grantor; DROP ROLE IF EXISTS pln_group;' >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 pg_query "CREATE ROLE pln_group; CREATE ROLE pln_member; CREATE ROLE pln_grantor;
   CREATE ROLE pln_executor LOGIN PASSWORD 'pln-test-password';
@@ -75,7 +83,4 @@ pg_query 'GRANT pln_grantor TO pln_executor WITH INHERIT TRUE, SET FALSE;'
 wait_for_ready_status_reason plan-authority-policy True Reconciled
 wait_for_plan_phase "$plan" Applied
 test "$(pg_query "SELECT pg_has_role('pln_member','pln_group','MEMBER');")" = f
-kubectl delete pgr plan-authority-policy --wait=true
-kubectl delete secret plan-authority-credentials
-pg_query 'DROP ROLE pln_member; DROP ROLE pln_executor; DROP ROLE pln_grantor; DROP ROLE pln_group;'
 echo 'Blocked Pending/Approved plan deduplication and ordinary-executor recovery passed.'

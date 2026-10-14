@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Blocked auto-apply plans remain Pending and retain their review reference. Identical Approved plans are reused instead of accumulating while executor authority is unavailable.
+- Blocked auto-apply plans remain Pending and retain their review reference. Identical Approved plans are reused instead of accumulating while executor authority is unavailable. Reuse prefers an approved plan, then the newest, and retires any other actionable plan holding the same effects, so duplicates left by earlier versions are cleaned up on the next reconcile.
 
 ## [0.13.0] - 2026-09-24
 

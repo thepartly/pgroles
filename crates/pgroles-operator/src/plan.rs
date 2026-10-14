@@ -399,6 +399,9 @@ pub enum SupersedeCause {
     EffectsCleared,
     /// A newer plan holds the current effects; this one is redundant.
     ReplacedByNewerPlan,
+    /// Another actionable plan holds exactly these effects against the same
+    /// base and is the one the policy acts on; this copy can never execute.
+    DuplicateOfActionablePlan,
     /// The database the plan was computed against is not the one it would now
     /// execute against. Carries the specific target-identity verdict.
     TargetChanged(pgroles_core::approval::TargetIdentityReason),
@@ -454,6 +457,10 @@ impl SupersedeCause {
             }
             SupersedeCause::ReplacedByNewerPlan => {
                 "a newer plan holds the current effects and replaces this one"
+            }
+            SupersedeCause::DuplicateOfActionablePlan => {
+                "another actionable plan holds identical effects and is the one this policy \
+                 acts on, so this duplicate will never execute"
             }
             SupersedeCause::TargetChanged(reason) => reason.message(),
             SupersedeCause::PolicyStoppedPlanning => {
@@ -738,35 +745,36 @@ pub async fn create_or_update_plan(
         .filter(|plan| owner.owns(plan))
         .collect();
 
-    // 5. Check for duplicate pending or approved plan with the same effects.
-    for plan in &existing_plans {
-        if let Some(ref status) = plan.status
-            && matches!(status.phase, PlanPhase::Pending | PlanPhase::Approved)
-            && plan_matches_digest(status, &change_digest)
-            && expected_base.is_none_or(|base| plan_base_pin(plan) == Some(base))
-        {
-            // Identical plan already exists — return early (deduplicated).
-            let plan_name = plan.name_any();
-            info!(
-                plan = %plan_name,
-                policy = %policy_name,
-                "existing actionable plan has identical change digest, skipping creation"
-            );
-            // This actionable plan *is* the replacement: it is already visible and
-            // holds exactly these effects, so any stale approved plan can be
-            // retired now without leaving the policy with nothing actionable.
-            supersede_stale_plans(
-                &plans_api,
-                &existing_plans,
-                &policy_name,
-                &plan_name,
-                &change_digest,
-                expected_base,
-                password_source_versions,
-            )
-            .await?;
-            return Ok(PlanCreationResult::Deduplicated(plan_name));
-        }
+    // 5. Reuse an actionable plan that already holds these exact effects.
+    //
+    // Approved plans count, not only Pending ones. The plan watch wakes the
+    // policy whenever a plan's phase changes, so a reconcile that approved a
+    // plan and then stopped short of executing it (missing executor authority,
+    // say) used to find no Pending match on the next pass, mint an identical
+    // plan, approve it, and wake itself again: a new plan every few seconds for
+    // as long as the blocker lasted.
+    if let Some(plan) = reusable_plan(&existing_plans, &change_digest, expected_base) {
+        let plan_name = plan.name_any();
+        info!(
+            plan = %plan_name,
+            policy = %policy_name,
+            "existing actionable plan has identical change digest, skipping creation"
+        );
+        // This actionable plan *is* the replacement: it is already visible and
+        // holds exactly these effects, so stale plans — and identical
+        // duplicates left by earlier controllers — can be retired now without
+        // leaving the policy with nothing actionable.
+        supersede_stale_plans(
+            &plans_api,
+            &existing_plans,
+            &policy_name,
+            &plan_name,
+            &change_digest,
+            expected_base,
+            password_source_versions,
+        )
+        .await?;
+        return Ok(PlanCreationResult::Deduplicated(plan_name));
     }
 
     // 5b. Check for a recently-failed plan with the same change digest. If a
@@ -1066,6 +1074,77 @@ pub(crate) fn supersedes_after_create(status: &PostgresPolicyPlanStatus, new_dig
     }
 }
 
+/// The actionable plan that already holds `change_digest`, if any.
+///
+/// Several can exist when an older controller minted duplicates. An approved
+/// plan wins over a pending one, so a recorded decision is never set aside in
+/// favour of an identical plan still awaiting one; ties go to the newest, the
+/// plan [`get_current_actionable_plan`] reports, then to the name so the choice
+/// never depends on list order.
+fn reusable_plan<'a>(
+    plans: &'a [PostgresPolicyPlan],
+    change_digest: &str,
+    expected_base: Option<&str>,
+) -> Option<&'a PostgresPolicyPlan> {
+    plans
+        .iter()
+        .filter(|plan| {
+            plan.status.as_ref().is_some_and(|status| {
+                matches!(status.phase, PlanPhase::Pending | PlanPhase::Approved)
+                    && plan_matches_digest(status, change_digest)
+            }) && expected_base.is_none_or(|base| plan_base_pin(plan) == Some(base))
+        })
+        .max_by(|a, b| {
+            let rank = |plan: &'a PostgresPolicyPlan| {
+                (
+                    plan.status
+                        .as_ref()
+                        .is_some_and(|status| status.phase == PlanPhase::Approved),
+                    plan.metadata.creation_timestamp.clone(),
+                    plan.name_any(),
+                )
+            };
+            rank(a).cmp(&rank(b))
+        })
+}
+
+/// Why `plan` is retired now that `kept_plan_name` holds `new_digest`, if it
+/// is.
+fn supersede_cause(
+    plan: &PostgresPolicyPlan,
+    kept_plan_name: &str,
+    new_digest: &str,
+    expected_base: Option<&str>,
+    password_source_versions: &BTreeMap<String, String>,
+) -> Option<SupersedeCause> {
+    let status = plan.status.as_ref()?;
+    if plan.name_any() == kept_plan_name {
+        return None;
+    }
+    let actionable = matches!(status.phase, PlanPhase::Pending | PlanPhase::Approved);
+    // A live plan pinned to a different base is stale even when its change
+    // digest still matches — see the base precondition in
+    // `create_or_update_plan`.
+    if actionable && expected_base.is_some_and(|base| plan_base_pin(plan) != Some(base)) {
+        return Some(SupersedeCause::BaseContentChanged);
+    }
+    // Same effects, same base: the kept plan already carries them. Leaving the
+    // copy actionable would only let a later pass pick it instead.
+    if actionable && plan_matches_digest(status, new_digest) {
+        return Some(SupersedeCause::DuplicateOfActionablePlan);
+    }
+    if !supersedes_after_create(status, new_digest) {
+        return None;
+    }
+    Some(
+        if password_source_changed(status, password_source_versions) {
+            SupersedeCause::PasswordSourceChanged
+        } else {
+            SupersedeCause::ReplacedByNewerPlan
+        },
+    )
+}
+
 /// Retire the plans replaced by `new_plan_name`.
 ///
 /// Called only once the replacement plan is visible with its status written —
@@ -1081,34 +1160,25 @@ async fn supersede_stale_plans(
     password_source_versions: &BTreeMap<String, String>,
 ) -> Result<(), ReconcileError> {
     for plan in existing_plans {
+        let Some(cause) = supersede_cause(
+            plan,
+            new_plan_name,
+            new_digest,
+            expected_base,
+            password_source_versions,
+        ) else {
+            continue;
+        };
         let Some(ref status) = plan.status else {
             continue;
         };
         let old_plan_name = plan.name_any();
-        // A live plan pinned to a different base is stale even when its
-        // change digest still matches — see the base precondition in
-        // `create_or_update_plan`.
-        let base_stale = expected_base.is_some_and(|base| {
-            matches!(status.phase, PlanPhase::Pending | PlanPhase::Approved)
-                && plan_base_pin(plan) != Some(base)
-        });
-        if old_plan_name == new_plan_name
-            || (!supersedes_after_create(status, new_digest) && !base_stale)
-        {
-            continue;
-        }
-        let cause = if base_stale {
-            SupersedeCause::BaseContentChanged
-        } else if password_source_changed(status, password_source_versions) {
-            SupersedeCause::PasswordSourceChanged
-        } else {
-            SupersedeCause::ReplacedByNewerPlan
-        };
 
         info!(
             plan = %old_plan_name,
             policy = %policy_name,
             phase = ?status.phase,
+            reason = cause.reason(),
             "marking existing plan as Superseded"
         );
         // The plan is void along with its phase — but the decision on it is
@@ -3847,6 +3917,7 @@ mod tests {
             SupersedeCause::PasswordSourceChanged,
             SupersedeCause::EffectsCleared,
             SupersedeCause::ReplacedByNewerPlan,
+            SupersedeCause::DuplicateOfActionablePlan,
             SupersedeCause::PolicyStoppedPlanning,
             SupersedeCause::SupersededByPromotion,
             SupersedeCause::BaseContentChanged,
@@ -3860,6 +3931,7 @@ mod tests {
                 | SupersedeCause::PasswordSourceChanged
                 | SupersedeCause::EffectsCleared
                 | SupersedeCause::ReplacedByNewerPlan
+                | SupersedeCause::DuplicateOfActionablePlan
                 | SupersedeCause::PolicyStoppedPlanning
                 | SupersedeCause::SupersededByPromotion
                 | SupersedeCause::BaseContentChanged
@@ -4960,6 +5032,171 @@ mod tests {
                 ..Default::default()
             };
             assert!(!supersedes_after_create(&status, "any-digest"));
+        }
+    }
+
+    /// An actionable plan holding `digest`, created `age_secs` before epoch
+    /// second 1_000_000, optionally pinned to a candidate base.
+    fn actionable_plan(
+        name: &str,
+        phase: PlanPhase,
+        digest: &str,
+        age_secs: i64,
+        base: Option<&str>,
+    ) -> PostgresPolicyPlan {
+        let mut plan = PostgresPolicyPlan::new(name, test_plan_spec());
+        plan.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                jiff::Timestamp::from_second(1_000_000 - age_secs).expect("epoch second in range"),
+            ));
+        plan.spec.origin = base.map(|base| PlanOrigin {
+            kind: "PostgresPolicyCandidate".to_string(),
+            name: "candidate".to_string(),
+            uid: "candidate-uid".to_string(),
+            content_digest: None,
+            content_digest_encoding: None,
+            policy_uid: None,
+            base_content_digest: Some(base.to_string()),
+        });
+        plan.status = Some(PostgresPolicyPlanStatus {
+            phase,
+            change_digest: Some(digest.to_string()),
+            change_digest_encoding: Some(APPROVAL_EFFECT_ENCODING_V3.to_string()),
+            ..Default::default()
+        });
+        plan
+    }
+
+    fn reused_name(
+        plans: &[PostgresPolicyPlan],
+        digest: &str,
+        base: Option<&str>,
+    ) -> Option<String> {
+        reusable_plan(plans, digest, base).map(|plan| plan.name_any())
+    }
+
+    #[test]
+    fn an_identical_approved_plan_is_reused_rather_than_minting_another() {
+        // The loop this closes: a reconcile approves a plan it cannot execute,
+        // the phase change wakes the policy, and a Pending-only lookup misses
+        // the plan it just approved, so it creates and approves another.
+        let plans = [actionable_plan(
+            "approved",
+            PlanPhase::Approved,
+            "d1",
+            10,
+            None,
+        )];
+        assert_eq!(reused_name(&plans, "d1", None).as_deref(), Some("approved"));
+        assert_eq!(reused_name(&plans, "d2", None), None);
+    }
+
+    #[test]
+    fn reuse_prefers_a_recorded_decision_then_the_newest_plan() {
+        let plans = [
+            actionable_plan("pending-newest", PlanPhase::Pending, "d1", 1, None),
+            actionable_plan("approved-old", PlanPhase::Approved, "d1", 30, None),
+            actionable_plan("approved-new", PlanPhase::Approved, "d1", 20, None),
+        ];
+        // An approval is never set aside for an identical plan still awaiting
+        // one, and the newest approval is the one the policy reports.
+        assert_eq!(
+            reused_name(&plans, "d1", None).as_deref(),
+            Some("approved-new")
+        );
+        // List order must not decide.
+        let reversed: Vec<_> = plans.iter().rev().cloned().collect();
+        assert_eq!(
+            reused_name(&reversed, "d1", None).as_deref(),
+            Some("approved-new")
+        );
+    }
+
+    #[test]
+    fn reuse_never_crosses_a_base_pin_or_revives_a_settled_plan() {
+        let plans = [
+            actionable_plan("other-base", PlanPhase::Approved, "d1", 5, Some("base-a")),
+            actionable_plan("applied", PlanPhase::Applied, "d1", 1, Some("base-b")),
+            actionable_plan("superseded", PlanPhase::Superseded, "d1", 1, Some("base-b")),
+            actionable_plan("failed", PlanPhase::Failed, "d1", 1, Some("base-b")),
+        ];
+        assert_eq!(reused_name(&plans, "d1", Some("base-b")), None);
+        assert_eq!(
+            reused_name(&plans, "d1", Some("base-a")).as_deref(),
+            Some("other-base")
+        );
+    }
+
+    #[test]
+    fn reusing_a_plan_retires_identical_duplicates_but_keeps_their_decisions() {
+        // Clusters upgraded from a controller that minted a plan per wake can
+        // hold many identical approved plans. Only the reused one stays live.
+        let versions = BTreeMap::new();
+        let kept = actionable_plan("kept", PlanPhase::Approved, "d1", 1, None);
+        let mut duplicate =
+            test_plan_with_decisions("duplicate", PlanPhase::Approved, &[("Approved", "True")]);
+        duplicate.status = Some(PostgresPolicyPlanStatus {
+            change_digest: Some("d1".to_string()),
+            change_digest_encoding: Some(APPROVAL_EFFECT_ENCODING_V3.to_string()),
+            ..duplicate.status.clone().expect("status")
+        });
+        let pending_copy = actionable_plan("pending-copy", PlanPhase::Pending, "d1", 2, None);
+
+        assert_eq!(supersede_cause(&kept, "kept", "d1", None, &versions), None);
+        for plan in [&duplicate, &pending_copy] {
+            assert_eq!(
+                supersede_cause(plan, "kept", "d1", None, &versions),
+                Some(SupersedeCause::DuplicateOfActionablePlan),
+                "{} still looks actionable beside the reused plan",
+                plan.name_any()
+            );
+        }
+        let retired = superseded_status(
+            duplicate.status.as_ref().expect("status"),
+            SupersedeCause::DuplicateOfActionablePlan,
+        );
+        assert_eq!(retired.phase, PlanPhase::Superseded);
+        assert_eq!(
+            retired.decided_by,
+            duplicate.status.as_ref().and_then(|s| s.decided_by.clone()),
+            "the reviewer's decision is history, not something a duplicate sweep rewrites"
+        );
+        assert!(
+            retired
+                .conditions
+                .iter()
+                .any(|c| c.condition_type == "Approved" && c.status == "True")
+        );
+    }
+
+    #[test]
+    fn supersede_cause_keeps_existing_retirement_rules() {
+        let versions = BTreeMap::new();
+        // A different base outranks matching effects.
+        let pinned = actionable_plan("pinned", PlanPhase::Approved, "d1", 1, Some("old"));
+        assert_eq!(
+            supersede_cause(&pinned, "kept", "d1", Some("new"), &versions),
+            Some(SupersedeCause::BaseContentChanged)
+        );
+        // An approval of other effects can no longer authorise anything.
+        let stale = actionable_plan("stale", PlanPhase::Approved, "d0", 1, None);
+        assert_eq!(
+            supersede_cause(&stale, "kept", "d1", None, &versions),
+            Some(SupersedeCause::ReplacedByNewerPlan)
+        );
+        // Settled plans are history.
+        for phase in [
+            PlanPhase::Applied,
+            PlanPhase::Applying,
+            PlanPhase::Failed,
+            PlanPhase::Rejected,
+            PlanPhase::Superseded,
+        ] {
+            let settled = actionable_plan("settled", phase, "d1", 1, None);
+            assert_eq!(
+                supersede_cause(&settled, "kept", "d1", None, &versions),
+                None
+            );
         }
     }
 
