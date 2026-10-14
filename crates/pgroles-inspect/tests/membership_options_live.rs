@@ -393,10 +393,16 @@ fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
             .memberships
             .retain(|e| !(e.role == "mop_g1" && e.member == "mop_exec"));
         let unsafe_raw = diff(&before, &target);
+        // With no grantor usable after the earlier removal, the increase is
+        // still planned for review — and the preflight blocks it.
+        let unsafe_plan = resolve_membership_options(&executor, unsafe_raw.clone(), &before)
+            .await
+            .unwrap();
         assert!(
-            resolve_membership_options(&executor, unsafe_raw.clone(), &before)
+            !preflight_authority_issues(&executor, &unsafe_plan, &before)
                 .await
-                .is_err()
+                .unwrap()
+                .is_empty()
         );
         let mut changes = unsafe_raw
             .into_iter()
@@ -581,7 +587,7 @@ fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
 
 #[test]
 #[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
-fn an_increase_without_usable_admin_is_an_executor_authority_blocker() {
+fn an_increase_without_usable_admin_is_planned_and_blocked_by_preflight() {
     // Declared first so the cleanup guard drops before the lock is released.
     let _serial = ONE_AT_A_TIME
         .lock()
@@ -598,20 +604,23 @@ fn an_increase_without_usable_admin_is_an_executor_authority_blocker() {
         let executor = ordinary_executor().await;
         let before = current(&executor).await;
         let raw = diff(&before, &desired(&before, true, false));
-        let error = resolve_membership_options(&executor, raw, &before)
+        // Missing authority is not a planning fault: the change still renders
+        // for review, attributed to the executor as a new SET FALSE edge.
+        let changes = resolve_membership_options(&executor, raw, &before)
             .await
-            .expect_err("no grantor the executor can use holds ADMIN");
-        // Callers report this as missing executor authority, so a degraded
-        // policy keeps its candidate previews instead of failing planning.
-        let message = error
-            .executor_authority_blocker()
-            .expect("an authority blocker, not a planning fault");
-        assert!(message.contains("mop_member") && message.contains("mop_exec"));
-        assert_eq!(
-            pgroles_inspect::MembershipPlanningError::NO_USABLE_GRANTOR,
-            "NoUsableGrantor"
+            .unwrap();
+        assert!(
+            matches!(&changes[..], [Change::UpdateMemberOptions { grantor, .. }] if grantor == "mop_exec")
         );
-        // Nothing ran: the provider-attributed edge is untouched.
+        assert!(render_batch_with_context(&changes, &SqlContext::default()).is_ok());
+        // The authority preflight is what blocks it, before any SQL runs.
+        let issues = preflight_authority_issues(&executor, &changes, &before)
+            .await
+            .unwrap();
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            AuthorityIssue::MembershipOptionsBlocked { grantor, .. } if grantor == "mop_exec"
+        )));
         assert_eq!(
             rows(&root).await,
             vec![("mop_alloydbadmin".into(), false, false, true)]

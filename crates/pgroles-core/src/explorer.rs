@@ -709,16 +709,7 @@ fn initial_edge_facts(
         // Live inspection may carry complete per-grantor SET facts. A
         // supplied snapshot without those facts remains explicitly unknown.
         let inspected_set = graph
-            .membership_edge_options
-            .get(&key)
-            .filter(|options| {
-                graph
-                    .membership_edge_grantors
-                    .get(&key)
-                    .is_some_and(|grantors| {
-                        !grantors.is_empty() && grantors.iter().eq(options.keys())
-                    })
-            })
+            .complete_membership_options(&edge.role, &edge.member)
             .map(|options| capability(options.values().any(|edge| edge.set)))
             .unwrap_or(default_set_role);
         set_role.insert(key.clone(), inspected_set);
@@ -1767,11 +1758,7 @@ fn apply_change(
             binding,
         } => {
             let key = (role.clone(), member.clone());
-            let existing_complete = graph
-                .membership_edge_grantors
-                .get(&key)
-                .zip(graph.membership_edge_options.get(&key))
-                .is_some_and(|(gs, os)| !gs.is_empty() && gs.iter().eq(os.keys()));
+            let existing_complete = graph.complete_membership_options(role, member).is_some();
             if existing_complete
                 && binding.as_ref().is_some_and(|b| {
                     matches!(

@@ -51,12 +51,17 @@ async fn profile() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let changes = pgroles_core::diff::diff(&inspection.graph, &desired);
         let diff = start.elapsed();
         let start = Instant::now();
-        let statements: Vec<_> = changes
+        // Option changes need executor attribution before they render; this
+        // profile measures the pure pipeline, so it counts only what renders
+        // and reports how many changes it left out.
+        let rendered: Vec<_> = changes
             .iter()
-            .flat_map(pgroles_core::sql::render_statements)
+            .map(pgroles_core::sql::render_statements)
             .collect();
+        let unrendered = rendered.iter().filter(|r| r.is_err()).count();
+        let statements: Vec<_> = rendered.into_iter().flatten().flatten().collect();
         println!(
-            "iteration={iteration} read={read:?} derive={derive:?} diff={diff:?} render={:?} acl_rows={} grant_keys={} grantor_keys={} changes={} statements={} phases={:?}",
+            "iteration={iteration} read={read:?} derive={derive:?} diff={diff:?} render={:?} acl_rows={} grant_keys={} grantor_keys={} changes={} statements={} unrendered={unrendered} phases={:?}",
             start.elapsed(),
             inspection.stats.acl_rows,
             inspection.stats.grants,

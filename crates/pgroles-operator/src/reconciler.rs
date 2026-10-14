@@ -3285,6 +3285,7 @@ pub(crate) fn summarize_changes(changes: &[pgroles_core::diff::Change]) -> Chang
         + summary.grants_revoked
         + summary.default_privileges_set
         + summary.default_privileges_revoked
+        + summary.members_options_changed
         + summary.members_added
         + summary.members_removed
         + summary.passwords_set;
@@ -4622,13 +4623,24 @@ mod tests {
                     .into_iter()
                     .collect(),
             },
+            // An option-only change runs SQL too, so it counts toward the total
+            // the status message, print column and metric all report.
+            Change::UpdateMemberOptions {
+                role: "reader".to_string(),
+                member: "app".to_string(),
+                grantor: "pgroles_executor".to_string(),
+                inherit: Some(true),
+                admin: None,
+                binding: None,
+            },
         ];
 
         let summary = summarize_changes(&changes);
         assert_eq!(summary.roles_created, 1);
         assert_eq!(summary.schemas_created, 1);
         assert_eq!(summary.grants_added, 1);
-        assert_eq!(summary.total, 3);
+        assert_eq!(summary.members_options_changed, 1);
+        assert_eq!(summary.total, 4);
     }
 
     #[test]

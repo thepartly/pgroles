@@ -418,6 +418,20 @@ pub struct RoleGraph {
 }
 
 impl RoleGraph {
+    /// Per-grantor options for one membership, when they cover exactly the
+    /// recorded grantors. Snapshots and older inspections may carry grantors
+    /// without options, and planning must not guess the missing tuples.
+    pub fn complete_membership_options(
+        &self,
+        role: &str,
+        member: &str,
+    ) -> Option<&BTreeMap<String, MembershipOptions>> {
+        let key = (role.to_string(), member.to_string());
+        let grantors = self.membership_edge_grantors.get(&key)?;
+        let options = self.membership_edge_options.get(&key)?;
+        (!grantors.is_empty() && grantors.iter().eq(options.keys())).then_some(options)
+    }
+
     /// Resolve catalog-proven equivalent routine targets before comparing grants.
     pub fn resolve_routine_aliases<'a>(
         &'a self,

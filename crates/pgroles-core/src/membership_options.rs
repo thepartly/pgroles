@@ -50,14 +50,6 @@ pub enum MembershipOptionsError {
         "membership option planning requires complete per-grantor options for {member} in {role}"
     )]
     IncompleteFacts { role: String, member: String },
-    #[error(
-        "no proven usable direct-ADMIN grantor for increasing membership options of {member} in {role} as {executor}"
-    )]
-    NoUsableGrantor {
-        role: String,
-        member: String,
-        executor: String,
-    },
 }
 
 pub fn resolve_membership_options(
@@ -79,14 +71,11 @@ pub fn resolve_membership_options(
             else {
                 return Ok(change);
             };
-            let key = (role.clone(), member.clone());
-            let grantors = current.membership_edge_grantors.get(&key);
-            let options = current.membership_edge_options.get(&key);
-            let complete = grantors.zip(options).is_some_and(|(gs, os)| {
-                !gs.is_empty()
-                    && gs.len() == os.len()
-                    && gs.iter().all(|g| os.contains_key(g))
-                    && current
+            // Complete tuples that also agree with the effective membership.
+            let Some(options) = current
+                .complete_membership_options(&role, &member)
+                .filter(|os| {
+                    current
                         .memberships
                         .iter()
                         .find(|e| e.role == role && e.member == member)
@@ -94,11 +83,10 @@ pub fn resolve_membership_options(
                             e.inherit == os.values().any(|o| o.inherit)
                                 && e.admin == os.values().any(|o| o.admin)
                         })
-            });
-            if !complete {
+                })
+            else {
                 return Err(MembershipOptionsError::IncompleteFacts { role, member });
-            }
-            let options = options.expect("complete options");
+            };
             if inherit == Some(true) || admin == Some(true) {
                 let usable = authority.usable_grantors.get(&role);
                 grantor = usable
@@ -117,11 +105,11 @@ pub fn resolve_membership_options(
                             gs.first().cloned()
                         }
                     })
-                    .ok_or_else(|| MembershipOptionsError::NoUsableGrantor {
-                        role: role.clone(),
-                        member: member.clone(),
-                        executor: authority.executor.clone(),
-                    })?;
+                    // No usable ADMIN holder is missing executor authority,
+                    // not a planning fault. Attribute the increase to the
+                    // executor so the plan still renders for review; the
+                    // authority preflight then blocks it before any SQL runs.
+                    .unwrap_or_else(|| authority.executor.clone());
             } else if !options.contains_key(&grantor) {
                 return Err(MembershipOptionsError::IncompleteFacts { role, member });
             }

@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pgroles_inspect::evaluate_execution_guards` runs the apply guards with `ExecutionSettings` and returns `ExecutionGuardFindings`, whose `blockers()` name the guard behind each blocker.
 - `pgroles_core::review_artifact::REVIEW_ARTIFACT_SCHEMA_VERSION` is `pgroles.review-artifact.v3`; `READABLE_REVIEW_ARTIFACT_SCHEMA_VERSIONS` lists what `parse_review_artifact` accepts. `PreflightCheck` and `EvidenceCheck` gain `SchemaOwnerTransfer`.
 - `pgroles_core::diff::adopt_schema_owner_transfers` lists the adopt-mode schema ownership transfers in a plan.
+- `pgroles_core::sql::render`, `render_statements`, `render_statements_with_context`, `render_batch_with_context`, `render_all` and `render_all_with_context` return `Result<_, SqlRenderError>`. A PG16+ membership option change from `diff()` carries no executor attribution, and rendering it unresolved is an error rather than a guess: pass the changes through `pgroles_inspect::resolve_membership_options` against the target database before rendering, as the CLI and operator do. When no grantor the executor can use holds ADMIN, resolution attributes the increase to the executor so the plan still renders, and the authority preflight reports `MembershipOptionsBlocked`.
 
 ## [0.13.0] - 2026-09-24
 

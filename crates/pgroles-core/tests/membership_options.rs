@@ -387,9 +387,17 @@ fn incomplete_or_inconsistent_catalog_facts_and_unusable_grantors_fail_closed() 
         executor: "pgroles_executor".into(),
         usable_grantors: Default::default(),
     };
+    // No usable grantor still yields a reviewable change, attributed to the
+    // executor as a new SET FALSE edge; the authority preflight blocks it.
+    let resolved = resolve_membership_options(vec![increase()], &graph, &no_authority).unwrap();
     assert!(matches!(
-        resolve_membership_options(vec![increase()], &graph, &no_authority),
-        Err(MembershipOptionsError::NoUsableGrantor { .. })
+        &resolved[..],
+        [pgroles_core::diff::Change::UpdateMemberOptions {
+            grantor,
+            binding: Some(binding),
+            ..
+        }] if grantor == "pgroles_executor"
+            && binding.set_effect == pgroles_core::membership_options::MembershipSetEffect::CreateFalse
     ));
     let mut partial = graph.clone();
     partial

@@ -11,26 +11,6 @@ pub enum MembershipPlanningError {
     Options(#[from] pgroles_core::membership_options::MembershipOptionsError),
 }
 
-impl MembershipPlanningError {
-    /// Stable diagnostic code shared with [`crate::AuthorityIssue::code`].
-    pub const NO_USABLE_GRANTOR: &'static str = "NoUsableGrantor";
-
-    /// The blocker message when resolution failed only because the executor
-    /// holds no usable ADMIN authority for an increase. That is an
-    /// executor-authority failure like any preflight finding — nothing has
-    /// run — so callers report it as one rather than as a planning fault.
-    pub fn executor_authority_blocker(&self) -> Option<String> {
-        match self {
-            Self::Options(
-                error @ pgroles_core::membership_options::MembershipOptionsError::NoUsableGrantor {
-                    ..
-                },
-            ) => Some(error.to_string()),
-            _ => None,
-        }
-    }
-}
-
 pub async fn resolve_membership_options(
     pool: &PgPool,
     changes: Vec<Change>,
