@@ -260,6 +260,15 @@ Interpretation:
   Apply reruns every guard against fresh state. Advisory warnings are not
   guards and do not affect eligibility. Changed effects require a replacement
   plan at promotion; the approved digest does not bypass execution checks.
+- Preflight covers current parent settings. A CI gate claiming apply eligibility
+  requires `spec.mode=apply`, matching parent generation and a fresh evaluation.
+  Observe executes nothing and permits review of ownership transfers; its
+  passing result does not establish future apply eligibility. Mode changes
+  re-evaluate guards. Flag-only edits retain identical SQL and approval while
+  refreshing eligibility. Covered local retirement hazards are warnings;
+  foreign-database dependencies remain blockers, and preview runs no cleanup.
+  NoEffects clears the preflight result. Offline validate/graph/WASM cannot
+  assess parent settings or live drop dependencies; these checks are uncovered.
 - The spec is immutable. Revise by filing a successor that names this
   candidate in `spec.replaces`.
 - Approving the candidate's plan executes nothing by itself. Execution happens

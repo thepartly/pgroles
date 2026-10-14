@@ -1601,6 +1601,9 @@ jobs:
       - name: Verify candidate executor authority and freshness
         run: bash scripts/e2e-candidate-authority.sh
 
+      - name: Verify candidate guard hardening and manual adoption
+        run: bash scripts/e2e-candidate-execution-policy.sh
+
       - name: Verify candidate grant preservation
         run: scripts/e2e-candidate-preservation.sh
 

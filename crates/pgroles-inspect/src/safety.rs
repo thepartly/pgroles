@@ -409,7 +409,13 @@ pub async fn inspect_drop_role_safety(
                 ELSE 'other'
             END AS dependency_scope,
             d.datname AS database_name,
-            pg_describe_object(sd.classid, sd.objid, sd.objsubid) AS description
+            -- Object OIDs from another database cannot be resolved here:
+            -- they may be absent or identify an unrelated local object.
+            CASE WHEN sd.dbid IN (0, (SELECT current_db_oid FROM current_db))
+                THEN COALESCE(pg_describe_object(sd.classid, sd.objid, sd.objsubid),
+                    format('catalog %s object %s subobject %s', sd.classid, sd.objid, sd.objsubid))
+                ELSE format('catalog %s object %s subobject %s', sd.classid, sd.objid, sd.objsubid)
+            END AS description
         FROM pg_shdepend sd
         JOIN pg_roles r
           ON r.oid = sd.refobjid

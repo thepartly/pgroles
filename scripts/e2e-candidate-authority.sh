@@ -15,7 +15,7 @@ cleanup() {
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl delete pgr candidate-authority-policy candidate-authority-root-parent \
     candidate-ownership-policy --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  pg_query "DROP SCHEMA IF EXISTS cow_onboarding CASCADE;" >/dev/null 2>&1 || true
+  pg_query "DROP SCHEMA IF EXISTS cow_workspace CASCADE;" >/dev/null 2>&1 || true
   kubectl delete secret candidate-authority-credentials --ignore-not-found >/dev/null 2>&1 || true
   for role in cau_member cau_executor cau_grantor cau_group cau_repair cat_member cat_grantor cat_group \
     cow_live_owner cow_new_owner cow_group cow_member; do
@@ -206,7 +206,7 @@ assert_unavailable
 kubectl patch pgr candidate-authority-policy --type=merge -p='{"spec":{"connection":{"secretRef":{"name":"candidate-authority-credentials"}}}}'
 assert_fresh
 # Induce external drift without changing the parent content/base pin: the
-# INC-168 shape. Losing grantor authority blocks the parent's option change.
+# lost-grantor case: losing authority blocks the parent's option change.
 # Nothing from its plan ran, so candidates are still planned against the
 # unchanged database and say so. Recovery must apply the parent plan normally;
 # deleting or canceling it would mask the lifecycle behavior this depends on.
@@ -290,26 +290,23 @@ PY_CAS
   assert_fresh
 done
 
-# Schema ownership, as in the onboarding incident: staging allowed the
-# transfer, production refused it, and a preview computed without the
-# production policy's settings passed. Candidates run apply's guards with their
-# parent's settings. The superuser connection keeps executor authority out of
-# the picture, so the only guard in play is the ownership refusal.
+# Schema ownership follows the parent's current transfer allowance. The
+# privileged fixture isolates the policy guard from executor authority.
 pg_query 'CREATE ROLE cow_live_owner; CREATE ROLE cow_new_owner; CREATE ROLE cow_group;
-  CREATE ROLE cow_member; CREATE SCHEMA cow_onboarding AUTHORIZATION cow_live_owner;'
+  CREATE ROLE cow_member; CREATE SCHEMA cow_workspace AUTHORIZATION cow_live_owner;'
 ownership_roles='[{"name":"cow_live_owner","external":true},{"name":"cow_new_owner","external":true},{"name":"cow_group","external":true},{"name":"cow_member","external":true}]'
 ownership_membership=',"memberships":[{"role":"cow_group","members":[{"name":"cow_member"}]}]'
 ownership_content() {
   local extra=""
   if [ -n "${2:-}" ]; then extra="$ownership_membership"; fi
-  printf '{"reconciliation_mode":"adopt","roles":%s,"schemas":[{"name":"cow_onboarding","owner":"%s"}]%s}' \
+  printf '{"reconciliation_mode":"adopt","roles":%s,"schemas":[{"name":"cow_workspace","owner":"%s"}]%s}' \
     "$ownership_roles" "$1" "$extra"
 }
 ownership_candidate() {
   printf '{"apiVersion":"pgroles.io/v1alpha1","kind":"PostgresPolicyCandidate","metadata":{"name":"%s"},"spec":{"policyRef":{"name":"candidate-ownership-policy"},"content":%s}}' \
     "$1" "$2" | kubectl apply -f -
 }
-schema_owner() { pg_query "SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'cow_onboarding';"; }
+schema_owner() { pg_query "SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'cow_workspace';"; }
 printf '{"apiVersion":"pgroles.io/v1alpha1","kind":"PostgresPolicy","metadata":{"name":"candidate-ownership-policy"},"spec":%s}' \
   "$(ownership_content cow_live_owner | python3 -c 'import json,sys; c=json.load(sys.stdin); c.update({"connection":{"secretRef":{"name":"postgres-credentials"}},"interval":"2s","mode":"apply","approval":"auto"}); print(json.dumps(c))')" \
   | kubectl apply -f -
@@ -319,11 +316,10 @@ ownership_candidate candidate-ownership-transfer "$(ownership_content cow_new_ow
 wait_for_candidate_condition candidate-ownership-transfer Ready False ExecutionBlocked
 test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.eligibility}')" = Blocked
 test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.issues[*].guard}')" = SchemaOwnerTransfer
-[[ "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.issues[0].message}')" == *'cow_onboarding'* ]]
+[[ "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.issues[0].message}')" == *'cow_workspace'* ]]
 test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.parentState}')" = Converged
-[[ "$(review_sql "$(wait_for_candidate_plan_ref candidate-ownership-transfer)")" == *'ALTER SCHEMA "cow_onboarding" OWNER TO "cow_new_owner"'* ]]
-# The same content against a parent that allows transfers — staging's
-# setting — has no known blockers.
+[[ "$(review_sql "$(wait_for_candidate_plan_ref candidate-ownership-transfer)")" == *'ALTER SCHEMA "cow_workspace" OWNER TO "cow_new_owner"'* ]]
+# Explicit parent opt-in makes the same content eligible for review.
 kubectl patch pgr candidate-ownership-policy --type=merge -p='{"spec":{"allow_schema_owner_transfers":true}}'
 wait_for_candidate_condition candidate-ownership-transfer Ready True Planned
 test "$(kubectl get pgcand candidate-ownership-transfer -o jsonpath='{.status.executionPreflight.eligibility}')" = NoKnownBlockers

@@ -3984,19 +3984,19 @@ mod tests {
     fn only_a_policy_that_executes_refuses_adopt_schema_owner_transfers() {
         use pgroles_core::diff::{Change, ReconciliationMode};
         let changes = vec![Change::AlterSchemaOwner {
-            name: "onboarding".into(),
-            owner: "onboarding_owner".into(),
+            name: "warehouse".into(),
+            owner: "warehouse_owner".into(),
         }];
         let mut policy = (*test_policy("5m", 0)).clone();
         let (transfers, blocker) =
             refused_schema_owner_transfers(&policy, ReconciliationMode::Adopt, &changes);
         assert_eq!(
             transfers,
-            vec![("onboarding".to_string(), "onboarding_owner".to_string())]
+            vec![("warehouse".to_string(), "warehouse_owner".to_string())]
         );
         assert!(blocker.unwrap().contains("allow_schema_owner_transfers"));
 
-        // Staging's setting: the same plan is permitted.
+        // Explicit opt-in permits the same plan.
         policy.spec.allow_schema_owner_transfers = true;
         assert_eq!(
             refused_schema_owner_transfers(&policy, ReconciliationMode::Adopt, &changes),
@@ -4020,7 +4020,7 @@ mod tests {
     fn guard_findings_name_the_guard_behind_every_blocker_in_apply_order() {
         use crate::crd::ExecutionGuard;
         let findings = ExecutionGuardFindings {
-            schema_owner_transfers: vec![("onboarding".into(), "onboarding_owner".into())],
+            schema_owner_transfers: vec![("warehouse".into(), "warehouse_owner".into())],
             owner_transfer_blocker: Some("refused".into()),
             drop_safety: pgroles_inspect::DropRoleSafetyAssessment {
                 warnings: Default::default(),
@@ -4069,7 +4069,7 @@ mod tests {
                 ),
             ]
         );
-        assert!(blockers[0].message.contains("\"onboarding\""));
+        assert!(blockers[0].message.contains("\"warehouse\""));
         assert!(blockers[1].message.contains("retired"));
         assert!(blockers[2].message.contains("app_owner"));
         assert!(ExecutionGuardFindings::default().blockers().is_empty());
@@ -6527,7 +6527,7 @@ mod tests {
         use crate::candidate::ParentOutcome;
         for refusal in [
             ReconcileError::ExecutorAuthority("blocked".into()),
-            ReconcileError::OwnerTransferBlocked("\"onboarding\" -> \"owner\"".into()),
+            ReconcileError::OwnerTransferBlocked("\"warehouse\" -> \"owner\"".into()),
             ReconcileError::UnsafeRoleDrops("role owns objects".into()),
         ] {
             let blocked = Err(refusal);
@@ -6558,5 +6558,157 @@ mod tests {
         assert!(!candidate_evaluation_unavailable(&Err(
             ReconcileError::LockContention("db".into(), "busy".into())
         )));
+    }
+    /// Uses only the disposable DATABASE_URL fixture, with unique names. The
+    /// same retained DROP is checked on two targets without executing cleanup.
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL instance with CREATEDB/CREATEROLE"]
+    async fn live_drop_guards_use_target_and_retirements_without_mutating() {
+        use futures::FutureExt;
+        use pgroles_core::{
+            diff::{Change, ReconciliationMode},
+            manifest::RoleRetirement,
+        };
+        use sqlx::{
+            Connection, Executor,
+            postgres::{PgConnectOptions, PgPoolOptions},
+        };
+        use std::{panic::AssertUnwindSafe, str::FromStr};
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL for disposable test fixture");
+        let options = PgConnectOptions::from_str(&url).unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        let policy = test_policy("5m", 0);
+        let suffix = rand::random::<u64>();
+        let role = format!("guard_retired_{suffix}");
+        let space = format!("guard_space_{suffix}");
+        let other_database = format!("guard_target_{suffix}");
+        // Keep cleanup outside the assertion future so panic unwinding also
+        // releases sessions and removes only this fixture's unique objects.
+        let result = AssertUnwindSafe(async {
+            pool.execute(format!("CREATE ROLE {role} LOGIN PASSWORD 'fixture-password'").as_str())
+                .await
+                .unwrap();
+            pool.execute(format!("CREATE SCHEMA {space} AUTHORIZATION {role}").as_str())
+                .await
+                .unwrap();
+            pool.execute(format!("CREATE DATABASE {other_database}").as_str())
+                .await
+                .unwrap();
+            let other_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.clone().database(&other_database))
+                .await
+                .unwrap();
+            let mut session = sqlx::PgConnection::connect_with(
+                &options.username(&role).password("fixture-password"),
+            )
+            .await
+            .unwrap();
+            session
+                .execute(format!("CREATE TABLE {space}.records (id int)").as_str())
+                .await
+                .unwrap();
+            let changes = vec![Change::DropRole { name: role.clone() }];
+            let retirements = vec![RoleRetirement {
+                role: role.clone(),
+                reassign_owned_to: Some("postgres".into()),
+                drop_owned: true,
+                terminate_sessions: true,
+            }];
+            let uncovered = evaluate_execution_guards(
+                &pool,
+                &policy,
+                ReconciliationMode::Authoritative,
+                &changes,
+                &Default::default(),
+                &[],
+            )
+            .await
+            .unwrap()
+            .drop_safety;
+            assert!(uncovered.has_blockers());
+            let local = evaluate_execution_guards(
+                &pool,
+                &policy,
+                ReconciliationMode::Authoritative,
+                &changes,
+                &Default::default(),
+                &retirements,
+            )
+            .await
+            .unwrap()
+            .drop_safety;
+            assert!(!local.has_blockers(), "{}", local.blockers);
+            assert!(!local.warnings.is_empty());
+            let external = evaluate_execution_guards(
+                &other_pool,
+                &policy,
+                ReconciliationMode::Authoritative,
+                &changes,
+                &Default::default(),
+                &retirements,
+            )
+            .await
+            .unwrap()
+            .drop_safety;
+            assert!(
+                external.has_blockers(),
+                "another database's dependencies remain blocked"
+            );
+            assert!(
+                external
+                    .blockers
+                    .issues
+                    .iter()
+                    .any(|issue| issue.external_owned_object_count > 0)
+            );
+            assert!(external.blockers.issues.iter().any(|issue| {
+                issue
+                    .external_owned_object_examples
+                    .iter()
+                    .any(|example| example.contains("catalog "))
+            }));
+            // Cleanup coverage is advice: preview must neither terminate this
+            // session nor reassign/drop the objects or the role.
+            let owner: String = sqlx::query_scalar(
+                "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = $1::regclass",
+            )
+            .bind(format!("{space}.records"))
+            .fetch_one(&mut session)
+            .await
+            .unwrap();
+            assert_eq!(owner, role);
+            let who: String = sqlx::query_scalar("SELECT current_user::text")
+                .fetch_one(&mut session)
+                .await
+                .unwrap();
+            assert_eq!(who, role);
+            session.close().await.unwrap();
+            other_pool.close().await;
+        })
+        .catch_unwind()
+        .await;
+        let mut cleanup_errors = Vec::new();
+        for statement in [
+            format!("DROP DATABASE IF EXISTS {other_database} WITH (FORCE)"),
+            format!("DROP SCHEMA IF EXISTS {space} CASCADE"),
+            format!("DROP ROLE IF EXISTS {role}"),
+        ] {
+            if let Err(error) = pool.execute(statement.as_str()).await {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        pool.close().await;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            cleanup_errors.is_empty(),
+            "fixture cleanup: {cleanup_errors:?}"
+        );
     }
 }
