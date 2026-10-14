@@ -162,6 +162,7 @@ test('accepts every sanitized ReviewChange variant', () => {
     { kind: 'grant', role: 'role', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'items' }, { kind: 'revoke', role: 'role', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: 'items', grantor: null },
     { kind: 'set_default_privilege', owner: 'owner', scope: { type: 'global' }, on_type: 'table', grantee: 'role', privileges: ['SELECT'] }, { kind: 'revoke_default_privilege', owner: 'owner', scope: { type: 'schema', schema: 'app' }, on_type: 'table', grantee: 'PUBLIC', privileges: ['SELECT'] },
     { kind: 'add_member', role: 'group', member: 'role', inherit: true, admin: false }, { kind: 'remove_member', role: 'group', member: 'role', grantor: null },
+    { kind: 'update_member_options', role: 'group', member: 'role', grantor: 'administrator', inherit: null, admin: false },
     { kind: 'reassign_owned', from_role: 'old', to_role: 'new' }, { kind: 'drop_owned', role: 'old' }, { kind: 'terminate_sessions', role: 'old' }, { kind: 'set_password', name: 'role' }, { kind: 'drop_role', name: 'old' },
   ]
   const artifact = {
@@ -272,6 +273,7 @@ test('labels changes by who is affected for live and recorded shapes', () => {
     [{ Grant: { role: 'orders_reader', privileges: ['SELECT'], object_type: 'table', schema: 'app', name: '*' } }, 'Grant · all tables in app → orders_reader'],
     [{ Grant: { role: 'orders_reader', privileges: ['USAGE'], object_type: 'schema', schema: null, name: 'app' } }, 'Grant · schema app → orders_reader'],
     [{ RemoveMember: { role: 'reporting', member: 'analyst' } }, 'Remove member · analyst from reporting'],
+    [{ kind: 'update_member_options', role: 'reporting', member: 'analyst', grantor: 'administrator', inherit: true, admin: null }, 'Update member options · analyst in reporting (grantor administrator)'],
     [{ kind: 'add_member', role: 'reporting', member: 'analyst', inherit: true, admin: false }, 'Add member · analyst to reporting'],
     [{ SetDefaultPrivilege: { owner: 'app_owner', scope: { type: 'schema', schema: 'app' }, on_type: 'table', grantee: 'orders_reader', privileges: ['SELECT'] } }, 'Set default privilege · app_owner tables in app → orders_reader'],
     [{ kind: 'revoke_default_privilege', owner: 'app_owner', scope: { type: 'global' }, on_type: 'materialized_view', grantee: 'PUBLIC', privileges: ['SELECT'] }, 'Revoke default privilege · app_owner materialized views → PUBLIC'],

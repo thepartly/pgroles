@@ -84,7 +84,7 @@ memberships:
     id: 'acme-membership-bridge',
     title: 'Cross a membership bridge',
     description: 'Inspect INHERIT, SET ROLE, and ADMIN OPTION as separate facts on Bob’s path to analyst.',
-    explanation: 'The existing edge was granted by team_lead. Changing it requires pgroles to remove that grantor-attributed edge and add the declared edge, while executor authority is evaluated independently from Bob’s ability to inherit or SET ROLE.',
+    explanation: 'Bob’s existing edge belongs to team_lead. The ordinary deploy executor has direct ADMIN on analyst and can add its own INHERIT grant with SET FALSE, preserving the foreign edge. Removing the foreign ADMIN option still requires team_lead’s inherited privileges and uses REVOKE ADMIN OPTION with RESTRICT. Additive mode retains the safe increase and filters the reduction; SET-only authority does not authorize the foreign revoke.',
     relatedDocs: [
       { href: '/docs/postgresql-role-hierarchy', label: 'PostgreSQL role hierarchy' },
       { href: '/docs/memberships', label: 'Memberships reference' },
@@ -92,10 +92,12 @@ memberships:
     request: {
       schema_version: schemaVersion,
       current: {
-        roles: { analyst: {}, bob: { login: true }, team_lead: { login: true }, orders_reader: {} },
+        roles: { analyst: {}, bob: { login: true }, team_lead: { login: true }, orders_reader: {}, deploy: { login: true } },
         memberships: [
-          { role: 'orders_reader', member: 'analyst', inherit: true, admin: false, grantors: ['postgres'] },
-          { role: 'analyst', member: 'bob', inherit: false, admin: true, grantors: ['team_lead'] },
+          { role: 'orders_reader', member: 'analyst', inherit: true, admin: false, grantors: ['postgres'], grantor_options: { postgres: { inherit: true, admin: false, set: true } } },
+          { role: 'analyst', member: 'bob', inherit: false, admin: true, grantors: ['team_lead'], grantor_options: { team_lead: { inherit: false, admin: true, set: true } } },
+          { role: 'analyst', member: 'team_lead', inherit: false, admin: true, grantors: ['postgres'], grantor_options: { postgres: { inherit: false, admin: true, set: true } } },
+          { role: 'analyst', member: 'deploy', inherit: false, admin: true, grantors: ['postgres'], grantor_options: { postgres: { inherit: false, admin: true, set: false } } },
         ],
       },
       desired_yaml: `roles:
@@ -105,6 +107,9 @@ memberships:
   - name: team_lead
     login: true
   - name: orders_reader
+  - name: deploy
+    login: true
+    external: true
 
 memberships:
   - role: orders_reader
@@ -115,6 +120,12 @@ memberships:
       - name: bob
         inherit: true
         admin: false
+      - name: team_lead
+        inherit: false
+        admin: true
+      - name: deploy
+        inherit: false
+        admin: true
 `,
       mode: 'authoritative',
       executor: executor('deploy', {
@@ -123,10 +134,17 @@ memberships:
     },
     focusPhase: 'membership_remove',
     expected: {
-      changes: [{ kind: 'RemoveMember', role: 'analyst', member: 'bob', grantor: 'team_lead' }],
+      changes: [
+        { kind: 'UpdateMemberOptions', role: 'analyst', member: 'bob', grantor: 'team_lead', admin: false },
+        { kind: 'UpdateMemberOptions', role: 'analyst', member: 'bob', grantor: 'deploy', inherit: true },
+      ],
+      absentChanges: ['RemoveMember', 'AddMember'],
       findings: [
         { kind: 'required_role_unavailable', phase: 'membership_remove', role: 'team_lead' },
-        { kind: 'required_role_unavailable', severity: 'error', phase: 'membership_add', role: 'analyst' },
+      ],
+      phaseReachability: [
+        { phase: 'membership_remove', authority: 'usage', role: 'team_lead', status: 'unreachable' },
+        { phase: 'membership_remove', authority: 'set_role', role: 'team_lead', status: 'reachable' },
       ],
     },
   },

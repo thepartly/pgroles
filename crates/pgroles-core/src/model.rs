@@ -344,6 +344,16 @@ pub struct MembershipEdge {
 // RoleGraph — the top-level state container
 // ---------------------------------------------------------------------------
 
+/// Options on one catalog membership grant.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MembershipOptions {
+    pub inherit: bool,
+    pub admin: bool,
+    pub set: bool,
+}
+
 /// Complete state of managed roles, grants, default privileges, and memberships.
 ///
 /// Both the manifest expander and the database inspector produce this type.
@@ -393,6 +403,10 @@ pub struct RoleGraph {
     /// inspections leave it empty, which diffs into plain grantor-less
     /// revokes.
     pub membership_edge_grantors: BTreeMap<(String, String), BTreeSet<String>>,
+    /// Per-grantor live membership options (PG16+). Unlike the effective
+    /// membership, these retain each independent edge's options so updates
+    /// can leave unrelated grantors and SET authority intact.
+    pub membership_edge_options: BTreeMap<(String, String), BTreeMap<String, MembershipOptions>>,
     /// Grantors recorded on each live object-privilege ACL entry for managed
     /// grantees, keyed by grant target, then grantor, holding that grantor's
     /// privileges. PostgreSQL's plain REVOKE removes only the entry of the

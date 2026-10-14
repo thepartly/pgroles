@@ -37,6 +37,7 @@ pub fn priority(change: &Change) -> ReviewPriority {
         | Change::AlterRole { .. }
         | Change::Revoke { .. }
         | Change::RevokeDefaultPrivilege { .. }
+        | Change::UpdateMemberOptions { .. }
         | Change::RemoveMember { .. }
         | Change::SetPassword { .. } => ReviewPriority::High,
         Change::CreateRole { .. }

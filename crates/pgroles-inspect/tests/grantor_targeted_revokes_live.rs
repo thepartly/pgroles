@@ -103,7 +103,7 @@ async fn apply(pool: &PgPool, changes: &[Change]) {
     let mut conn = pool.acquire().await.expect("connection should acquire");
     let mut tx = conn.begin().await.expect("transaction should begin");
     for change in changes {
-        for statement in render_statements(change) {
+        for statement in render_statements(change).unwrap() {
             tx.execute(statement.as_str())
                 .await
                 .unwrap_or_else(|error| panic!("failed `{statement}`: {error}"));
@@ -335,7 +335,7 @@ fn grantor_revoke_restores_the_configured_execution_role() {
             .await
             .expect("connection should acquire");
         let mut tx = conn.begin().await.expect("transaction should begin");
-        for statement in pgroles_core::sql::render_statements_with_context(&change, &ctx) {
+        for statement in pgroles_core::sql::render_statements_with_context(&change, &ctx).unwrap() {
             sqlx::Executor::execute(&mut *tx, statement.as_str())
                 .await
                 .unwrap_or_else(|error| panic!("failed `{statement}`: {error}"));

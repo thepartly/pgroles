@@ -1138,6 +1138,12 @@
                         "format": "int32",
                         "type": "integer"
                       },
+                      "members_options_changed": {
+                        "default": 0,
+                        "description": "Number of grantor-attributed membership option changes.",
+                        "format": "int32",
+                        "type": "integer"
+                      },
                       "members_removed": {
                         "default": 0,
                         "description": "Number of membership removals.",

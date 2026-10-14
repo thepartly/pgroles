@@ -921,6 +921,7 @@ async fn plan_against_target(
         changes = pgroles_core::diff::inject_password_changes(changes, &password_changes);
     }
 
+    changes = pgroles_inspect::resolve_membership_options(target.pool(), changes, &current).await?;
     let summary = crate::reconciler::summarize_changes(&changes);
 
     if changes.is_empty() {
@@ -2566,6 +2567,7 @@ mod tests {
                 &changes,
                 &pgroles_core::sql::SqlContext::default(),
             )
+            .unwrap()
             .into_iter()
             .map(|statement| statement.redacted_sql)
             .collect::<Vec<_>>()

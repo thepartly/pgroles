@@ -1121,6 +1121,9 @@ pub struct ChangeSummary {
     /// Number of membership additions.
     pub members_added: i32,
     #[serde(default)]
+    /// Number of grantor-attributed membership option changes.
+    pub members_options_changed: i32,
+    #[serde(default)]
     /// Number of membership removals.
     pub members_removed: i32,
     #[serde(default)]

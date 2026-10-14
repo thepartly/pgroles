@@ -490,6 +490,18 @@ impl RawInspection {
             edge.admin |= row.admin_option;
             if let Some(grantor) = &row.grantor {
                 graph
+                    .membership_edge_options
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(
+                        grantor.clone(),
+                        pgroles_core::model::MembershipOptions {
+                            inherit: row.inherit_option,
+                            admin: row.admin_option,
+                            set: row.set_option,
+                        },
+                    );
+                graph
                     .membership_edge_grantors
                     .entry(key)
                     .or_default()
@@ -724,6 +736,7 @@ mod tests {
 
     fn membership_row(role: &str, member: &str) -> MembershipRow {
         MembershipRow {
+            set_option: true,
             grantor: None,
             role_name: role.to_string(),
             member_name: member.to_string(),

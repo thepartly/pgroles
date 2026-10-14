@@ -137,25 +137,101 @@ impl Default for SqlContext {
 // SQL rendering
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SqlRenderError {
+    #[error("membership option changes require PostgreSQL 16+")]
+    UnsupportedMembershipOptions,
+    #[error(
+        "PG16+ membership option replacement requires complete grantor facts; re-inspect before review"
+    )]
+    UnattributedMembershipReplacement,
+    #[error("membership option change has no explicit options")]
+    EmptyMembershipOptions,
+    #[error("an absent membership tuple cannot have options revoked")]
+    InvalidMembershipExpectation,
+    #[error("membership option changes require a resolved executor/grantor binding")]
+    UnresolvedMembershipOptions,
+}
+
+fn validate_membership_options(change: &Change, ctx: &SqlContext) -> Result<(), SqlRenderError> {
+    if let Change::UpdateMemberOptions {
+        inherit,
+        admin,
+        binding,
+        grantor,
+        ..
+    } = change
+    {
+        if !ctx.supports_grant_with_options() {
+            return Err(SqlRenderError::UnsupportedMembershipOptions);
+        }
+        if inherit.is_none() && admin.is_none() {
+            return Err(SqlRenderError::EmptyMembershipOptions);
+        }
+        if binding.as_ref().is_none_or(|b| b.executor.is_empty()) {
+            return Err(SqlRenderError::UnresolvedMembershipOptions);
+        }
+        if binding.as_ref().is_some_and(|b| {
+            b.expected_edges.is_empty()
+                || match &b.expected {
+                    crate::membership_options::MembershipExpectedState::Absent => {
+                        b.expected_edges.contains_key(grantor)
+                    }
+                    crate::membership_options::MembershipExpectedState::Present { options } => {
+                        b.expected_edges.get(grantor) != Some(options)
+                    }
+                }
+        }) {
+            return Err(SqlRenderError::InvalidMembershipExpectation);
+        }
+        if binding.as_ref().is_some_and(|b| {
+            matches!(
+                b.expected,
+                crate::membership_options::MembershipExpectedState::Absent
+            ) != matches!(
+                b.set_effect,
+                crate::membership_options::MembershipSetEffect::CreateFalse
+            )
+        }) {
+            return Err(SqlRenderError::InvalidMembershipExpectation);
+        }
+        if binding.as_ref().is_some_and(|b| {
+            matches!(
+                b.expected,
+                crate::membership_options::MembershipExpectedState::Absent
+            )
+        }) && (*inherit == Some(false) || *admin == Some(false))
+        {
+            return Err(SqlRenderError::InvalidMembershipExpectation);
+        }
+    }
+    Ok(())
+}
+
 /// Render a single [`Change`] into a SQL statement (including trailing `;`).
 /// Uses default context (PG 16+).
-pub fn render(change: &Change) -> String {
-    render_statements(change).join("\n")
+pub fn render(change: &Change) -> Result<String, SqlRenderError> {
+    Ok(render_statements(change)?.join("\n"))
 }
 
 /// Render a single [`Change`] into one or more SQL statements.
 /// Uses default context (PG 16+).
-pub fn render_statements(change: &Change) -> Vec<String> {
+pub fn render_statements(change: &Change) -> Result<Vec<String>, SqlRenderError> {
     render_statements_with_context(change, &SqlContext::default())
 }
 
 /// Render a single [`Change`] into one or more SQL statements,
 /// using the given [`SqlContext`] for version-dependent syntax.
-pub fn render_statements_with_context(change: &Change, ctx: &SqlContext) -> Vec<String> {
-    render_batch_with_context(std::slice::from_ref(change), ctx)
-        .into_iter()
-        .map(|statement| statement.sql)
-        .collect()
+pub fn render_statements_with_context(
+    change: &Change,
+    ctx: &SqlContext,
+) -> Result<Vec<String>, SqlRenderError> {
+    Ok(
+        render_batch_with_context(std::slice::from_ref(change), ctx)?
+            .into_iter()
+            .map(|statement| statement.sql)
+            .collect(),
+    )
 }
 
 /// One executable statement and its safe display counterpart.
@@ -173,7 +249,25 @@ pub struct RenderedStatement {
 /// attributed to the same grantor. No changes are reordered. Every temporary
 /// role block restores the configured execution role (or the login role).
 /// Password redaction uses change metadata, never SQL text parsing.
-pub fn render_batch_with_context(changes: &[Change], ctx: &SqlContext) -> Vec<RenderedStatement> {
+pub fn render_batch_with_context(
+    changes: &[Change],
+    ctx: &SqlContext,
+) -> Result<Vec<RenderedStatement>, SqlRenderError> {
+    if ctx.supports_grant_with_options()
+        && changes.iter().any(|change| match change {
+            Change::RemoveMember {
+                role,
+                member,
+                grantor: None,
+            } => changes.iter().any(|other| {
+                matches!(other,
+            Change::AddMember { role: r, member: m, .. } if r == role && m == member)
+            }),
+            _ => false,
+        })
+    {
+        return Err(SqlRenderError::UnattributedMembershipReplacement);
+    }
     let mut result = Vec::new();
     let mut active_grantor: Option<&str> = None;
     let restore = || match &ctx.execution_role {
@@ -185,6 +279,7 @@ pub fn render_batch_with_context(changes: &[Change], ctx: &SqlContext) -> Vec<Re
         sql,
     };
     for change in changes {
+        validate_membership_options(change, ctx)?;
         // Object REVOKE acts on the current grantor's ACL entry (a superuser
         // acts as owner); GRANTED BY cannot impersonate another object grantor.
         // Membership revokes instead express attribution with GRANTED BY and
@@ -219,7 +314,7 @@ pub fn render_batch_with_context(changes: &[Change], ctx: &SqlContext) -> Vec<Re
     if active_grantor.is_some() {
         result.push(plain(restore()));
     }
-    result
+    Ok(result)
 }
 
 fn render_unscoped_statements(change: &Change, ctx: &SqlContext) -> Vec<String> {
@@ -290,6 +385,56 @@ fn render_unscoped_statements(change: &Change, ctx: &SqlContext) -> Vec<String> 
             inherit,
             admin,
         } => render_add_member(role, member, *inherit, *admin, ctx),
+        Change::UpdateMemberOptions {
+            role,
+            member,
+            grantor,
+            inherit,
+            admin,
+            binding,
+        } => {
+            let mut statements = Vec::new();
+            for (name, value) in [("ADMIN", admin), ("INHERIT", inherit)] {
+                if *value == Some(false) {
+                    statements.push(format!(
+                        "REVOKE {name} OPTION FOR {} FROM {} GRANTED BY {} RESTRICT;",
+                        quote_ident(role),
+                        quote_ident(member),
+                        quote_ident(grantor)
+                    ));
+                }
+            }
+            if *inherit == Some(true) || *admin == Some(true) {
+                let mut options = Vec::new();
+                if *inherit == Some(true) {
+                    options.push("INHERIT TRUE");
+                }
+                if *admin == Some(true) {
+                    options.push("ADMIN TRUE");
+                }
+                if binding.as_ref().is_some_and(|b| {
+                    matches!(
+                        b.set_effect,
+                        crate::membership_options::MembershipSetEffect::CreateFalse
+                    )
+                }) {
+                    // A new attribution contributes only the needed positive
+                    // options. Never duplicate a foreign SET capability.
+                    if inherit.is_none() {
+                        options.push("INHERIT FALSE");
+                    }
+                    options.push("SET FALSE");
+                }
+                statements.push(format!(
+                    "GRANT {} TO {} WITH {} GRANTED BY {};",
+                    quote_ident(role),
+                    quote_ident(member),
+                    options.join(", "),
+                    quote_ident(grantor)
+                ));
+            }
+            statements
+        }
         Change::RemoveMember {
             role,
             member,
@@ -304,17 +449,20 @@ fn render_unscoped_statements(change: &Change, ctx: &SqlContext) -> Vec<String> 
 }
 
 /// Render all changes into a single SQL script (default context, PG 16+).
-pub fn render_all(changes: &[Change]) -> String {
+pub fn render_all(changes: &[Change]) -> Result<String, SqlRenderError> {
     render_all_with_context(changes, &SqlContext::default())
 }
 
 /// Render all changes into a single SQL script with version context.
-pub fn render_all_with_context(changes: &[Change], ctx: &SqlContext) -> String {
-    render_batch_with_context(changes, ctx)
+pub fn render_all_with_context(
+    changes: &[Change],
+    ctx: &SqlContext,
+) -> Result<String, SqlRenderError> {
+    Ok(render_batch_with_context(changes, ctx)?
         .into_iter()
         .map(|statement| statement.sql)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,7 +1244,7 @@ mod tests {
                 ..RoleState::default()
             },
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(statements.len(), 1);
         assert!(statements[0].starts_with("CREATE ROLE \"blue\""));
     }
@@ -1110,7 +1258,7 @@ mod tests {
                 RoleAttribute::ResetConfig("statement_timeout".to_string()),
             ],
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec![
@@ -1129,7 +1277,7 @@ mod tests {
                 RoleAttribute::SetConfig("search_path".to_string(), "app, public".to_string()),
             ],
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec![
@@ -1150,7 +1298,7 @@ mod tests {
                 "\"$user\", public".to_string(),
             )],
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec!["ALTER ROLE \"blue\" SET \"search_path\" = '$user', 'public';".to_string()]
@@ -1166,7 +1314,7 @@ mod tests {
                 "hello, world".to_string(),
             )],
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec!["ALTER ROLE \"blue\" SET \"app.motd\" = 'hello, world';".to_string()]
@@ -1182,7 +1330,7 @@ mod tests {
                 "o'brien".to_string(),
             )],
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec!["ALTER ROLE \"blue\" SET \"app.tenant\" = 'o''brien';".to_string()]
@@ -1195,7 +1343,7 @@ mod tests {
             name: "inventory-editor".to_string(),
             state: RoleState::default(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert!(sql.starts_with("CREATE ROLE \"inventory-editor\""));
         assert!(sql.contains("NOLOGIN"));
         assert!(sql.contains("NOSUPERUSER"));
@@ -1210,7 +1358,7 @@ mod tests {
             owner: Some("inventory_owner".to_string()),
         };
         assert_eq!(
-            render(&change),
+            render(&change).unwrap(),
             "CREATE SCHEMA \"inventory\" AUTHORIZATION \"inventory_owner\";"
         );
     }
@@ -1221,7 +1369,7 @@ mod tests {
             name: "inventory".to_string(),
             owner: None,
         };
-        assert_eq!(render(&change), "CREATE SCHEMA \"inventory\";");
+        assert_eq!(render(&change).unwrap(), "CREATE SCHEMA \"inventory\";");
     }
 
     #[test]
@@ -1231,7 +1379,7 @@ mod tests {
             owner: "inventory_owner".to_string(),
         };
         assert_eq!(
-            render(&change),
+            render(&change).unwrap(),
             "ALTER SCHEMA \"inventory\" OWNER TO \"inventory_owner\";"
         );
     }
@@ -1244,7 +1392,7 @@ mod tests {
             privileges: BTreeSet::from([Privilege::Create, Privilege::Usage]),
         };
         assert_eq!(
-            render(&change),
+            render(&change).unwrap(),
             "GRANT CREATE, USAGE ON SCHEMA \"inventory\" TO \"inventory_owner\";"
         );
     }
@@ -1259,7 +1407,7 @@ mod tests {
                 ..RoleState::default()
             },
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert!(sql.contains("LOGIN"));
         assert!(sql.contains("COMMENT ON ROLE \"analytics\" IS 'Analytics readonly role';"));
     }
@@ -1270,7 +1418,7 @@ mod tests {
             name: "r1".to_string(),
             attributes: vec![RoleAttribute::Login(true), RoleAttribute::Createdb(true)],
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" LOGIN CREATEDB;");
     }
 
@@ -1279,7 +1427,10 @@ mod tests {
         let change = Change::DropRole {
             name: "old-role".to_string(),
         };
-        assert_eq!(render(&change), "DROP ROLE IF EXISTS \"old-role\";");
+        assert_eq!(
+            render(&change).unwrap(),
+            "DROP ROLE IF EXISTS \"old-role\";"
+        );
     }
 
     #[test]
@@ -1291,7 +1442,7 @@ mod tests {
             schema: None,
             name: Some("inventory".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT USAGE ON SCHEMA \"inventory\" TO \"inventory-editor\";"
@@ -1314,6 +1465,7 @@ mod tests {
                 vec!["orders".to_string(), "widgets".to_string()],
             )])),
         )
+        .unwrap()
         .join("\n");
         assert_eq!(
             sql,
@@ -1347,7 +1499,9 @@ mod tests {
 
         // The owned table is skipped; the other table's explicit drift revokes.
         assert_eq!(
-            render_statements_with_context(&change, &ctx).join("\n"),
+            render_statements_with_context(&change, &ctx)
+                .unwrap()
+                .join("\n"),
             "REVOKE UPDATE ON TABLE \"mix\".\"t_other\" FROM \"app_owner\";"
         );
 
@@ -1359,7 +1513,10 @@ mod tests {
             schema: Some("mix".to_string()),
             name: Some("*".to_string()),
         };
-        assert_eq!(render_statements_with_context(&grant, &ctx).len(), 2);
+        assert_eq!(
+            render_statements_with_context(&grant, &ctx).unwrap().len(),
+            2
+        );
     }
 
     #[test]
@@ -1385,7 +1542,9 @@ mod tests {
             )]));
 
         assert_eq!(
-            render_statements_with_context(&change, &ctx).join("\n"),
+            render_statements_with_context(&change, &ctx)
+                .unwrap()
+                .join("\n"),
             "REVOKE UPDATE ON SEQUENCE \"mix\".\"seq_other\" FROM \"seq_owner\";"
         );
     }
@@ -1413,7 +1572,9 @@ mod tests {
             )]));
 
         assert_eq!(
-            render_statements_with_context(&change, &ctx).join("\n"),
+            render_statements_with_context(&change, &ctx)
+                .unwrap()
+                .join("\n"),
             "REVOKE EXECUTE ON ROUTINE \"mix\".\"f_other\"(text) FROM \"fn_owner\";"
         );
     }
@@ -1432,7 +1593,9 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
         )]));
         assert_eq!(
-            render_statements_with_context(&seq, &ctx).join("\n"),
+            render_statements_with_context(&seq, &ctx)
+                .unwrap()
+                .join("\n"),
             "GRANT USAGE ON ALL SEQUENCES IN SCHEMA \"s\" TO \"r1\";"
         );
 
@@ -1444,7 +1607,9 @@ mod tests {
             name: Some("*".to_string()),
         };
         assert_eq!(
-            render_statements_with_context(&routine, &ctx).join("\n"),
+            render_statements_with_context(&routine, &ctx)
+                .unwrap()
+                .join("\n"),
             "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA \"s\" TO \"r1\";"
         );
     }
@@ -1459,7 +1624,9 @@ mod tests {
             schema: Some("mix".to_string()),
             name: Some("*".to_string()),
         };
-        let sql = render_statements_with_context(&change, &SqlContext::default()).join("\n");
+        let sql = render_statements_with_context(&change, &SqlContext::default())
+            .unwrap()
+            .join("\n");
         assert!(
             sql.contains("relkind IN ('S')")
                 && sql.contains("pg_get_userbyid(c.relowner) <> 'seq_owner'"),
@@ -1477,7 +1644,9 @@ mod tests {
             schema: Some("mix".to_string()),
             name: Some("*".to_string()),
         };
-        let sql = render_statements_with_context(&change, &SqlContext::default()).join("\n");
+        let sql = render_statements_with_context(&change, &SqlContext::default())
+            .unwrap()
+            .join("\n");
         assert!(
             sql.contains("pg_get_userbyid(c.relowner) <> 'app_owner'"),
             "DO-block fallback must exclude owner-owned relations: {sql}"
@@ -1493,7 +1662,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: Some("users".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "GRANT SELECT ON TABLE \"public\".\"users\" TO \"r1\";");
     }
 
@@ -1506,7 +1675,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: Some("refresh_users(integer, text)".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT EXECUTE ON ROUTINE \"public\".\"refresh_users\"(integer, text) TO \"r1\";"
@@ -1537,7 +1706,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: Some("run_something()".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "REVOKE EXECUTE ON ROUTINE \"public\".\"run_something\"() FROM \"r1\";"
@@ -1553,7 +1722,7 @@ mod tests {
             schema: Some("inventory".to_string()),
             name: Some("*".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA \"inventory\" TO \"inventory-editor\";"
@@ -1570,7 +1739,7 @@ mod tests {
             schema: Some("inventory".to_string()),
             name: Some("*".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         // Without inventory the sequence wildcard renders as a guarded
         // DO-block: per-object expansion keeps the owner guard available.
         assert!(
@@ -1592,7 +1761,7 @@ mod tests {
             grantee: "inventory-editor".into(),
             privileges: BTreeSet::from([Privilege::Select, Privilege::Insert]),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "ALTER DEFAULT PRIVILEGES FOR ROLE \"app_owner\" IN SCHEMA \"inventory\" GRANT INSERT, SELECT ON TABLES TO \"inventory-editor\";"
@@ -1610,7 +1779,7 @@ mod tests {
             grantee: "inventory-editor".into(),
             privileges: BTreeSet::from([Privilege::Execute]),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "ALTER DEFAULT PRIVILEGES FOR ROLE \"app_owner\" IN SCHEMA \"inventory\" REVOKE EXECUTE ON ROUTINES FROM \"inventory-editor\";"
@@ -1625,7 +1794,7 @@ mod tests {
             inherit: true,
             admin: false,
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT \"inventory-editor\" TO \"user@example.com\" WITH INHERIT TRUE;"
@@ -1640,7 +1809,7 @@ mod tests {
             inherit: true,
             admin: true,
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT \"inventory-editor\" TO \"admin@example.com\" WITH INHERIT TRUE, ADMIN TRUE;"
@@ -1655,7 +1824,7 @@ mod tests {
             inherit: false,
             admin: false,
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "GRANT \"inventory-editor\" TO \"noinherit@example.com\" WITH INHERIT FALSE;"
@@ -1684,13 +1853,13 @@ mod tests {
             revoke("e", "owner"),
         ];
         let ctx = SqlContext::default().with_execution_role(Some("executor".into()));
-        let batch = render_batch_with_context(&changes, &ctx);
+        let batch = render_batch_with_context(&changes, &ctx).unwrap();
         let full = batch
             .iter()
             .map(|s| s.sql.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(full, render_all_with_context(&changes, &ctx));
+        assert_eq!(full, render_all_with_context(&changes, &ctx).unwrap());
         assert_eq!(
             full.lines().collect::<Vec<_>>(),
             vec![
@@ -1722,7 +1891,7 @@ mod tests {
         assert!(!redacted.contains("secret"));
         assert!(redacted.contains("PASSWORD '[REDACTED]'"));
         assert!(full.contains("secret"));
-        assert!(render_batch_with_context(&[], &ctx).is_empty());
+        assert!(render_batch_with_context(&[], &ctx).unwrap().is_empty());
     }
 
     #[test]
@@ -1739,7 +1908,7 @@ mod tests {
             (ObjectType::Table, "app".into()),
             vec!["a".into(), "b".into()],
         )]));
-        let sql = render_all_with_context(&[change.clone(), change], &ctx);
+        let sql = render_all_with_context(&[change.clone(), change], &ctx).unwrap();
         assert_eq!(
             sql.lines()
                 .filter(|line| line.starts_with("SET ROLE"))
@@ -1760,7 +1929,7 @@ mod tests {
             name: Some("orders".to_string()),
             grantor: Some("report_owner".to_string()),
         };
-        let statements = render_statements(&change);
+        let statements = render_statements(&change).unwrap();
         assert_eq!(
             statements,
             vec![
@@ -1785,7 +1954,7 @@ mod tests {
             name: Some("orders".to_string()),
             grantor: Some("report_owner".to_string()),
         };
-        let statements = render_statements_with_context(&change, &ctx);
+        let statements = render_statements_with_context(&change, &ctx).unwrap();
         assert_eq!(
             statements,
             vec![
@@ -1803,7 +1972,7 @@ mod tests {
             member: "user@example.com".to_string(),
             grantor: Some("team_lead".to_string()),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "REVOKE \"editors\" FROM \"user@example.com\" GRANTED BY \"team_lead\";"
@@ -1824,7 +1993,9 @@ mod tests {
             member: "user@example.com".to_string(),
             grantor: Some("team_lead".to_string()),
         };
-        let sql = render_statements_with_context(&change, &ctx).join("\n");
+        let sql = render_statements_with_context(&change, &ctx)
+            .unwrap()
+            .join("\n");
         assert_eq!(sql, "REVOKE \"editors\" FROM \"user@example.com\";");
     }
 
@@ -1835,7 +2006,7 @@ mod tests {
             role: "inventory-editor".to_string(),
             member: "user@example.com".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(
             sql,
             "REVOKE \"inventory-editor\" FROM \"user@example.com\";"
@@ -1849,7 +2020,7 @@ mod tests {
             to_role: "app-owner".to_string(),
         };
         assert_eq!(
-            render(&change),
+            render(&change).unwrap(),
             "REASSIGN OWNED BY \"legacy-owner\" TO \"app-owner\";"
         );
     }
@@ -1859,7 +2030,7 @@ mod tests {
         let change = Change::DropOwned {
             role: "legacy-owner".to_string(),
         };
-        assert_eq!(render(&change), "DROP OWNED BY \"legacy-owner\";");
+        assert_eq!(render(&change).unwrap(), "DROP OWNED BY \"legacy-owner\";");
     }
 
     #[test]
@@ -1868,7 +2039,7 @@ mod tests {
             role: "legacy-owner".to_string(),
         };
         assert_eq!(
-            render(&change),
+            render(&change).unwrap(),
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'legacy-owner' AND pid <> pg_backend_pid();"
         );
     }
@@ -1879,7 +2050,10 @@ mod tests {
             name: "r1".to_string(),
             comment: Some("A test role".to_string()),
         };
-        assert_eq!(render(&change), "COMMENT ON ROLE \"r1\" IS 'A test role';");
+        assert_eq!(
+            render(&change).unwrap(),
+            "COMMENT ON ROLE \"r1\" IS 'A test role';"
+        );
     }
 
     #[test]
@@ -1888,7 +2062,7 @@ mod tests {
             name: "r1".to_string(),
             comment: None,
         };
-        assert_eq!(render(&change), "COMMENT ON ROLE \"r1\" IS NULL;");
+        assert_eq!(render(&change).unwrap(), "COMMENT ON ROLE \"r1\" IS NULL;");
     }
 
     // -----------------------------------------------------------------------
@@ -1907,7 +2081,9 @@ mod tests {
             inherit: true,
             admin: false,
         };
-        let sql = render_statements_with_context(&change, &ctx).join("\n");
+        let sql = render_statements_with_context(&change, &ctx)
+            .unwrap()
+            .join("\n");
         assert_eq!(sql, "GRANT \"editors\" TO \"user@example.com\";");
     }
 
@@ -1923,7 +2099,9 @@ mod tests {
             inherit: true,
             admin: true,
         };
-        let sql = render_statements_with_context(&change, &ctx).join("\n");
+        let sql = render_statements_with_context(&change, &ctx)
+            .unwrap()
+            .join("\n");
         assert_eq!(
             sql,
             "GRANT \"editors\" TO \"admin@example.com\" WITH ADMIN OPTION;"
@@ -1942,7 +2120,9 @@ mod tests {
             inherit: false,
             admin: true,
         };
-        let sql = render_statements_with_context(&change, &ctx).join("\n");
+        let sql = render_statements_with_context(&change, &ctx)
+            .unwrap()
+            .join("\n");
         assert_eq!(
             sql,
             "GRANT \"editors\" TO \"user@example.com\" WITH INHERIT FALSE, ADMIN TRUE;"
@@ -1964,7 +2144,7 @@ mod tests {
             name: Some("*".to_string()),
         };
 
-        let sql = render_statements_with_context(&change, &ctx);
+        let sql = render_statements_with_context(&change, &ctx).unwrap();
         assert_eq!(
             sql,
             vec![
@@ -1987,7 +2167,7 @@ mod tests {
             name: Some("*".to_string()),
         };
 
-        let sql = render_statements_with_context(&change, &SqlContext::default());
+        let sql = render_statements_with_context(&change, &SqlContext::default()).unwrap();
         assert_eq!(sql.len(), 1);
         assert!(sql[0].contains("WHERE c.relkind IN ('m')"));
         assert!(sql[0].contains("REVOKE SELECT ON TABLE %I.%I FROM %I;"));
@@ -2046,7 +2226,7 @@ memberships:
         let current = RoleGraph::default();
 
         let changes = diff(&current, &desired);
-        let sql = render_all(&changes);
+        let sql = render_all(&changes).unwrap();
 
         // Smoke test: the output should contain key SQL statements
         assert!(sql.contains("CREATE ROLE \"inventory-editor\""));
@@ -2069,7 +2249,7 @@ memberships:
             name: "app-service".to_string(),
             password: "s3cret!".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"app-service\" PASSWORD 's3cret!';");
     }
 
@@ -2079,7 +2259,7 @@ memberships:
             name: "r1".to_string(),
             password: "pass'word".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" PASSWORD 'pass''word';");
     }
 
@@ -2089,7 +2269,7 @@ memberships:
             name: "r1".to_string(),
             password: r"pass\word".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, r#"ALTER ROLE "r1" PASSWORD 'pass\word';"#);
     }
 
@@ -2099,7 +2279,7 @@ memberships:
             name: "r1".to_string(),
             password: "pa$$word".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" PASSWORD 'pa$$word';");
     }
 
@@ -2109,7 +2289,7 @@ memberships:
             name: "r1".to_string(),
             password: "pässwörd_日本語".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" PASSWORD 'pässwörd_日本語';");
     }
 
@@ -2119,7 +2299,7 @@ memberships:
             name: "r1".to_string(),
             password: "line1\nline2".to_string(),
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         // Newlines are passed through in single-quoted strings — PostgreSQL handles them.
         assert_eq!(sql, "ALTER ROLE \"r1\" PASSWORD 'line1\nline2';");
     }
@@ -2146,7 +2326,7 @@ memberships:
                 ..RoleState::default()
             },
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert!(sql.contains("LOGIN"));
         assert!(sql.contains("VALID UNTIL '2025-12-31T00:00:00Z'"));
     }
@@ -2159,7 +2339,7 @@ memberships:
                 "2025-06-01T00:00:00Z".to_string(),
             ))],
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" VALID UNTIL '2025-06-01T00:00:00Z';");
     }
 
@@ -2169,7 +2349,7 @@ memberships:
             name: "r1".to_string(),
             attributes: vec![RoleAttribute::ValidUntil(None)],
         };
-        let sql = render(&change);
+        let sql = render(&change).unwrap();
         assert_eq!(sql, "ALTER ROLE \"r1\" VALID UNTIL 'infinity';");
     }
 
@@ -2186,7 +2366,8 @@ memberships:
             object_type: ObjectType::Function,
             schema: Some("api".to_string()),
             name: Some("f()".to_string()),
-        });
+        })
+        .unwrap();
         assert_eq!(
             revoke_public,
             r#"REVOKE EXECUTE ON ROUTINE "api"."f"() FROM PUBLIC;"#
@@ -2198,7 +2379,8 @@ memberships:
             object_type: ObjectType::Schema,
             schema: None,
             name: Some("api".to_string()),
-        });
+        })
+        .unwrap();
         assert_eq!(grant_public, r#"GRANT USAGE ON SCHEMA "api" TO PUBLIC;"#);
 
         // A real role that merely looks like the keyword stays quoted.
@@ -2208,7 +2390,8 @@ memberships:
             object_type: ObjectType::Schema,
             schema: None,
             name: Some("api".to_string()),
-        });
+        })
+        .unwrap();
         assert_eq!(lowercase, r#"GRANT USAGE ON SCHEMA "api" TO "public";"#);
     }
 
@@ -2222,7 +2405,8 @@ memberships:
                 object_type: ObjectType::Function,
                 schema: Some("api".to_string()),
                 name: Some("*".to_string()),
-            }),
+            })
+            .unwrap(),
             r#"REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA "api" FROM PUBLIC;"#
         );
     }
@@ -2238,7 +2422,8 @@ memberships:
             object_type: ObjectType::Table,
             schema: Some("app".to_string()),
             name: Some("*".to_string()),
-        });
+        })
+        .unwrap();
         assert!(sql.contains("FROM PUBLIC;'"), "{sql}");
         assert!(!sql.contains("FROM %I"), "{sql}");
 
@@ -2250,7 +2435,8 @@ memberships:
             object_type: ObjectType::Table,
             schema: Some("app".to_string()),
             name: Some("*".to_string()),
-        });
+        })
+        .unwrap();
         assert!(role_sql.contains("FROM %I"), "{role_sql}");
         assert!(role_sql.contains("'reader'"), "{role_sql}");
     }
@@ -2264,7 +2450,8 @@ memberships:
                 on_type: ObjectType::Function,
                 grantee: Grantee::Public,
                 privileges: [Privilege::Execute].into_iter().collect(),
-            }),
+            })
+            .unwrap(),
             r#"ALTER DEFAULT PRIVILEGES FOR ROLE "function_owner" REVOKE EXECUTE ON ROUTINES FROM PUBLIC;"#
         );
 
@@ -2277,7 +2464,8 @@ memberships:
                 on_type: ObjectType::Function,
                 grantee: "reader".into(),
                 privileges: [Privilege::Execute].into_iter().collect(),
-            }),
+            })
+            .unwrap(),
             r#"ALTER DEFAULT PRIVILEGES FOR ROLE "app_owner" IN SCHEMA "app" GRANT EXECUTE ON ROUTINES TO "reader";"#
         );
     }
@@ -2292,6 +2480,7 @@ memberships:
                 grantee: "r".into(),
                 privileges: [Privilege::Usage].into_iter().collect(),
             })
+            .unwrap()
         };
         assert!(keyword_for(ObjectType::Type).contains("ON TYPES"));
         assert!(keyword_for(ObjectType::Schema).contains("ON SCHEMAS"));

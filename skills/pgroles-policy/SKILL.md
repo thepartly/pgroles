@@ -134,10 +134,24 @@ the provider or IaC rollout completes before pgroles apply.
 
 ## Membership SET Option
 
-pgroles manages membership `inherit` and `admin`, but not `SET`.
-Changing those options can revoke and recreate an edge with PostgreSQL's
-default `SET TRUE`. Do not use `SET FALSE` as a security boundary on a
-pgroles-managed membership; a clean diff does not verify its SET option.
+pgroles manages effective `inherit` and `admin`, without declaring SET.
+PG16+ option planning requires complete per-grantor facts. Reductions use
+`REVOKE ... OPTION FOR ... GRANTED BY ... RESTRICT` on every supplier, preserving
+membership and SET. Do not substitute `GRANT ADMIN FALSE`: its upsert bypasses
+ADMIN-revoke dependency checks. Stage explicitly reviewed onward-grant removals
+before a last-support ADMIN reduction, then replan. Never add CASCADE.
+
+Increases prefer an existing usable attribution, then create a usable attribution
+with SET FALSE and only required positive options. The actual executor must inherit
+the selected grantor's direct ADMIN authority; SET-only paths do not qualify.
+Independent foreign edges stay intact. The reviewed change binds executor,
+grantor, exact tuple/absence, every independent tuple and SET effect. Apply rechecks and requires replacement
+review after changed expectations. Authority removed by earlier operations cannot
+justify later ones. External writers can still race after final preflight, because
+GRANT is an upsert; coordinate their writes with pgroles's advisory lock or quiesce
+them during apply. Full membership absence revokes every attribution with RESTRICT.
+New memberships use PostgreSQL's SET default; a clean diff does not validate a
+declared SET boundary.
 
 ## Predefined (pg_*) Roles
 

@@ -11,7 +11,7 @@ async fn check_plan(pool: &PgPool, changes: &[Change], expected: Vec<AuthorityIs
     let issues = preflight_authority_issues(pool, changes, &RoleGraph::default()).await;
     let mut failure = None;
     'plan: for change in changes {
-        for statement in render_statements(change) {
+        for statement in render_statements(change).unwrap() {
             if let Err(error) = pool.execute(statement.as_str()).await {
                 failure = Some((statement, error));
                 break 'plan;
@@ -284,7 +284,7 @@ async fn default_owner_bootstrap_matches_postgres() {
         let issues = preflight_authority_issues(&pool, &changes, &RoleGraph::default()).await;
         let mut failure = None;
         'plan: for change in &changes {
-            for statement in render_statements(change) {
+            for statement in render_statements(change).unwrap() {
                 if let Err(error) = pool.execute(statement.as_str()).await {
                     failure = Some((statement, error));
                     break 'plan;
@@ -481,7 +481,7 @@ async fn planned_owner_grants_require_surviving_admin_authority() {
         let issues = preflight_authority_issues(&pool, &changes, &RoleGraph::default()).await;
         let mut failure = None;
         'plan: for change in &changes {
-            for statement in render_statements(change) {
+            for statement in render_statements(change).unwrap() {
                 if let Err(error) = pool.execute(statement.as_str()).await {
                     failure = Some((statement, error));
                     break 'plan;

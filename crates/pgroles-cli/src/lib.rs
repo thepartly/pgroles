@@ -156,13 +156,16 @@ pub fn inject_password_changes(
 // ---------------------------------------------------------------------------
 
 /// Format a plan as SQL statements.
-pub fn format_plan_sql(changes: &[Change]) -> String {
-    sql::render_all(changes)
+pub fn format_plan_sql(changes: &[Change]) -> Result<String> {
+    Ok(sql::render_all(changes)?)
 }
 
 /// Format a plan as SQL statements using an explicit SQL context.
-pub fn format_plan_sql_with_context(changes: &[Change], ctx: &sql::SqlContext) -> String {
-    sql::render_all_with_context(&report::redact_password_changes(changes), ctx)
+pub fn format_plan_sql_with_context(changes: &[Change], ctx: &sql::SqlContext) -> Result<String> {
+    Ok(sql::render_all_with_context(
+        &report::redact_password_changes(changes),
+        ctx,
+    )?)
 }
 
 /// Format a plan as JSON for machine consumption.
@@ -202,6 +205,7 @@ pub struct PlanSummary {
     /// database.
     pub global_default_privileges_set: usize,
     pub global_default_privileges_revoked: usize,
+    pub members_options_changed: usize,
     pub members_added: usize,
     pub members_removed: usize,
     pub passwords_set: usize,
@@ -240,6 +244,7 @@ impl PlanSummary {
                         summary.default_privileges_revoked += 1;
                     }
                 }
+                Change::UpdateMemberOptions { .. } => summary.members_options_changed += 1,
                 Change::AddMember { .. } => summary.members_added += 1,
                 Change::RemoveMember { .. } => summary.members_removed += 1,
                 Change::SetPassword { .. } => summary.passwords_set += 1,
@@ -265,6 +270,7 @@ impl PlanSummary {
             + self.default_privileges_revoked
             + self.global_default_privileges_set
             + self.global_default_privileges_revoked
+            + self.members_options_changed
             + self.members_added
             + self.members_removed
             + self.passwords_set
@@ -325,6 +331,7 @@ impl PlanSummary {
                 "GLOBAL default privilege(s) to revoke (affects every schema)",
                 self.global_default_privileges_revoked,
             ),
+            ("membership option update(s)", self.members_options_changed),
             ("membership(s) to add", self.members_added),
             ("membership(s) to remove", self.members_removed),
             ("password(s) to set", self.passwords_set),
@@ -834,7 +841,7 @@ schemas:
         let current = RoleGraph::default();
         let changes = compute_plan(&current, &validated.desired);
 
-        let sql_output = format_plan_sql(&changes);
+        let sql_output = format_plan_sql(&changes).unwrap();
         assert!(
             sql_output.contains("CREATE SCHEMA"),
             "expected CREATE SCHEMA in: {sql_output}"
@@ -1225,7 +1232,7 @@ roles:
             },
         ];
 
-        let sql = format_plan_sql_with_context(&changes, &sql::SqlContext::default());
+        let sql = format_plan_sql_with_context(&changes, &sql::SqlContext::default()).unwrap();
         assert!(sql.contains("[REDACTED]"), "got: {sql}");
         assert!(!sql.contains("super-secret"), "got: {sql}");
         assert!(sql.contains("planned-config"), "got: {sql}");

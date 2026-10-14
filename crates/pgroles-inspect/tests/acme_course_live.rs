@@ -226,7 +226,7 @@ fn cumulative_chapter_policies_preserve_the_promised_access() {
                 }
                 let yaml = isolated(&policy, &prefix);
                 let changes = plan(&pool, &yaml).await;
-                execute(&pool, &render_all(&changes)).await;
+                execute(&pool, &render_all(&changes).unwrap()).await;
                 assert_orders_access(&pool, &prefix, "alice", chapter < 3).await;
                 if chapter >= 2 {
                     assert_orders_access(&pool, &prefix, "reporting_app", true).await;

@@ -1096,7 +1096,9 @@ fn targeted_authority_coverage(
     let has_membership_change = changes.iter().any(|change| {
         matches!(
             change,
-            Change::AddMember { .. } | Change::RemoveMember { .. }
+            Change::AddMember { .. }
+                | Change::UpdateMemberOptions { .. }
+                | Change::RemoveMember { .. }
         )
     });
     let phase_checks_active = !inspector_is_superuser && pg_major_version >= 16;
@@ -1141,6 +1143,10 @@ fn targeted_authority_coverage(
                     checks_performed.insert(EvidenceCheck::PredefinedRoleMembership);
                 }
                 checked
+            }
+            Change::UpdateMemberOptions { .. } => {
+                checks_performed.insert(EvidenceCheck::GrantorReachability);
+                true
             }
             Change::RemoveMember { role, grantor, .. } => {
                 if pgroles_core::manifest::is_predefined_role(role) {
@@ -1333,6 +1339,7 @@ fn build_cli_review_artifact(input: ReviewArtifactBuildInput<'_>) -> Result<Revi
         executor_facts: ExecutorFacts {
             role: intended_executor.to_string(),
             superuser: intended_is_inspector && inspector.superuser,
+            bootstrap_role: None,
             createrole: Default::default(),
             memberships: Vec::new(),
             new_membership_set_role: Default::default(),
@@ -1364,6 +1371,9 @@ fn authority_preflight_findings(
         .map(|issue| {
             use pgroles_inspect::AuthorityIssue;
             let (code, role) = match issue {
+                AuthorityIssue::MembershipOptionsBlocked { role, .. } => {
+                    ("membership_options_blocked", Some(role.clone()))
+                }
                 AuthorityIssue::DefaultPrivilegeOwner { owner, .. }
                 | AuthorityIssue::MissingDefaultPrivilegeOwner { owner } => {
                     ("default_privilege_owner", Some(owner.clone()))
@@ -1491,7 +1501,7 @@ fn render_diff_report(
                 report.stdout = "-- No changes needed. Database is in sync with manifest.\n".into();
             } else {
                 let sql_context = sql_context.expect("SQL output requested SQL context");
-                report.stdout = format_plan_sql_with_context(changes, sql_context);
+                report.stdout = format_plan_sql_with_context(changes, sql_context)?;
                 report.stderr = format!("\n{summary}\n{drop_safety_note}");
             }
         }
@@ -1587,6 +1597,7 @@ async fn cmd_diff(
             &validated.composed.expanded.roles,
         );
         let changes = diff_password_changes(changes, &validated.composed.expanded, format)?;
+        let changes = pgroles_inspect::resolve_membership_options(&pool, changes, &current).await?;
         validate_changes_against_managed_surface(
             &changes,
             &validated.composed.managed_change_surface,
@@ -1701,6 +1712,7 @@ async fn cmd_diff(
         &validated.expanded.roles,
     );
     let changes = diff_password_changes(changes, &validated.expanded, format)?;
+    let changes = pgroles_inspect::resolve_membership_options(&pool, changes, &current).await?;
     let guards = evaluate_apply_guards(
         &pool,
         mode,
@@ -1816,6 +1828,7 @@ async fn cmd_apply(
         let resolved_passwords = resolve_passwords(&validated.composed.expanded)
             .context("failed to resolve role passwords")?;
         let changes = inject_password_changes(changes, &resolved_passwords);
+        let changes = pgroles_inspect::resolve_membership_options(&pool, changes, &current).await?;
         validate_changes_against_managed_surface(
             &changes,
             &validated.composed.managed_change_surface,
@@ -1851,7 +1864,7 @@ async fn cmd_apply(
             return Ok(());
         }
 
-        let sql_output = format_plan_sql_with_context(&changes, &sql_ctx);
+        let sql_output = format_plan_sql_with_context(&changes, &sql_ctx)?;
 
         if dry_run {
             println!("-- DRY RUN: the following SQL would be executed:\n");
@@ -1920,6 +1933,7 @@ async fn cmd_apply(
     let resolved_passwords =
         resolve_passwords(&validated.expanded).context("failed to resolve role passwords")?;
     let changes = inject_password_changes(changes, &resolved_passwords);
+    let changes = pgroles_inspect::resolve_membership_options(&pool, changes, &current).await?;
     // Validate changes against privilege level.
     let priv_warnings =
         pgroles_inspect::cloud::validate_changes_for_privilege_level(&changes, &privilege_level);
@@ -1949,7 +1963,7 @@ async fn cmd_apply(
         return Ok(());
     }
 
-    let sql_output = format_plan_sql_with_context(&changes, &sql_ctx);
+    let sql_output = format_plan_sql_with_context(&changes, &sql_ctx)?;
 
     if dry_run {
         println!("-- DRY RUN: the following SQL would be executed:\n");
@@ -2421,7 +2435,7 @@ async fn execute_changes(
         }
     };
 
-    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_ctx) {
+    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_ctx)? {
         info!(sql = %statement.redacted_sql, "executing");
         if let Err(error) = sqlx::query(&statement.sql)
             .execute(transaction.as_mut())

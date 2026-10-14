@@ -191,6 +191,7 @@ export function describeChange(change) {
       case 'set_default_privilege':
       case 'revoke_default_privilege': return defaultPrivilegeLabel(detail)
       case 'add_member': return `${text(detail.member)} to ${text(detail.role)}`
+      case 'update_member_options': return `${text(detail.member)} in ${text(detail.role)} (grantor ${text(detail.grantor)})`
       case 'remove_member': return `${text(detail.member)} from ${text(detail.role)}`
       case 'reassign_owned': return `${text(detail.from_role)} → ${text(detail.to_role)}`
       case 'drop_owned':
@@ -255,6 +256,7 @@ const reviewChangeShape = tagged('kind', {
   set_default_privilege: defaultPrivilegeTarget,
   revoke_default_privilege: defaultPrivilegeTarget,
   add_member: keys('role', 'member', 'inherit', 'admin'),
+  update_member_options: { ...keys('role', 'member', 'grantor', 'inherit', 'admin'), binding: fields({ ...keys('executor', 'setEffect', 'expectedEdges'), expected: tagged('state', { absent: {}, present: { options: fields(keys('inherit', 'admin', 'set')) } }) }) },
   remove_member: keys('role', 'member', 'grantor'),
   reassign_owned: keys('from_role', 'to_role'),
   drop_owned: keys('role'),
@@ -504,6 +506,15 @@ export function reviewArtifactImport(value) {
     return ['set_config', 'reset_config'].includes(attribute.kind) && isString(attribute.parameter)
   }
   const isScope = (scope) => isObject(scope) && (scope.type === 'global' || (scope.type === 'schema' && isString(scope.schema)))
+  const isMembershipBinding = (binding, grantor) => {
+    if (binding == null) return true
+    if (!isObject(binding) || !isString(binding.executor) || !isOneOf(binding.setEffect, ['preserve', 'createFalse']) || !isObject(binding.expected)) return false
+    if (Object.keys(binding).some((key) => !['executor', 'setEffect', 'expected', 'expectedEdges'].includes(key))) return false
+    if (!isObject(binding.expectedEdges) || Object.keys(binding.expectedEdges).length === 0 || !Object.values(binding.expectedEdges).every((options) => isObject(options) && Object.keys(options).length === 3 && ['inherit', 'admin', 'set'].every((key) => isBoolean(options[key])))) return false
+    const expected = binding.expected
+    if (expected.state === 'absent') return binding.setEffect === 'createFalse' && Object.keys(expected).length === 1 && !Object.hasOwn(binding.expectedEdges, grantor)
+    return expected.state === 'present' && binding.setEffect === 'preserve' && Object.keys(expected).every((key) => ['state', 'options'].includes(key)) && isObject(expected.options) && Object.keys(expected.options).length === 3 && ['inherit', 'admin', 'set'].every((key) => isBoolean(expected.options[key]) && binding.expectedEdges[grantor]?.[key] === expected.options[key])
+  }
   const isReviewChange = (change) => {
     if (!isObject(change) || !isString(change.kind)) return false
     const named = () => isString(change.name)
@@ -521,6 +532,7 @@ export function reviewArtifactImport(value) {
       case 'set_default_privilege':
       case 'revoke_default_privilege': return defaultPrivilege()
       case 'add_member': return isString(change.role) && isString(change.member) && isBoolean(change.inherit) && isBoolean(change.admin)
+      case 'update_member_options': return isString(change.role) && isString(change.member) && isString(change.grantor) && [change.inherit, change.admin].every((option) => option == null || isBoolean(option)) && isMembershipBinding(change.binding, change.grantor)
       case 'remove_member': return isString(change.role) && isString(change.member) && isOptionalString(change.grantor)
       case 'reassign_owned': return isString(change.from_role) && isString(change.to_role)
       case 'drop_owned':

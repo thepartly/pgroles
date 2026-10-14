@@ -58,7 +58,7 @@ async fn plan(pool: &PgPool, manifest_yaml: &str) -> (Vec<Change>, RoleGraph) {
 
 async fn apply(pool: &PgPool, changes: &[Change]) {
     for change in changes {
-        for statement in render_statements(change) {
+        for statement in render_statements(change).unwrap() {
             pool.execute(statement.as_str())
                 .await
                 .unwrap_or_else(|error| panic!("failed `{statement}`: {error}"));

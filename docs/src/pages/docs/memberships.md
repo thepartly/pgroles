@@ -45,13 +45,40 @@ Per-membership `INHERIT` requires PostgreSQL 16 or later. See
 [installation compatibility](/docs/installation#compatibility) for the
 currently supported server versions.
 
-PostgreSQL 16 also records a separate `SET` option on each membership. pgroles does not currently inspect or converge that option. A membership created by pgroles receives PostgreSQL's default `SET TRUE`. An existing `SET FALSE` edge may appear to match, but if pgroles changes `inherit` or `admin` it revokes and recreates the membership without a `SET` clause, restoring `SET TRUE`. Do not rely on `SET FALSE` remaining intact on a pgroles-managed edge. See [Membership mechanics](/docs/postgresql-role-hierarchy).
+PostgreSQL 16 also records a separate `SET` option on each membership. pgroles
+inspects and preserves it when updating existing grant options, but does not
+converge a declared SET value. A new membership receives PostgreSQL's default
+`SET TRUE`. See [Membership mechanics](/docs/postgresql-role-hierarchy).
 
 Role attributes such as `CREATEDB`, `CREATEROLE`, and `BYPASSRLS` are not inherited like object privileges. A member must normally `SET ROLE` to use an attribute on the granted role.
 
 ## Flag changes
 
-If a membership exists but the `inherit` or `admin` flags differ from the manifest, pgroles generates a `REVOKE` followed by a new `GRANT` with the correct flags. Because `apply` is transactional, that temporary remove-and-re-add sequence does not leave the database half-updated if execution fails.
+On PostgreSQL 16+, a mismatch in effective `inherit` or `admin` is planned as
+per-grantor option changes. Reductions use `REVOKE INHERIT OPTION FOR` or
+`REVOKE ADMIN OPTION FOR ... GRANTED BY ... RESTRICT` for every supplying edge.
+They retain membership and SET. `GRANT ... ADMIN FALSE` is deliberately avoided:
+PostgreSQL permits that upsert to bypass the dependency check of ADMIN revocation.
+If the last supporting ADMIN option has onward grants, preflight blocks the
+reduction. Stage explicitly reviewed dependent removals first, then replan.
+
+An increase uses an existing attribution whose direct ADMIN authority the actual
+executor can inherit, preferring its own edge. If only an absent usable attribution
+is available, pgroles creates that edge with `SET FALSE` and only the required
+positive options; foreign edges and their SET options remain unchanged. The
+reviewed change binds the executor, selected grantor, exact prior tuple or absence,
+all independently attributed tuples, and explicit SET effect. Apply checks those expectations again and requests a
+replacement review when they differ. SET-only paths cannot supply authority.
+
+An already-correct effective option leaves differing per-grantor values intact.
+Missing or inconsistent per-grantor facts fail closed; there is no PG16+ fallback
+to unattributed revoke/regrant. Full membership absence still revokes every
+recorded edge with RESTRICT. pgroles never adds CASCADE or escalates privileges.
+SQL execution remains transactional, and an authority path consumed by an earlier
+reduction cannot authorize a later operation. External catalog writers do not
+honor pgroles's advisory lock: a change after the final preflight remains a race,
+especially because GRANT can upsert a newly appearing tuple. Coordinate those
+writers with the same lock or quiesce them during apply.
 
 ## Convergent behavior
 

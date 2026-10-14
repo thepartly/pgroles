@@ -168,6 +168,7 @@ For workflows, see [operator guidance](/docs/operator), [approval](/docs/operato
 | ` status.change_summary.grants_added ` | **integer; optional.** Number of object privilege grant steps. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 | ` status.change_summary.grants_revoked ` | **integer; optional.** Number of object privilege revoke steps. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 | ` status.change_summary.members_added ` | **integer; optional.** Number of membership additions. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
+| ` status.change_summary.members_options_changed ` | **integer; optional.** Number of grantor-attributed membership option changes. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 | ` status.change_summary.members_removed ` | **integer; optional.** Number of membership removals. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 | ` status.change_summary.passwords_set ` | **integer; optional.** Number of password updates. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 | ` status.change_summary.roles_altered ` | **integer; optional.** Number of role attribute or configuration changes. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |

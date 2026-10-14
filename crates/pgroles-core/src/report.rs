@@ -373,7 +373,9 @@ fn lookup_bundle_change_owner(
                     }),
             }
         }
-        Change::AddMember { role, member, .. } | Change::RemoveMember { role, member, .. } => {
+        Change::AddMember { role, member, .. }
+        | Change::UpdateMemberOptions { role, member, .. }
+        | Change::RemoveMember { role, member, .. } => {
             let key = MembershipKey {
                 role: role.clone(),
                 member: member.clone(),
@@ -455,7 +457,9 @@ fn bundle_change_category(change: &Change) -> BundleChangeCategory {
         Change::SetDefaultPrivilege { .. } | Change::RevokeDefaultPrivilege { .. } => {
             BundleChangeCategory::DefaultPrivilege
         }
-        Change::AddMember { .. } | Change::RemoveMember { .. } => BundleChangeCategory::Membership,
+        Change::AddMember { .. }
+        | Change::UpdateMemberOptions { .. }
+        | Change::RemoveMember { .. } => BundleChangeCategory::Membership,
         Change::ReassignOwned { .. }
         | Change::DropOwned { .. }
         | Change::TerminateSessions { .. } => BundleChangeCategory::Retirement,

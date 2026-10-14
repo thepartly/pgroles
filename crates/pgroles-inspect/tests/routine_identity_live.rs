@@ -32,7 +32,7 @@ async fn apply(pool: &PgPool, desired: &RoleGraph, config: &InspectConfig) {
     let current = inspect(pool, config).await.unwrap();
     let mut transaction = pool.begin().await.unwrap();
     for change in diff(&current, desired) {
-        for statement in render_statements(&change) {
+        for statement in render_statements(&change).unwrap() {
             transaction.execute(statement.as_str()).await.unwrap();
         }
     }

@@ -107,6 +107,10 @@ enum RetryClass {
 /// Errors that can occur during reconciliation.
 #[derive(Debug, thiserror::Error)]
 pub enum ReconcileError {
+    #[error(transparent)]
+    MembershipPlanning(#[from] pgroles_inspect::MembershipPlanningError),
+    #[error(transparent)]
+    SqlRender(#[from] pgroles_core::sql::SqlRenderError),
     #[error("context error: {0}")]
     Context(#[from] Box<ContextError>),
 
@@ -631,6 +635,19 @@ fn retry_class(error: &finalizer::Error<ReconcileError>) -> RetryClass {
 
 fn retry_class_for_reconcile_error(error: &ReconcileError) -> RetryClass {
     match error {
+        ReconcileError::SqlRender(_)
+        | ReconcileError::MembershipPlanning(pgroles_inspect::MembershipPlanningError::Options(
+            _,
+        )) => RetryClass::Slow,
+        ReconcileError::MembershipPlanning(pgroles_inspect::MembershipPlanningError::Database(
+            error,
+        )) => {
+            if sqlx_error_is_non_transient(error) {
+                RetryClass::Slow
+            } else {
+                RetryClass::Transient
+            }
+        }
         ReconcileError::LockContention(_, _) => RetryClass::LockContention,
         // The watch resyncs on its own, so this clears without operator action.
         ReconcileError::RequestIndexNotReady(_) => RetryClass::Transient,
@@ -1618,6 +1635,7 @@ async fn apply_under_lock(
     if !password_changes.is_empty() {
         changes = pgroles_core::diff::inject_password_changes(changes, &password_changes);
     }
+    changes = pgroles_inspect::resolve_membership_options(pool, changes, &current).await?;
     // The apply guards, shared with candidate previews so that a preview
     // reports exactly what this apply would refuse.
     //
@@ -3245,6 +3263,7 @@ fn accumulate_summary(summary: &mut ChangeSummary, change: &pgroles_core::diff::
         Change::Revoke { .. } => summary.grants_revoked += 1,
         Change::SetDefaultPrivilege { .. } => summary.default_privileges_set += 1,
         Change::RevokeDefaultPrivilege { .. } => summary.default_privileges_revoked += 1,
+        Change::UpdateMemberOptions { .. } => summary.members_options_changed += 1,
         Change::AddMember { .. } => summary.members_added += 1,
         Change::RemoveMember { .. } => summary.members_removed += 1,
         Change::SetPassword { .. } => summary.passwords_set += 1,
@@ -3763,6 +3782,8 @@ fn detect_policy_conflict_in_list(
 impl ReconcileError {
     fn reason(&self) -> &'static str {
         match self {
+            ReconcileError::MembershipPlanning(_) => "MembershipPlanningFailed",
+            ReconcileError::SqlRender(_) => "SqlRenderFailed",
             ReconcileError::ManifestExpansion(_)
             | ReconcileError::InvalidInterval(_, _)
             | ReconcileError::InvalidSpec(_) => "InvalidSpec",

@@ -17,6 +17,8 @@ pub struct MembershipRow {
     /// Available since PostgreSQL 16. For older versions we fall back to
     /// the member role's `rolinherit` attribute.
     pub inherit_option: bool,
+    /// PG16+ SET permission; legacy memberships always permit SET ROLE.
+    pub set_option: bool,
     /// The role that granted this edge. Recorded per edge since
     /// PostgreSQL 16, where a plain REVOKE removes only the edge attributed
     /// to the revoker — removing a membership means revoking every grantor's
@@ -78,6 +80,7 @@ pub async fn fetch_predefined_memberships(
                 mr.rolname AS member_name,
                 m.admin_option,
                 m.inherit_option,
+                m.set_option,
                 g.rolname AS grantor
             FROM pg_auth_members m
             JOIN pg_roles gr ON gr.oid = m.roleid
@@ -99,6 +102,7 @@ pub async fn fetch_predefined_memberships(
                 mr.rolname AS member_name,
                 m.admin_option,
                 mr.rolinherit AS inherit_option,
+                true AS set_option,
                 NULL::text AS grantor
             FROM pg_auth_members m
             JOIN pg_roles gr ON gr.oid = m.roleid
@@ -170,6 +174,7 @@ async fn fetch_memberships_pg16(
                     mr.rolname AS member_name,
                     m.admin_option,
                     m.inherit_option,
+                    m.set_option,
                     g.rolname AS grantor
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
@@ -191,6 +196,7 @@ async fn fetch_memberships_pg16(
                     mr.rolname AS member_name,
                     m.admin_option,
                     m.inherit_option,
+                    m.set_option,
                     g.rolname AS grantor
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
@@ -221,6 +227,7 @@ async fn fetch_memberships_legacy(
                     mr.rolname AS member_name,
                     m.admin_option,
                     mr.rolinherit AS inherit_option,
+                    true AS set_option,
                     NULL::text AS grantor
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
@@ -241,6 +248,7 @@ async fn fetch_memberships_legacy(
                     mr.rolname AS member_name,
                     m.admin_option,
                     mr.rolinherit AS inherit_option,
+                    true AS set_option,
                     NULL::text AS grantor
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
@@ -267,6 +275,7 @@ mod tests {
     fn membership_row_maps_to_membership_edge() {
         let row = MembershipRow {
             grantor: None,
+            set_option: true,
             role_name: "editors".to_string(),
             member_name: "alice@example.com".to_string(),
             admin_option: true,

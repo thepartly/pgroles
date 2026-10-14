@@ -352,3 +352,26 @@ test('importer closed key sets match the generated review artifact schema', { sk
   }
   compare(REVIEW_ARTIFACT_SHAPE, schema, '$')
 })
+
+
+test('membership option bindings keep grantor tuple and SET expectations coherent', { skip: fixtureSkip }, () => {
+  const artifact = copy()
+  artifact.recorded.changes[0].change = {
+    kind: 'update_member_options', role: 'reader', member: 'member', grantor: 'executor',
+    inherit: true, admin: null,
+    binding: { executor: 'executor', setEffect: 'createFalse', expected: { state: 'absent' },
+      expectedEdges: { provider: { inherit: false, admin: false, set: true } } },
+  }
+  assert.equal(reviewArtifactImport(artifact), artifact)
+  for (const mutate of [
+    (b) => { b.setEffect = 'preserve' },
+    (b) => { b.expectedEdges.executor = { inherit: false, admin: false, set: true } },
+    (b) => { b.expectedEdges.provider.secret = 'hidden' },
+    (b) => { b.expectedEdges.provider.set = 'false' },
+    (b) => { b.expectedEdges = {} },
+  ]) {
+    const invalid = structuredClone(artifact)
+    mutate(invalid.recorded.changes[0].change.binding)
+    assert.throws(() => reviewArtifactImport(invalid))
+  }
+})

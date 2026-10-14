@@ -694,7 +694,7 @@ pub async fn create_or_update_plan(
     //    artifact only — never an execution payload, and never the approval
     //    identity.
     let render_started = std::time::Instant::now();
-    let full_sql = render_full_sql(changes, sql_context);
+    let full_sql = render_full_sql(changes, sql_context)?;
 
     // 2. Compute the approval identity: a canonical digest of the typed
     //    effects. Deduplication and approval both key off this rather than the
@@ -717,7 +717,7 @@ pub async fn create_or_update_plan(
     let sql_statement_count = full_sql.lines().filter(|l| !l.trim().is_empty()).count() as i64;
 
     // 5. Render redacted SQL for display (passwords masked).
-    let redacted_sql = render_redacted_sql(changes, sql_context);
+    let redacted_sql = render_redacted_sql(changes, sql_context)?;
     tracing::debug!(
         phase = "plan_render",
         elapsed_ms = render_started.elapsed().as_secs_f64() * 1000.0,
@@ -1727,7 +1727,7 @@ pub(crate) async fn execute_changes_in_transaction(
     let mut transaction = pool.begin().await?;
     let mut statements_executed = 0usize;
 
-    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_context) {
+    for statement in pgroles_core::sql::render_batch_with_context(changes, sql_context)? {
         tracing::debug!(sql = %statement.redacted_sql, "executing");
         sqlx::query(&statement.sql)
             .execute(transaction.as_mut())
@@ -2127,7 +2127,7 @@ async fn delete_configmap_best_effort(client: &Client, namespace: &str, configma
 pub(crate) fn render_full_sql(
     changes: &[pgroles_core::diff::Change],
     sql_context: &pgroles_core::sql::SqlContext,
-) -> String {
+) -> Result<String, pgroles_core::sql::SqlRenderError> {
     pgroles_core::sql::render_all_with_context(changes, sql_context)
 }
 
@@ -2135,12 +2135,14 @@ pub(crate) fn render_full_sql(
 fn render_redacted_sql(
     changes: &[pgroles_core::diff::Change],
     sql_context: &pgroles_core::sql::SqlContext,
-) -> String {
-    pgroles_core::sql::render_batch_with_context(changes, sql_context)
-        .into_iter()
-        .map(|statement| statement.redacted_sql)
-        .collect::<Vec<_>>()
-        .join("\n")
+) -> Result<String, pgroles_core::sql::SqlRenderError> {
+    Ok(
+        pgroles_core::sql::render_batch_with_context(changes, sql_context)?
+            .into_iter()
+            .map(|statement| statement.redacted_sql)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Compute the canonical approval-effect digest for a set of changes.
@@ -4749,8 +4751,8 @@ mod tests {
         );
         let changes = vec![revoke("a"), revoke("b")];
         assert_eq!(
-            render_full_sql(&changes, &ctx),
-            render_redacted_sql(&changes, &ctx)
+            render_full_sql(&changes, &ctx).unwrap(),
+            render_redacted_sql(&changes, &ctx).unwrap()
         );
         assert_eq!(
             execute_changes_in_transaction(&pool, &changes, &ctx)
@@ -4792,7 +4794,7 @@ mod tests {
             },
         ];
         let ctx = pgroles_core::sql::SqlContext::default();
-        let redacted = render_redacted_sql(&changes, &ctx);
+        let redacted = render_redacted_sql(&changes, &ctx).unwrap();
 
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("super_secret"));
@@ -4808,7 +4810,7 @@ mod tests {
             password: "my_secret_pw".to_string(),
         }];
         let ctx = pgroles_core::sql::SqlContext::default();
-        let redacted = render_redacted_sql(&changes, &ctx);
+        let redacted = render_redacted_sql(&changes, &ctx).unwrap();
 
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("my_secret_pw"));
@@ -4821,7 +4823,7 @@ mod tests {
             password: "super_secret".to_string(),
         }];
         let ctx = pgroles_core::sql::SqlContext::default();
-        let full = render_full_sql(&changes, &ctx);
+        let full = render_full_sql(&changes, &ctx).unwrap();
 
         assert!(full.contains("super_secret") || full.contains("SCRAM-SHA-256"));
     }
@@ -4972,14 +4974,14 @@ mod tests {
         // which is exactly why it is no longer the approval identity.
         let ctx = pgroles_core::sql::SqlContext::default();
         assert_ne!(
-            compute_sql_hash(&render_full_sql(
-                &[set_password("app", "SCRAM-SHA-256$4096:aaa$sA:vA")],
-                &ctx
-            )),
-            compute_sql_hash(&render_full_sql(
-                &[set_password("app", "SCRAM-SHA-256$4096:bbb$sB:vB")],
-                &ctx
-            )),
+            compute_sql_hash(
+                &render_full_sql(&[set_password("app", "SCRAM-SHA-256$4096:aaa$sA:vA")], &ctx)
+                    .unwrap()
+            ),
+            compute_sql_hash(
+                &render_full_sql(&[set_password("app", "SCRAM-SHA-256$4096:bbb$sB:vB")], &ctx)
+                    .unwrap()
+            ),
         );
     }
 

@@ -320,6 +320,7 @@ fn gen_graph(rng: &mut Rng, allow_none: bool, messy: bool) -> RoleGraph {
         // grantor-less revokes, which is the semantics this pure harness
         // models.
         membership_edge_grantors: BTreeMap::new(),
+        membership_edge_options: BTreeMap::new(),
         grant_entry_grantors: BTreeMap::new(),
     }
 }
@@ -749,7 +750,8 @@ fn apply_changes(graph: &RoleGraph, changes: &[Change]) -> RoleGraph {
                     .retain(|e| !(e.role == *role && e.member == *member));
             }
             // Variants the diff engine never emits — presence indicates a bug.
-            Change::SetPassword { .. }
+            Change::UpdateMemberOptions { .. }
+            | Change::SetPassword { .. }
             | Change::ReassignOwned { .. }
             | Change::DropOwned { .. }
             | Change::TerminateSessions { .. } => {

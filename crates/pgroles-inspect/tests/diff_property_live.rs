@@ -128,6 +128,29 @@ async fn execute_sql(pool: &PgPool, statement: &str, seed: u64, phase: &str) {
 }
 
 async fn execute_changes(pool: &PgPool, changes: &[Change], seed: u64, phase: &str) {
+    let changes = if changes
+        .iter()
+        .any(|c| matches!(c, Change::UpdateMemberOptions { .. }))
+    {
+        let roles: BTreeSet<String> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::UpdateMemberOptions { role, .. } => Some(role.clone()),
+                _ => None,
+            })
+            .collect();
+        let expanded = pgroles_core::authoring::prepare_policy("{}")
+            .unwrap()
+            .expanded;
+        let mut config = InspectConfig::from_expanded(&expanded, false);
+        config.managed_roles = roles.into_iter().collect();
+        let catalog = inspect(pool, &config).await.unwrap();
+        pgroles_inspect::resolve_membership_options(pool, changes.to_vec(), &catalog)
+            .await
+            .unwrap()
+    } else {
+        changes.to_vec()
+    };
     // One connection for the whole change list, mirroring production's
     // single-transaction apply: grantor-targeted revokes render as
     // `SET ROLE grantor; REVOKE ...; RESET ROLE;`, and running those
@@ -137,8 +160,8 @@ async fn execute_changes(pool: &PgPool, changes: &[Change], seed: u64, phase: &s
         .acquire()
         .await
         .unwrap_or_else(|error| panic!("seed {seed} [{phase}]: failed to acquire: {error}"));
-    for change in changes {
-        for statement in render_statements(change) {
+    for change in &changes {
+        for statement in render_statements(change).unwrap() {
             conn.execute(statement.as_str())
                 .await
                 .unwrap_or_else(|error| {
@@ -1013,6 +1036,47 @@ fn apply_changes(graph: &RoleGraph, changes: &[Change]) -> RoleGraph {
                     member: member.clone(),
                     inherit: *inherit,
                     admin: *admin,
+                });
+            }
+            Change::UpdateMemberOptions {
+                role,
+                member,
+                grantor,
+                inherit,
+                admin,
+                ..
+            } => {
+                let key = (role.clone(), member.clone());
+                let options = g
+                    .membership_edge_options
+                    .get_mut(&key)
+                    .expect("catalog option facts");
+                let edge = options.entry(grantor.clone()).or_insert(
+                    pgroles_core::model::MembershipOptions {
+                        inherit: false,
+                        admin: false,
+                        set: false,
+                    },
+                );
+                g.membership_edge_grantors
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(grantor.clone());
+                if let Some(value) = inherit {
+                    edge.inherit = *value;
+                }
+                if let Some(value) = admin {
+                    edge.admin = *value;
+                }
+                let inherit = options.values().any(|edge| edge.inherit);
+                let admin = options.values().any(|edge| edge.admin);
+                g.memberships
+                    .retain(|e| !(e.role == *role && e.member == *member));
+                g.memberships.insert(MembershipEdge {
+                    role: role.clone(),
+                    member: member.clone(),
+                    inherit,
+                    admin,
                 });
             }
             Change::RemoveMember { role, member, .. } => {

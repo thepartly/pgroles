@@ -232,7 +232,9 @@ pub fn change_pairs(change: &Change) -> Vec<EffectPair> {
                 EffectPair::new(owner, object),
             ]
         }
-        Change::AddMember { role, member, .. } | Change::RemoveMember { role, member, .. } => {
+        Change::AddMember { role, member, .. }
+        | Change::UpdateMemberOptions { role, member, .. }
+        | Change::RemoveMember { role, member, .. } => {
             vec![EffectPair::new(member, EffectObject::Role(role.clone()))]
         }
     }

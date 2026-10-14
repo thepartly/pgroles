@@ -745,6 +745,8 @@ pub enum ExplorationOmissionReason {
 
 #[derive(Debug, Error)]
 pub enum ReviewArtifactError {
+    #[error(transparent)]
+    SqlRender(#[from] crate::sql::SqlRenderError),
     #[error("could not serialize review artifact fingerprint: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("review artifact has {actual} bytes, which exceeds the limit of {limit}")]
@@ -816,7 +818,7 @@ pub fn build_review_artifact(
         .collect::<Vec<_>>();
     let sql_preview = if sensitive_change_indices.is_empty() {
         SqlPreview::Available {
-            sql: crate::sql::render_all_with_context(input.changes, input.sql_context),
+            sql: crate::sql::render_all_with_context(input.changes, input.sql_context)?,
         }
     } else {
         SqlPreview::Omitted {
@@ -1152,6 +1154,14 @@ pub enum ReviewChange {
         inherit: bool,
         admin: bool,
     },
+    UpdateMemberOptions {
+        role: String,
+        member: String,
+        grantor: String,
+        inherit: Option<bool>,
+        admin: Option<bool>,
+        binding: Option<crate::membership_options::MembershipOptionBinding>,
+    },
     RemoveMember {
         role: String,
         member: String,
@@ -1339,6 +1349,21 @@ impl ReviewChange {
                 inherit: *inherit,
                 admin: *admin,
             },
+            Change::UpdateMemberOptions {
+                role,
+                member,
+                grantor,
+                inherit,
+                admin,
+                binding,
+            } => Self::UpdateMemberOptions {
+                role: role.clone(),
+                member: member.clone(),
+                grantor: grantor.clone(),
+                inherit: *inherit,
+                admin: *admin,
+                binding: binding.clone(),
+            },
             Change::RemoveMember {
                 role,
                 member,
@@ -1415,6 +1440,7 @@ mod tests {
 
     fn executor(role: &str) -> ExecutorFacts {
         ExecutorFacts {
+            bootstrap_role: None,
             role: role.into(),
             superuser: false,
             createrole: Default::default(),

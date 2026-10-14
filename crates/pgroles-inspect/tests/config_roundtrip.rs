@@ -144,7 +144,10 @@ memberships:
         let current = inspect(&pool, &config).await.expect("inspect failed");
         let changes = diff(&current, &desired);
         assert!(!changes.is_empty(), "fresh plan should not be empty");
-        let statements: Vec<String> = changes.iter().flat_map(render_statements).collect();
+        let statements: Vec<String> = changes
+            .iter()
+            .flat_map(|change| render_statements(change).unwrap())
+            .collect();
         assert!(
             statements
                 .iter()
@@ -188,7 +191,10 @@ memberships:
 
         let current = inspect(&pool, &config).await.expect("inspect failed");
         let changes = diff(&current, &desired);
-        let statements: Vec<String> = changes.iter().flat_map(render_statements).collect();
+        let statements: Vec<String> = changes
+            .iter()
+            .flat_map(|change| render_statements(change).unwrap())
+            .collect();
         assert!(
             statements
                 .iter()
@@ -274,7 +280,10 @@ profiles:
                 .any(|c| matches!(c, Change::CreateSchema { name, .. } if name == &schema)),
             "expected a CreateSchema change, got: {changes:?}"
         );
-        let statements: Vec<String> = changes.iter().flat_map(render_statements).collect();
+        let statements: Vec<String> = changes
+            .iter()
+            .flat_map(|change| render_statements(change).unwrap())
+            .collect();
         assert!(
             statements
                 .iter()

@@ -225,6 +225,9 @@ pub struct SnapshotMembership {
     /// Live edge grantors, when PostgreSQL 16+ inspection provides them.
     #[serde(default)]
     pub grantors: BTreeSet<String>,
+    /// Complete options for each independent catalog grant, when supplied.
+    #[serde(default)]
+    pub grantor_options: BTreeMap<String, crate::model::MembershipOptions>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +247,10 @@ pub struct ExecutorFacts {
     /// `superuser` attribute for the executor role.
     #[serde(default)]
     pub superuser: bool,
+    /// Catalog-proven name of the bootstrap superuser (OID 10), when known.
+    /// SUPERUSER alone does not identify the attribution PostgreSQL uses.
+    #[serde(default)]
+    pub bootstrap_role: Option<String>,
     /// Whether the executor holds CREATEROLE. `allowed` and `denied` win over
     /// the snapshot; `unknown` defers to the snapshot's `createrole`
     /// attribute for the executor role. Only consulted before PostgreSQL 16.
@@ -364,6 +371,8 @@ pub enum FingerprintKind {
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
+    #[error(transparent)]
+    MembershipOptions(#[from] crate::membership_options::MembershipOptionsError),
     #[error("unsupported explorer schema version: {0}")]
     UnsupportedSchemaVersion(String),
     #[error(transparent)]
@@ -409,6 +418,16 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     let desired = prepared.desired;
     let graph = request.current.into_graph();
     let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
+    let changes = crate::membership_options::resolve_membership_options(
+        changes,
+        &graph,
+        &analysis_membership_authority(
+            &graph,
+            &request.executor,
+            pg_major_version,
+            authority_graph_complete,
+        ),
+    )?;
     let analysis = analyze_changes_with_options(
         graph,
         &changes,
@@ -594,6 +613,45 @@ fn simulate(
     )
 }
 
+fn analysis_membership_authority(
+    graph: &RoleGraph,
+    executor: &ExecutorFacts,
+    pg_major_version: u16,
+    complete: bool,
+) -> crate::membership_options::MembershipAuthority {
+    let (_, usage, admins) = initial_edge_facts(graph, executor, pg_major_version);
+    let attributes = ExecutorAttributes::initial(graph, executor);
+    let reachable = reachability(
+        graph,
+        &usage,
+        &executor.role,
+        attributes.superuser,
+        complete,
+    );
+    let mut usable_grantors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for ((role, holder), admin) in admins {
+        if admin == SetRoleCapability::Allowed
+            && reachable.get(&holder) == Some(&ReachabilityStatus::Reachable)
+        {
+            usable_grantors.entry(role).or_default().insert(holder);
+        }
+    }
+    if attributes.superuser
+        && let Some(bootstrap) = &executor.bootstrap_role
+    {
+        for edge in &graph.memberships {
+            usable_grantors
+                .entry(edge.role.clone())
+                .or_default()
+                .insert(bootstrap.clone());
+        }
+    }
+    crate::membership_options::MembershipAuthority {
+        executor: executor.role.clone(),
+        usable_grantors,
+    }
+}
+
 fn reachability_list(statuses: &BTreeMap<String, ReachabilityStatus>) -> Vec<RoleReachability> {
     statuses
         .iter()
@@ -648,8 +706,22 @@ fn initial_edge_facts(
     let default_set_role = membership_set_role_default(pg_major_version);
     for edge in &graph.memberships {
         let key = (edge.role.clone(), edge.member.clone());
-        // Snapshot memberships carry no PG16 SET option fact.
-        set_role.insert(key.clone(), default_set_role);
+        // Live inspection may carry complete per-grantor SET facts. A
+        // supplied snapshot without those facts remains explicitly unknown.
+        let inspected_set = graph
+            .membership_edge_options
+            .get(&key)
+            .filter(|options| {
+                graph
+                    .membership_edge_grantors
+                    .get(&key)
+                    .is_some_and(|grantors| {
+                        !grantors.is_empty() && grantors.iter().eq(options.keys())
+                    })
+            })
+            .map(|options| capability(options.values().any(|edge| edge.set)))
+            .unwrap_or(default_set_role);
+        set_role.insert(key.clone(), inspected_set);
         // Duplicate edges for one pair aggregate like inspection does: an
         // option applies if any edge carries it.
         let inherit = usage
@@ -729,6 +801,7 @@ fn affects_reachability(change: &Change) -> bool {
     match change {
         Change::CreateRole { .. }
         | Change::DropRole { .. }
+        | Change::UpdateMemberOptions { .. }
         | Change::AddMember { .. }
         | Change::RemoveMember { .. } => true,
         Change::AlterRole { attributes, .. } => attributes.iter().any(|attribute| {
@@ -945,6 +1018,7 @@ impl ExplorerSnapshot {
         let mut effective_memberships: BTreeMap<(String, String), MembershipEdge> = BTreeMap::new();
         let mut membership_edge_grantors: BTreeMap<(String, String), BTreeSet<String>> =
             BTreeMap::new();
+        let mut membership_edge_options = BTreeMap::new();
         for item in self.memberships {
             let key = (item.role.clone(), item.member.clone());
             let edge = effective_memberships
@@ -957,6 +1031,12 @@ impl ExplorerSnapshot {
                 });
             edge.inherit |= item.inherit;
             edge.admin |= item.admin;
+            if !item.grantor_options.is_empty() {
+                membership_edge_options
+                    .entry(key.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .extend(item.grantor_options);
+            }
             if !item.grantors.is_empty() {
                 membership_edge_grantors
                     .entry(key)
@@ -983,6 +1063,7 @@ impl ExplorerSnapshot {
             memberships,
             inherent_grants,
             membership_edge_grantors,
+            membership_edge_options,
             grant_entry_grantors,
             ..RoleGraph::default()
         }
@@ -1013,6 +1094,13 @@ fn phase_for(change: &Change) -> PlanPhase {
         | Change::EnsureSchemaOwnerPrivileges { .. }
         | Change::SetPassword { .. } => PlanPhase::Alter,
         Change::Grant { .. } | Change::SetDefaultPrivilege { .. } => PlanPhase::Grant,
+        Change::UpdateMemberOptions { inherit, admin, .. } => {
+            if *inherit == Some(false) || *admin == Some(false) {
+                PlanPhase::MembershipRemove
+            } else {
+                PlanPhase::MembershipAdd
+            }
+        }
         Change::RemoveMember { .. } => PlanPhase::MembershipRemove,
         Change::AddMember { .. } => PlanPhase::MembershipAdd,
         Change::Revoke { .. } => PlanPhase::Revoke,
@@ -1247,7 +1335,8 @@ fn analyze_required_authority(
             grantor: Some(grantor),
             ..
         } => Some((grantor, authority.set_reachable, "SET ROLE")),
-        Change::RemoveMember {
+        Change::UpdateMemberOptions { grantor, .. }
+        | Change::RemoveMember {
             grantor: Some(grantor),
             ..
         } => Some((grantor, authority.usage_reachable, "USAGE")),
@@ -1287,7 +1376,9 @@ fn analyze_required_authority(
         }
     }
     if !authority.is_superuser
-        && let Change::AddMember { role, .. } | Change::RemoveMember { role, .. } = change
+        && let Change::AddMember { role, .. }
+        | Change::UpdateMemberOptions { role, .. }
+        | Change::RemoveMember { role, .. } = change
         && authority
             .graph
             .roles
@@ -1306,6 +1397,7 @@ fn analyze_required_authority(
         ));
     } else if !authority.is_superuser
         && let Change::AddMember { role, .. }
+        | Change::UpdateMemberOptions { role, .. }
         | Change::RemoveMember {
             role,
             grantor: None,
@@ -1434,6 +1526,7 @@ fn change_kind(change: &Change) -> &'static str {
         Change::SetDefaultPrivilege { .. } => "SetDefaultPrivilege",
         Change::RevokeDefaultPrivilege { .. } => "RevokeDefaultPrivilege",
         Change::AddMember { .. } => "AddMember",
+        Change::UpdateMemberOptions { .. } => "UpdateMemberOptions",
         Change::RemoveMember { .. } => "RemoveMember",
         Change::ReassignOwned { .. } => "ReassignOwned",
         Change::DropOwned { .. } => "DropOwned",
@@ -1629,6 +1722,7 @@ fn apply_change(
             member,
             inherit,
             admin,
+            ..
         } => {
             graph.memberships.insert(MembershipEdge {
                 role: role.clone(),
@@ -1663,6 +1757,115 @@ fn apply_change(
                     SetRoleCapability::Denied
                 },
             );
+        }
+        Change::UpdateMemberOptions {
+            role,
+            member,
+            grantor,
+            inherit,
+            admin,
+            binding,
+        } => {
+            let key = (role.clone(), member.clone());
+            let existing_complete = graph
+                .membership_edge_grantors
+                .get(&key)
+                .zip(graph.membership_edge_options.get(&key))
+                .is_some_and(|(gs, os)| !gs.is_empty() && gs.iter().eq(os.keys()));
+            if existing_complete
+                && binding.as_ref().is_some_and(|b| {
+                    matches!(
+                        b.expected,
+                        crate::membership_options::MembershipExpectedState::Absent
+                    )
+                })
+            {
+                let options = graph
+                    .membership_edge_options
+                    .get_mut(&key)
+                    .expect("complete options");
+                if !options.contains_key(grantor) {
+                    options.insert(
+                        grantor.clone(),
+                        crate::model::MembershipOptions {
+                            inherit: false,
+                            admin: false,
+                            set: false,
+                        },
+                    );
+                    graph
+                        .membership_edge_grantors
+                        .get_mut(&key)
+                        .expect("complete grantors")
+                        .insert(grantor.clone());
+                }
+            }
+            let complete = graph
+                .membership_edge_grantors
+                .get(&key)
+                .is_some_and(|grantors| {
+                    !grantors.is_empty()
+                        && graph
+                            .membership_edge_options
+                            .get(&key)
+                            .is_some_and(|options| {
+                                grantors.iter().eq(options.keys()) && options.contains_key(grantor)
+                            })
+                });
+            if let Some(options) = graph.membership_edge_options.get_mut(&key) {
+                if let Some(edge) = options.get_mut(grantor) {
+                    if let Some(value) = inherit {
+                        edge.inherit = *value;
+                    }
+                    if let Some(value) = admin {
+                        edge.admin = *value;
+                    }
+                }
+                if !complete {
+                    if inherit.is_some() {
+                        usage.insert(key.clone(), SetRoleCapability::Unknown);
+                    }
+                    if admin.is_some() {
+                        admin_options.insert(key, SetRoleCapability::Unknown);
+                    }
+                    return;
+                }
+                let new_inherit = options.values().any(|edge| edge.inherit);
+                let new_admin = options.values().any(|edge| edge.admin);
+                graph
+                    .memberships
+                    .retain(|edge| edge.role != *role || edge.member != *member);
+                graph.memberships.insert(MembershipEdge {
+                    role: role.clone(),
+                    member: member.clone(),
+                    inherit: new_inherit,
+                    admin: new_admin,
+                });
+                usage.insert(
+                    key.clone(),
+                    if new_inherit {
+                        SetRoleCapability::Allowed
+                    } else {
+                        SetRoleCapability::Denied
+                    },
+                );
+                admin_options.insert(
+                    key,
+                    if new_admin {
+                        SetRoleCapability::Allowed
+                    } else {
+                        SetRoleCapability::Denied
+                    },
+                );
+            } else {
+                // No per-grantor facts: do not claim the effective result.
+                if inherit.is_some() {
+                    usage.insert(key.clone(), SetRoleCapability::Unknown);
+                }
+                if admin.is_some() {
+                    admin_options.insert(key, SetRoleCapability::Unknown);
+                }
+            }
         }
         Change::RemoveMember {
             role,
@@ -1784,6 +1987,7 @@ mod tests {
             desired_yaml: "roles: []\n".into(),
             mode,
             executor: ExecutorFacts {
+                bootstrap_role: None,
                 role: "deployer".into(),
                 superuser: false,
                 createrole: SetRoleCapability::Unknown,
@@ -1809,6 +2013,7 @@ mod tests {
             input.current.roles.insert("obsolete".into(), role());
             input.current.roles.insert("deployer".into(), role());
             input.current.memberships.push(SnapshotMembership {
+                grantor_options: BTreeMap::new(),
                 role: "obsolete".into(),
                 member: "deployer".into(),
                 inherit: true,
@@ -1846,6 +2051,7 @@ mod tests {
         input.current.roles.insert("deployer".into(), role());
         input.current.roles.insert("owner".into(), role());
         input.current.memberships.push(SnapshotMembership {
+            grantor_options: BTreeMap::new(),
             role: "owner".into(),
             member: "deployer".into(),
             inherit: true,
@@ -1920,6 +2126,7 @@ mod tests {
             // A snapshot membership without SET facts, and an executor fact
             // whose SET option is unknown for an edge the snapshot lacks.
             input.current.memberships.push(SnapshotMembership {
+                grantor_options: BTreeMap::new(),
                 role: "owner".into(),
                 member: "deployer".into(),
                 inherit: true,
@@ -2514,6 +2721,7 @@ mod tests {
             input.current.roles.insert(name.into(), role());
         }
         input.current.memberships.push(SnapshotMembership {
+            grantor_options: BTreeMap::new(),
             role: "target".into(),
             member: "deployer".into(),
             inherit: false,
@@ -2582,6 +2790,7 @@ mod tests {
             input.current.roles.insert(name.into(), role());
         }
         input.current.memberships.push(SnapshotMembership {
+            grantor_options: BTreeMap::new(),
             role: "target".into(),
             member: "deployer".into(),
             inherit: false,
@@ -2608,6 +2817,7 @@ mod tests {
 
     fn membership(role: &str, member: &str, inherit: bool, admin: bool) -> SnapshotMembership {
         SnapshotMembership {
+            grantor_options: BTreeMap::new(),
             role: role.into(),
             member: member.into(),
             inherit,

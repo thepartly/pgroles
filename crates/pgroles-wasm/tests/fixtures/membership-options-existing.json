@@ -1,0 +1,99 @@
+{
+  "description": "A positive option change uses ordinary direct ADMIN, preserves foreign SET and binds existing own SET.",
+  "request": {
+    "schema_version": "pgroles.explorer.v1",
+    "current": {
+      "roles": {
+        "executor": {},
+        "reader": {},
+        "member": {},
+        "provider": {}
+      },
+      "memberships": [
+        {
+          "role": "reader",
+          "member": "executor",
+          "inherit": false,
+          "admin": true,
+          "grantors": [
+            "postgres"
+          ],
+          "grantor_options": {
+            "postgres": {
+              "inherit": false,
+              "admin": true,
+              "set": false
+            }
+          }
+        },
+        {
+          "role": "reader",
+          "member": "member",
+          "inherit": false,
+          "admin": false,
+          "grantors": [
+            "provider",
+            "executor"
+          ],
+          "grantor_options": {
+            "provider": {
+              "inherit": false,
+              "admin": false,
+              "set": true
+            },
+            "executor": {
+              "inherit": false,
+              "admin": false,
+              "set": true
+            }
+          }
+        }
+      ]
+    },
+    "desired_yaml": "roles:\n  - {name: executor, external: true}\n  - {name: reader, external: true}\n  - {name: member, external: true}\n  - {name: provider, external: true}\nmemberships:\n  - role: reader\n    members: [{name: executor, inherit: false, admin: true}, {name: member, inherit: true}]\n",
+    "mode": "authoritative",
+    "executor": {
+      "role": "executor",
+      "superuser": false
+    }
+  },
+  "expected": {
+    "changes": [
+      {
+        "kind": "UpdateMemberOptions",
+        "role": "reader",
+        "member": "member",
+        "grantor": "executor",
+        "inherit": true,
+        "binding": {
+          "executor": "executor",
+          "setEffect": "preserve",
+          "expectedEdges": {
+            "provider": {
+              "inherit": false,
+              "admin": false,
+              "set": true
+            },
+            "executor": {
+              "inherit": false,
+              "admin": false,
+              "set": true
+            }
+          },
+          "expected": {
+            "state": "present",
+            "options": {
+              "inherit": false,
+              "admin": false,
+              "set": true
+            }
+          }
+        }
+      }
+    ],
+    "absentChanges": [
+      "RemoveMember",
+      "AddMember"
+    ]
+  }
+}

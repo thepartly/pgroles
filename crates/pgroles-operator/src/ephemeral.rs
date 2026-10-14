@@ -2117,14 +2117,15 @@ async fn create_scoped_plan(
             last_transition_time: Some(crate::crd::now_rfc3339()),
         }],
         change_summary: Some(scoped_change_summary(execution.changes)),
-        sql_inline: Some(pgroles_core::sql::render_all_with_context(
-            execution.changes,
-            execution.sql_context,
-        )),
+        sql_inline: Some(
+            pgroles_core::sql::render_all_with_context(execution.changes, execution.sql_context)
+                .map_err(ReconcileError::from)?,
+        ),
         computed_at: Some(crate::crd::now_rfc3339()),
         applying_since: Some(crate::crd::now_rfc3339()),
         sql_hash: Some(crate::plan::compute_sql_hash(
-            &pgroles_core::sql::render_all_with_context(execution.changes, execution.sql_context),
+            &pgroles_core::sql::render_all_with_context(execution.changes, execution.sql_context)
+                .map_err(ReconcileError::from)?,
         )),
         sql_statements: Some(execution.changes.len() as i64),
         ..Default::default()
@@ -2203,6 +2204,9 @@ fn scoped_change_summary(changes: &[pgroles_core::diff::Change]) -> ChangeSummar
     let mut summary = ChangeSummary::default();
     for change in changes {
         match change {
+            pgroles_core::diff::Change::UpdateMemberOptions { .. } => {
+                summary.members_options_changed += 1
+            }
             pgroles_core::diff::Change::AddMember { .. } => summary.members_added += 1,
             pgroles_core::diff::Change::RemoveMember { .. } => summary.members_removed += 1,
             _ => {}

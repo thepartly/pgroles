@@ -184,7 +184,9 @@ impl ManagedChangeSurface {
                 on_type: *on_type,
                 grantee: grantee.clone(),
             }),
-            Change::AddMember { role, member, .. } | Change::RemoveMember { role, member, .. } => {
+            Change::AddMember { role, member, .. }
+            | Change::UpdateMemberOptions { role, member, .. }
+            | Change::RemoveMember { role, member, .. } => {
                 self.roles.contains(role)
                     || self.explicit_memberships.contains(&MembershipKey {
                         role: role.clone(),
@@ -298,6 +300,9 @@ pub(crate) fn describe_change(change: &Change) -> String {
         ),
         Change::AddMember { role, member, .. } => {
             format!("add membership \"{role}\" -> \"{member}\"")
+        }
+        Change::UpdateMemberOptions { role, member, .. } => {
+            format!("update membership options \"{role}\" -> \"{member}\"")
         }
         Change::RemoveMember { role, member, .. } => {
             format!("remove membership \"{role}\" -> \"{member}\"")

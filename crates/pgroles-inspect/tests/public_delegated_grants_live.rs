@@ -74,7 +74,7 @@ async fn apply(pool: &PgPool, changes: &[Change]) {
     let mut conn = pool.acquire().await.expect("connection should acquire");
     let mut tx = conn.begin().await.expect("transaction should begin");
     for change in changes {
-        for statement in render_statements(change) {
+        for statement in render_statements(change).unwrap() {
             tx.execute(statement.as_str())
                 .await
                 .unwrap_or_else(|error| panic!("failed `{statement}`: {error}"));

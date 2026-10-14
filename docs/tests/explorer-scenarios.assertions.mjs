@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 
 function matches(actual, expected) {
-  return Object.entries(expected).every(([key, value]) => actual[key] === value)
+  return actual != null && Object.entries(expected).every(([key, value]) =>
+    value != null && typeof value === 'object'
+      ? matches(actual[key], value)
+      : actual[key] === value)
 }
 
 // Contiguous runs of one phase are grouped, so a plan can repeat a phase

@@ -8,6 +8,7 @@ pub mod cloud;
 mod defaults;
 mod guards;
 mod identity;
+mod membership_options;
 mod memberships;
 mod preflight;
 mod privileges;
@@ -1019,6 +1020,8 @@ pub(crate) fn remove_redundant_schema_owner_grants(graph: &mut RoleGraph) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+pub use membership_options::{MembershipPlanningError, resolve_membership_options};
 
 #[cfg(test)]
 mod tests {

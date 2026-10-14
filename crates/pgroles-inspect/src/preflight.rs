@@ -134,6 +134,15 @@ pub enum AuthorityIssue {
         executor: String,
     },
 
+    /// An in-place membership option update cannot run with the intended
+    /// attribution or the grantor lacks surviving ADMIN authority.
+    MembershipOptionsBlocked {
+        role: String,
+        member: String,
+        grantor: String,
+        reason: String,
+    },
+
     /// A planned object-privilege revoke targets an ACL entry attributed to
     /// `grantor`, and the executor cannot become that grantor. The revoke is
     /// rendered as `SET ROLE <grantor>; REVOKE ...;` (restoring the
@@ -166,6 +175,7 @@ impl AuthorityIssue {
     /// Stable diagnostic kind for consumers of read-only authority preflight.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::MembershipOptionsBlocked { .. } => "MembershipOptionsBlocked",
             Self::DefaultPrivilegeOwner { .. } => "DefaultPrivilegeOwner",
             Self::MissingDefaultPrivilegeOwner { .. } => "MissingDefaultPrivilegeOwner",
             Self::PredefinedRoleGrant { .. } => "PredefinedRoleGrant",
@@ -295,6 +305,15 @@ impl std::fmt::Display for AuthorityIssue {
                  grant the executor membership in \"{grantor}\" or run the revoke \
                  as a role that has it"
             ),
+            AuthorityIssue::MembershipOptionsBlocked {
+                role,
+                member,
+                grantor,
+                reason,
+            } => write!(
+                f,
+                "UnsatisfiableMembershipOptions: cannot update membership of \"{member}\" in \"{role}\" granted by \"{grantor}\": {reason}"
+            ),
             AuthorityIssue::RevokeGrantorUnavailable { grantor, executor } => write!(
                 f,
                 "UnsatisfiableRevoke: the plan revokes object privileges from ACL \
@@ -395,7 +414,9 @@ pub async fn preflight_authority_issues(
     let predefined_targets: BTreeSet<String> = changes
         .iter()
         .filter_map(|change| match change {
-            Change::AddMember { role, .. } | Change::RemoveMember { role, .. }
+            Change::AddMember { role, .. }
+            | Change::UpdateMemberOptions { role, .. }
+            | Change::RemoveMember { role, .. }
                 if is_predefined_role(role) =>
             {
                 Some(role.clone())
@@ -455,7 +476,8 @@ pub async fn preflight_authority_issues(
     let membership_grantors: BTreeSet<String> = changes
         .iter()
         .filter_map(|change| match change {
-            Change::RemoveMember {
+            Change::UpdateMemberOptions { grantor, .. }
+            | Change::RemoveMember {
                 grantor: Some(grantor),
                 ..
             } => Some(grantor.clone()),
@@ -505,6 +527,17 @@ pub async fn preflight_authority_issues(
             .collect();
         for change in changes {
             match change {
+                Change::UpdateMemberOptions {
+                    role,
+                    member,
+                    grantor,
+                    ..
+                } if !usage.contains(grantor.as_str()) => {
+                    issues.push(AuthorityIssue::MembershipOptionsBlocked {
+                        role: role.clone(), member: member.clone(), grantor: grantor.clone(),
+                        reason: format!("executor \"{executor}\" lacks the grantor's inherited privileges required by GRANTED BY"),
+                    });
+                }
                 Change::RemoveMember {
                     role,
                     member,
@@ -560,13 +593,235 @@ pub async fn preflight_authority_issues(
     // Requires the per-edge `inherit_option` PostgreSQL 16 records; before
     // 16 there are no grantor-targeted removals to protect, so the residual
     // pre-16 default-privilege exposure stays with the post-apply detection.
-    let removed_edges: Vec<(String, String)> = changes
+    let mut removed_edges: Vec<(String, String)> = changes
         .iter()
         .filter_map(|change| match change {
-            Change::RemoveMember { role, member, .. } => Some((role.clone(), member.clone())),
+            Change::RemoveMember { role, member, .. }
+            | Change::UpdateMemberOptions {
+                role,
+                member,
+                inherit: Some(false),
+                ..
+            } => Some((role.clone(), member.clone())),
             _ => None,
         })
         .collect();
+    let mut admin_removed_edges: Vec<(String, String)> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::RemoveMember { role, member, .. }
+            | Change::UpdateMemberOptions {
+                role,
+                member,
+                admin: Some(false),
+                ..
+            } => Some((role.clone(), member.clone())),
+            _ => None,
+        })
+        .collect();
+
+    if changes
+        .iter()
+        .any(|c| matches!(c, Change::UpdateMemberOptions { .. }))
+    {
+        let phase =
+            crate::membership_options::membership_removal_phase(pool, changes, &executor).await?;
+        removed_edges = phase.inherit_lost;
+        admin_removed_edges = phase.admin_lost;
+    }
+
+    // Explicit attribution is required for updates. PostgreSQL checks both
+    // privileges of the grantor and that grantor's surviving ADMIN authority.
+    // Do not use CASCADE or replace independent downstream grants.
+    for (index, change) in changes.iter().enumerate() {
+        if let Change::UpdateMemberOptions {
+            role,
+            member,
+            grantor,
+            inherit,
+            admin,
+            binding,
+        } = change
+        {
+            let prior = crate::membership_options::membership_removal_phase(
+                pool,
+                &changes[..index],
+                &executor,
+            )
+            .await?;
+            let removed_edges = &prior.inherit_lost;
+            let admin_removed_edges = &prior.admin_lost;
+            if !executor_is_superuser && !prior.inherited_roles.contains(grantor) {
+                issues.push(AuthorityIssue::MembershipOptionsBlocked {
+                    role: role.clone(),
+                    member: member.clone(),
+                    grantor: grantor.clone(),
+                    reason:
+                        "earlier membership reductions remove the grantor's inherited privileges"
+                            .into(),
+                });
+            }
+            // Bind the actual executor and exact selected tuple before SQL
+            // generation/approval. GRANT is an upsert; a newly appearing own
+            // tuple must be replanned rather than receive insertion defaults.
+            let live: Option<(bool, bool, bool)> = sqlx::query_as(
+                "SELECT a.inherit_option, a.admin_option, a.set_option FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member JOIN pg_roles g ON g.oid=a.grantor WHERE r.rolname=$1 AND m.rolname=$2 AND g.rolname=$3"
+            ).bind(role).bind(member).bind(grantor).fetch_optional(pool).await?;
+            let live_edges: Vec<(String, bool, bool, bool)> = sqlx::query_as(
+                "SELECT g.rolname::text,a.inherit_option,a.admin_option,a.set_option FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member JOIN pg_roles g ON g.oid=a.grantor WHERE r.rolname=$1 AND m.rolname=$2"
+            ).bind(role).bind(member).fetch_all(pool).await?;
+            let live_edges: BTreeMap<String, pgroles_core::model::MembershipOptions> = live_edges
+                .into_iter()
+                .map(|(grantor, inherit, admin, set)| {
+                    (
+                        grantor,
+                        pgroles_core::model::MembershipOptions {
+                            inherit,
+                            admin,
+                            set,
+                        },
+                    )
+                })
+                .collect();
+            let matches_binding = binding.as_ref().is_some_and(|b| {
+                b.executor == executor
+                    && b.expected_edges == live_edges
+                    && match (&b.expected, &live) {
+                        (
+                            pgroles_core::membership_options::MembershipExpectedState::Absent,
+                            None,
+                        ) => true,
+                        (
+                            pgroles_core::membership_options::MembershipExpectedState::Present {
+                                options,
+                            },
+                            Some((inherit, admin, set)),
+                        ) => {
+                            (options.inherit, options.admin, options.set)
+                                == (*inherit, *admin, *set)
+                        }
+                        _ => false,
+                    }
+            });
+            if !matches_binding {
+                issues.push(AuthorityIssue::MembershipOptionsBlocked { role:role.clone(), member:member.clone(), grantor:grantor.clone(),
+                    reason:"executor or independently attributed catalog tuples changed since option resolution; replan and review the replacement".into() });
+            }
+            // PostgreSQL exempts the bootstrap superuser (catalog OID 10)
+            // from the recorded grantor's ADMIN requirement, even if the
+            // plan reduces an explicit membership held by that identity.
+            let (bootstrap, has_admin): (bool, bool) = sqlx::query_as(
+                r#"SELECT
+                    EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2 AND oid = 10),
+                    EXISTS (SELECT 1 FROM pg_auth_members a
+                            JOIN pg_roles r ON r.oid = a.roleid
+                            JOIN pg_roles g ON g.oid = a.member
+                            WHERE r.rolname = $1 AND g.rolname = $2 AND a.admin_option)
+                "#,
+            )
+            .bind(role)
+            .bind(grantor)
+            .fetch_one(pool)
+            .await?;
+            let grantor_admin_removed =
+                admin_removed_edges.contains(&(role.clone(), grantor.clone()));
+            // Explicit GRANTED BY needs grantor ADMIN for GRANT, but not
+            // REVOKE. Both commands still require actual executor authority:
+            // administrative holders reachable through INHERIT, not SET-only
+            // membership paths accepted by MEMBER WITH ADMIN OPTION.
+            let (target_exists, target_superuser): (bool, bool) = sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1), EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1 AND rolsuper)"
+            ).bind(role).fetch_one(pool).await?;
+            let admins: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT member.rolname::text FROM pg_auth_members a JOIN pg_roles target ON target.oid = a.roleid JOIN pg_roles member ON member.oid = a.member WHERE target.rolname = $1 AND a.admin_option AND pg_has_role(current_user, member.oid, 'USAGE')"
+            ).bind(role).fetch_all(pool).await?;
+            let unreachable: BTreeSet<String> = if executor_is_superuser {
+                BTreeSet::new()
+            } else {
+                roles_unreachable_in_graph(
+                    pool,
+                    &admins,
+                    removed_edges,
+                    &[],
+                    &created,
+                    &creation_edges,
+                    admin_removed_edges,
+                )
+                .await?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+            };
+            let executor_admin = executor_is_superuser
+                || (!target_superuser
+                    && role != &executor
+                    && admins.iter().any(|member| {
+                        !unreachable.contains(member)
+                            && !admin_removed_edges.contains(&(role.clone(), member.clone()))
+                    }));
+            let grants_options = *inherit == Some(true) || *admin == Some(true);
+            let reason = if !target_exists {
+                Some("the granted role no longer exists")
+            } else if !executor_admin {
+                Some(
+                    "the executor lacks surviving inherited ADMIN authority (self-administration and superuser targets require a superuser executor)",
+                )
+            } else if grants_options && !bootstrap && (!has_admin || grantor_admin_removed) {
+                Some(
+                    "the recorded grantor lacks surviving ADMIN OPTION required by the GRANT component",
+                )
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                issues.push(AuthorityIssue::MembershipOptionsBlocked {
+                    role: role.clone(),
+                    member: member.clone(),
+                    grantor: grantor.clone(),
+                    reason: reason.into(),
+                });
+            }
+            if *admin == Some(false) {
+                // Reductions precede membership absences. Even an explicitly
+                // requested downstream removal later in this plan cannot make
+                // an earlier last-support ADMIN revoke pass RESTRICT. Keep
+                // independently supplied ADMIN edges, and never add CASCADE.
+                let removed_grantors: Vec<String> = changes[..=index]
+                    .iter()
+                    .filter_map(|other| match other {
+                        Change::UpdateMemberOptions {
+                            role: r,
+                            member: m,
+                            grantor: g,
+                            admin: Some(false),
+                            ..
+                        } if r == role && m == member => Some(g.clone()),
+                        Change::RemoveMember {
+                            role: r,
+                            member: m,
+                            grantor: Some(g),
+                        } if r == role && m == member => Some(g.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let removes_pair = changes[..=index].iter().any(|other| matches!(other,
+                    Change::RemoveMember { role: r, member: m, grantor: None } if r == role && m == member));
+                let (dependent, surviving_admin): (bool, bool) = sqlx::query_as(
+                    r#"SELECT
+                        EXISTS (SELECT 1 FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles g ON g.oid = a.grantor WHERE r.rolname = $1 AND g.rolname = $2 AND g.oid <> 10),
+                        EXISTS (SELECT 1 FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles m ON m.oid = a.member JOIN pg_roles g ON g.oid = a.grantor WHERE r.rolname = $1 AND m.rolname = $2 AND a.admin_option AND NOT (g.rolname = ANY($3)) AND NOT $4)
+                    "#
+                ).bind(role).bind(member).bind(&removed_grantors).bind(removes_pair).fetch_one(pool).await?;
+                if dependent && !surviving_admin {
+                    issues.push(AuthorityIssue::MembershipOptionsBlocked {
+                        role: role.clone(), member: member.clone(), grantor: grantor.clone(),
+                        reason: "the last supporting ADMIN option has dependent onward grants; RESTRICT preserves them. Stage explicitly reviewed dependent membership removals first, then replan the ADMIN reduction (option reductions precede membership absences)".into(),
+                    });
+                }
+            }
+        }
+    }
+
     // Only inheriting additions extend USAGE.
     let added_edges: Vec<(String, String)> = changes
         .iter()
@@ -575,6 +830,12 @@ pub async fn preflight_authority_issues(
                 role,
                 member,
                 inherit: true,
+                ..
+            }
+            | Change::UpdateMemberOptions {
+                role,
+                member,
+                inherit: Some(true),
                 ..
             } => Some((role.clone(), member.clone())),
             _ => None,
@@ -619,7 +880,15 @@ pub async fn preflight_authority_issues(
         // Membership `GRANTED BY` revokes run in the removal batch, before
         // any addition, so only removals can affect them.
         if !removed_edges.is_empty() && !membership_grantors.is_empty() {
-            let membership_phase_roles: Vec<String> = membership_grantors.iter().cloned().collect();
+            let membership_phase_roles: Vec<String> = changes
+                .iter()
+                .filter_map(|change| match change {
+                    Change::RemoveMember {
+                        grantor: Some(g), ..
+                    } => Some(g.clone()),
+                    _ => None,
+                })
+                .collect();
             for (grantor, usable_now) in roles_unreachable_in_graph(
                 pool,
                 &membership_phase_roles,
@@ -627,7 +896,7 @@ pub async fn preflight_authority_issues(
                 &[],
                 &created,
                 &creation_edges,
-                &removed_edges,
+                &admin_removed_edges,
             )
             .await?
             {
@@ -660,7 +929,7 @@ pub async fn preflight_authority_issues(
                 &added_edges,
                 &created,
                 &creation_edges,
-                &removed_edges,
+                &admin_removed_edges,
             )
             .await?
             {

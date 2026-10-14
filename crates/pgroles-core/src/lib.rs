@@ -8,6 +8,7 @@ pub mod explorer;
 pub mod export;
 pub mod guc;
 pub mod manifest;
+pub mod membership_options;
 pub mod model;
 pub mod overlap;
 pub mod ownership;
