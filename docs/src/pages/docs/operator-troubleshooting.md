@@ -182,7 +182,9 @@ missing authority. Under `approval: auto` the plan stays `Pending` with
 Resolve it one of three ways:
 
 - change the policy so it no longer needs that statement — keep the edge, or
-  match the live membership options — and review the resulting plan
+  match the live membership options — and preview the change as a
+  [candidate](/docs/operator-candidates) first; candidates are still planned
+  while the policy is blocked on executor authority
 - grant the executor the specific authority named, never broad provider
   administration to get past the check
 - have someone holding that authority run the named statement once, then let
