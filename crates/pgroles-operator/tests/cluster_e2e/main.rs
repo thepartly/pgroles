@@ -21,4 +21,5 @@
 mod candidate_authority;
 mod candidate_guards;
 mod harness;
+mod membership_options;
 mod plan_authority;
