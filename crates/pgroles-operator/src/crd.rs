@@ -2907,6 +2907,10 @@ pub struct PostgresPolicyCandidateStatus {
 }
 
 /// Targeted executor-authority check for a candidate's current review SQL.
+///
+/// The evaluation fields bind the result to when, and against which parent
+/// state, it was computed, so a consumer can reject an old answer instead of
+/// inferring freshness from whether the object happens to be present.
 #[derive(KubeSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateExecutorAuthority {
@@ -2914,6 +2918,28 @@ pub struct CandidateExecutorAuthority {
     pub eligibility: ExecutorAuthorityEligibility,
     /// Known blockers, with stable diagnostic codes and readable details.
     pub issues: Vec<ExecutorAuthorityDiagnostic>,
+    /// RFC 3339 time the preflight ran. A consumer that needs a result newer
+    /// than some event (its own start, a migration, a restore) compares this.
+    pub evaluated_at: String,
+    /// The parent policy's `metadata.generation` during evaluation. A result
+    /// for an older generation does not describe the current parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_generation: Option<i64>,
+    /// The parent policy's state during evaluation.
+    pub parent_state: ParentEvaluationState,
+}
+
+/// Parent policy state a candidate preview was evaluated under.
+#[derive(JsonSchema, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ParentEvaluationState {
+    /// The parent reconciled and holds no other actionable plan; the preview
+    /// is computed against the state the parent enforced.
+    Converged,
+    /// The parent's own plan stopped at the executor-authority preflight, so
+    /// none of it ran. The preview is computed against the unchanged database,
+    /// and promoting the candidate replaces the blocked content: this is the
+    /// state in which a repair is reviewed.
+    ExecutorAuthorityBlocked,
 }
 
 /// Execution eligibility established by targeted read-only authority checks.

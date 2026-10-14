@@ -231,7 +231,10 @@ Interpretation:
   reality, so an unchanged section produces no SQL.
 - `Ready=False, reason=BlockedByActivePolicy` means the parent is failing or
   has its own plan awaiting a decision; the candidate is planned once the
-  parent settles.
+  parent settles. A parent blocked only by executor authority is the
+  exception: candidates are still planned, with
+  `executorAuthority.parentState=ExecutorAuthorityBlocked`, so a repair can be
+  previewed while the policy it fixes is degraded.
 - Candidate planning filters undeclared object-grant revokes using the proposed roles' `preserve_undeclared_grants` setting, before SQL and approval digest generation. Explicit absence, default privileges, and memberships retain their normal semantics.
 - Candidate planning runs apply's read-only executor-authority preflight on the
   final filtered changes and actual target. Same-database overrides keep their
@@ -240,9 +243,13 @@ Interpretation:
   ownership and terminal state. Known blockers leave the review
   SQL and plan reference available with `Ready=False/ExecutorAuthority` and
   phase `Planned`. `status.executorAuthority` carries `Blocked` or
-  `NoKnownBlockers` eligibility and code/message diagnostics. For SQL previews,
-  CI requires current parent readiness/convergence, candidate Ready=True and NoKnownBlockers; absence of a current result must
-  fail the gate. NoEffects is the separate no-SQL outcome. Apply
+  `NoKnownBlockers` eligibility, code/message diagnostics, and the
+  `evaluatedAt`, `parentGeneration` and `parentState` it was computed against.
+  For SQL previews, CI requires candidate Ready=True and NoKnownBlockers,
+  `parentGeneration` equal to the parent's current generation, an
+  `evaluatedAt` newer than the gate's start, and `parentState=Converged`
+  (or `ExecutorAuthorityBlocked` when reviewing a repair of that policy).
+  Absence of a current result must fail the gate. NoEffects is the separate no-SQL outcome. Apply
   still rechecks fresh authority. Advisory warnings and the adopt-mode
   schema-owner-transfer guard remain outside preview coverage. Check parent
   execution settings separately. Changed effects require a replacement plan

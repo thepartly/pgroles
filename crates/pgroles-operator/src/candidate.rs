@@ -60,10 +60,10 @@ use pgroles_core::overlap::{
 use crate::context::OperatorContext;
 use crate::crd::{
     CandidateExecutorAuthority, CandidatePhase, CandidateTarget, ConnectionSpec, DatabaseIdentity,
-    ExecutorAuthorityDiagnostic, ExecutorAuthorityEligibility, PlanPhase, PlanReference,
-    PolicyCondition, PostgresPolicy, PostgresPolicyCandidate, PostgresPolicyCandidateStatus,
-    PostgresPolicyPlan, SecretReference, candidate_reason, is_retention_exempt, ready_condition,
-    set_condition_in, superseded_condition,
+    ExecutorAuthorityDiagnostic, ExecutorAuthorityEligibility, ParentEvaluationState, PlanPhase,
+    PlanReference, PolicyCondition, PostgresPolicy, PostgresPolicyCandidate,
+    PostgresPolicyCandidateStatus, PostgresPolicyPlan, SecretReference, candidate_reason,
+    is_retention_exempt, ready_condition, set_condition_in, superseded_condition,
 };
 use crate::plan::{CandidatePlanBinding, SupersedeCause};
 use crate::reconciler::{ReconcileError, ResolvedPassword};
@@ -131,26 +131,87 @@ impl BlockCause {
 /// Whether the parent's just-finished reconcile permits candidate planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentGate {
-    Stable,
+    /// Candidates are planned, and record the parent state they were planned
+    /// under.
+    Open(ParentEvaluationState),
     Blocked(BlockCause),
 }
 
-/// Decide the gate from the two facts the parent's reconcile leaves behind.
+/// How the parent's own reconcile ended, as far as candidate planning cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentOutcome {
+    /// Reconciled, or planned in observe/manual mode.
+    Converged,
+    /// Execution stopped at the executor-authority preflight. The plan runs
+    /// in one transaction and the preflight precedes it, so nothing executed,
+    /// and the parent still holds both database locks.
+    ExecutorAuthorityBlocked,
+    /// Any other outcome that still reached the locked phase.
+    Unstable,
+}
+
+/// Decide the gate from the facts the parent's reconcile leaves behind.
 ///
 /// The spec says a candidate is blocked when the parent "is failing or awaiting
-/// its own approval". That maps onto two observable facts and nothing else:
-/// the reconcile reached a converged outcome, and no plan of the policy's own
-/// is still actionable. `mode: observe` therefore blocks candidates exactly
-/// while it holds pending changes, and lets them through when it is in sync —
-/// which is the honest reading, since an observe-mode policy never executes
-/// and its "post-enforcement state" is simply the database as it stands.
-pub fn parent_gate(converged: bool, has_actionable_plan: bool) -> ParentGate {
-    if !converged {
-        ParentGate::Blocked(BlockCause::Unstable)
-    } else if has_actionable_plan {
-        ParentGate::Blocked(BlockCause::AwaitingDecision)
-    } else {
-        ParentGate::Stable
+/// its own approval". That maps onto two observable facts: the reconcile
+/// reached a converged outcome, and no plan of the policy's own is still
+/// actionable. `mode: observe` therefore blocks candidates exactly while it
+/// holds pending changes, and lets them through when it is in sync — which is
+/// the honest reading, since an observe-mode policy never executes and its
+/// "post-enforcement state" is simply the database as it stands.
+///
+/// A parent blocked on executor authority is the exception, and the case a
+/// repair is filed for. Its actionable plan is the one that cannot run, so the
+/// database is not about to move under the candidate, and the state it is
+/// planned against is the database as it stands. Blocking candidates here
+/// would leave every repair without a preview exactly when one is needed.
+pub fn parent_gate(parent: ParentOutcome, has_actionable_plan: bool) -> ParentGate {
+    match parent {
+        ParentOutcome::Unstable => ParentGate::Blocked(BlockCause::Unstable),
+        ParentOutcome::ExecutorAuthorityBlocked => {
+            ParentGate::Open(ParentEvaluationState::ExecutorAuthorityBlocked)
+        }
+        ParentOutcome::Converged if has_actionable_plan => {
+            ParentGate::Blocked(BlockCause::AwaitingDecision)
+        }
+        ParentOutcome::Converged => ParentGate::Open(ParentEvaluationState::Converged),
+    }
+}
+
+/// When, and against which parent state, one candidate pass evaluated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Evaluation {
+    evaluated_at: String,
+    parent_generation: Option<i64>,
+    parent_state: ParentEvaluationState,
+}
+
+impl Evaluation {
+    fn authority(
+        &self,
+        eligibility: ExecutorAuthorityEligibility,
+        issues: Vec<ExecutorAuthorityDiagnostic>,
+    ) -> CandidateExecutorAuthority {
+        CandidateExecutorAuthority {
+            eligibility,
+            issues,
+            evaluated_at: self.evaluated_at.clone(),
+            parent_generation: self.parent_generation,
+            parent_state: self.parent_state,
+        }
+    }
+
+    /// Appended to Ready messages, so a reviewer reading only the condition
+    /// knows the preview is a repair of a blocked policy.
+    fn parent_note(&self) -> &'static str {
+        match self.parent_state {
+            ParentEvaluationState::Converged => "",
+            ParentEvaluationState::ExecutorAuthorityBlocked => {
+                "; the active policy is itself blocked by executor authority, so this preview is \
+                 computed against the unchanged database and promoting it replaces the blocked \
+                 content"
+            }
+        }
     }
 }
 
@@ -395,6 +456,7 @@ pub async fn reconcile_candidates(
     });
 
     let overlay_pairs = membership_overlay_pairs(planning.overlay_edges);
+    let evaluated_at = crate::crd::now_rfc3339();
 
     // Which candidates are not planned this pass — abandoned past the TTL, or
     // past the open-candidate budget. Decided before the shared read so an
@@ -475,10 +537,18 @@ pub async fn reconcile_candidates(
             continue;
         }
 
-        if let ParentGate::Blocked(cause) = planning.gate {
-            block_candidate(ctx, candidate, cause).await?;
-            continue;
-        }
+        let parent_state = match planning.gate {
+            ParentGate::Blocked(cause) => {
+                block_candidate(ctx, candidate, cause).await?;
+                continue;
+            }
+            ParentGate::Open(parent_state) => parent_state,
+        };
+        let evaluation = Evaluation {
+            evaluated_at: evaluated_at.clone(),
+            parent_generation: policy.metadata.generation,
+            parent_state,
+        };
 
         let planning_started_at = std::time::Instant::now();
         let outcome =
@@ -487,7 +557,7 @@ pub async fn reconcile_candidates(
             .record_candidate_planning(planning_started_at.elapsed());
         match outcome {
             Ok(outcome) => {
-                record_outcome(ctx, candidate, outcome).await?;
+                record_outcome(ctx, candidate, outcome, &evaluation).await?;
             }
             Err(err) => {
                 let message = err.to_string();
@@ -679,7 +749,7 @@ async fn shared_inspection(
     candidates: &[PostgresPolicyCandidate],
     not_planned: &BTreeMap<String, NotPlanned>,
 ) -> SharedInspection {
-    if !matches!(planning.gate, ParentGate::Stable) {
+    if !matches!(planning.gate, ParentGate::Open(_)) {
         return SharedInspection::none();
     }
 
@@ -1310,17 +1380,18 @@ async fn record_outcome(
     ctx: &OperatorContext,
     candidate: &mut PostgresPolicyCandidate,
     outcome: CandidateOutcome,
+    evaluation: &Evaluation,
 ) -> Result<(), ReconcileError> {
+    let parent_note = evaluation.parent_note();
     match outcome {
         CandidateOutcome::Planned { plan_name, changes } => {
             let message = format!(
-                "Plan {plan_name} holds {changes} change(s) for review; executor-authority preflight found no known blockers (apply rechecks before execution)"
+                "Plan {plan_name} holds {changes} change(s) for review; executor-authority preflight found no known blockers (apply rechecks before execution){parent_note}"
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(CandidateExecutorAuthority {
-                    eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
-                    issues: vec![],
-                });
+                status.executor_authority = Some(
+                    evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]),
+                );
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -1339,13 +1410,11 @@ async fn record_outcome(
             issues,
         } => {
             let message = format!(
-                "Plan {plan_name} holds {changes} change(s) for review; execution is blocked:\n{message}"
+                "Plan {plan_name} holds {changes} change(s) for review; execution is blocked{parent_note}:\n{message}"
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(CandidateExecutorAuthority {
-                    eligibility: ExecutorAuthorityEligibility::Blocked,
-                    issues,
-                });
+                status.executor_authority =
+                    Some(evaluation.authority(ExecutorAuthorityEligibility::Blocked, issues));
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference { name: plan_name });
                 set_condition_in(
@@ -1356,9 +1425,9 @@ async fn record_outcome(
             .await
         }
         CandidateOutcome::NoEffects => {
-            let message =
-                "this candidate's content is already the database's state; nothing to review"
-                    .to_string();
+            let message = format!(
+                "this candidate's content is already the database's state; nothing to review{parent_note}"
+            );
             write_status(ctx, candidate, |status| {
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = None;
@@ -1381,10 +1450,9 @@ async fn record_outcome(
                 overlapping.join(", "),
             );
             write_status(ctx, candidate, |status| {
-                status.executor_authority = Some(CandidateExecutorAuthority {
-                    eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
-                    issues: vec![],
-                });
+                status.executor_authority = Some(
+                    evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]),
+                );
                 status.phase = CandidatePhase::Planned;
                 status.plan_ref = Some(PlanReference {
                     name: plan_name.clone(),
@@ -2169,21 +2237,70 @@ mod tests {
 
     #[test]
     fn the_gate_blocks_only_a_parent_that_has_not_finished_its_own_work() {
-        assert_eq!(parent_gate(true, false), ParentGate::Stable);
         assert_eq!(
-            parent_gate(true, true),
+            parent_gate(ParentOutcome::Converged, false),
+            ParentGate::Open(ParentEvaluationState::Converged)
+        );
+        assert_eq!(
+            parent_gate(ParentOutcome::Converged, true),
             ParentGate::Blocked(BlockCause::AwaitingDecision)
         );
         assert_eq!(
-            parent_gate(false, false),
+            parent_gate(ParentOutcome::Unstable, false),
             ParentGate::Blocked(BlockCause::Unstable)
         );
         // A failing parent is blocked whether or not a plan of its own is open;
         // "unstable" is the cause a reviewer needs to see first.
         assert_eq!(
-            parent_gate(false, true),
+            parent_gate(ParentOutcome::Unstable, true),
             ParentGate::Blocked(BlockCause::Unstable)
         );
+    }
+
+    fn test_authority() -> CandidateExecutorAuthority {
+        Evaluation {
+            evaluated_at: "2026-10-14T00:00:00Z".to_string(),
+            parent_generation: Some(1),
+            parent_state: ParentEvaluationState::Converged,
+        }
+        .authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![])
+    }
+
+    #[test]
+    fn a_parent_blocked_on_executor_authority_still_previews_its_repair() {
+        // INC-168: the parent's plan could not run, and the repair was a policy
+        // change. Its open plan is the blocked one, so it must not hold the
+        // gate shut the way an executable plan awaiting a decision does.
+        for has_actionable_plan in [false, true] {
+            assert_eq!(
+                parent_gate(ParentOutcome::ExecutorAuthorityBlocked, has_actionable_plan),
+                ParentGate::Open(ParentEvaluationState::ExecutorAuthorityBlocked)
+            );
+        }
+    }
+
+    #[test]
+    fn every_authority_result_records_when_and_against_what_it_was_evaluated() {
+        let evaluation = Evaluation {
+            evaluated_at: "2026-10-14T00:00:00Z".to_string(),
+            parent_generation: Some(36),
+            parent_state: ParentEvaluationState::ExecutorAuthorityBlocked,
+        };
+        let result = evaluation.authority(ExecutorAuthorityEligibility::NoKnownBlockers, vec![]);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["evaluatedAt"], "2026-10-14T00:00:00Z");
+        assert_eq!(json["parentGeneration"], 36);
+        assert_eq!(json["parentState"], "ExecutorAuthorityBlocked");
+        assert!(
+            evaluation
+                .parent_note()
+                .contains("replaces the blocked content")
+        );
+        let converged = Evaluation {
+            parent_state: ParentEvaluationState::Converged,
+            ..evaluation
+        };
+        assert_eq!(converged.parent_note(), "");
     }
 
     #[test]
@@ -2636,10 +2753,7 @@ mod tests {
             plan_ref: Some(PlanReference {
                 name: "review-sql".into(),
             }),
-            executor_authority: Some(CandidateExecutorAuthority {
-                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
-                issues: vec![],
-            }),
+            executor_authority: Some(test_authority()),
             conditions: vec![ready_condition(true, candidate_reason::PLANNED, "preview")],
             ..Default::default()
         });
@@ -2714,10 +2828,7 @@ mod tests {
         stale.metadata.resource_version = Some("10".into());
         stale.status = Some(PostgresPolicyCandidateStatus {
             phase: CandidatePhase::Planned,
-            executor_authority: Some(CandidateExecutorAuthority {
-                eligibility: ExecutorAuthorityEligibility::NoKnownBlockers,
-                issues: vec![],
-            }),
+            executor_authority: Some(test_authority()),
             conditions: vec![ready_condition(
                 true,
                 candidate_reason::PLANNED,
