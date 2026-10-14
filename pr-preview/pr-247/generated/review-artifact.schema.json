@@ -741,43 +741,6 @@
         {
           "type": "object",
           "properties": {
-            "admin": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "grantor": {
-              "type": "string"
-            },
-            "inherit": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "update_member_options"
-            },
-            "member": {
-              "type": "string"
-            },
-            "role": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "role",
-            "member",
-            "grantor"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
             "grantor": {
               "type": [
                 "string",
