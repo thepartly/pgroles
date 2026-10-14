@@ -99,7 +99,7 @@ order. Only the last one is about human review:
 |---|---|---|---|---|
 | `true` | — | — | no | no — nothing reconciles at all |
 | `false` | `observe` | *ignored* | yes | **never** |
-| `false` | `apply` | `auto` | yes | immediately, plan auto-approved |
+| `false` | `apply` | `auto` | yes | immediately, plan auto-approved — once the executor has the authority it needs |
 | `false` | `apply` | `manual` | yes | only once approved *and* still current |
 
 `approval` has no effect in `observe` mode; a decision recorded on an
@@ -107,7 +107,21 @@ observe-mode plan is accepted and does nothing, and the policy reports an `Appro
 condition so this is distinguishable from a stalled operator.
 
 Under `approval: auto` the operator approves its own plan, so an audit trail
-never shows an unattributed approval. The `Approved` condition's reason is
+never shows an unattributed approval.
+
+Auto-approval is an execution decision, so it waits for the read-only
+executor-authority preflight. When the executor lacks authority a statement
+needs — a revoke attributed to a grantor it cannot act as, say — the plan stays
+`Pending` and `status.current_plan_ref` points at it, while the policy reports
+`Ready=False` with reason `ExecutorAuthority`. Nothing executes, and later
+reconciles keep reusing that one plan rather than opening new ones. Once the
+authority exists the operator approves and applies that same plan; if the
+changes disappear first, the plan is superseded with no replacement. While it
+waits, a reviewer can deny it: the plan moves to `Rejected` and never executes.
+Under `approval: auto` that voids the one plan — the replacement for the same
+effects is approved automatically once authority allows — so to stop automatic
+execution, set `approval: manual` or `suspend`. See
+[troubleshooting](/docs/operator-troubleshooting#executor-authority-blocks-execution). The `Approved` condition's reason is
 `AutoApproved` either way; `status.decidedBy.username` reads
 `system:pgroles-operator(auto-approval)` on its own, and the operator's
 authenticated ServiceAccount once the admission policy below is installed and
@@ -373,6 +387,7 @@ write-once; on a plan nobody decided the cause is also stamped on its
 | Effects changed | `Superseded` | the policy would now produce different effects; a fresh plan is opened |
 | Effects cleared | `Superseded` | the changes are no longer pending — applied out of band, or edited away. No replacement |
 | Replaced by a newer plan | `Superseded` | a newer plan already holds the current effects |
+| Duplicate of an actionable plan | `Superseded` | under `approval: auto`, another actionable plan holds identical effects and is the one acted on; identical copies left by earlier versions are retired this way |
 | Policy stopped planning | `Superseded` | the policy no longer references this plan |
 | Target moved | `TargetChanged` and friends (see [below](#target-identity)) | the plan would execute against a different database than the one reviewed |
 

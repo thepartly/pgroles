@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Blocked auto-apply plans remain Pending and retain their review reference. Identical Approved plans are reused instead of accumulating while executor authority is unavailable. Reuse prefers an approved plan, then the newest, and retires any other actionable plan holding the same effects, so duplicates left by earlier versions are cleaned up on the next reconcile.
+- Under `approval: auto`, a plan the executor lacks authority to apply stays `Pending` with its review reference instead of being approved and abandoned, and later reconciles reuse it rather than opening an identical plan every few seconds. Once authority exists the same plan is approved and applied; if the changes disappear first it is superseded. A reviewer's denial of a waiting plan is honoured: it is rejected and never executes. When an auto-apply reconcile next plans the same effects, any other identical actionable plan, including duplicates left by earlier versions, is retired as `DuplicateOfActionablePlan`. Manual and observe modes keep their existing reuse and approval rules.
 
 ## [0.13.0] - 2026-09-24
 

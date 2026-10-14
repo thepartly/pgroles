@@ -68,6 +68,19 @@ for pass in 1 2 3; do
   test "$(kubectl get pgplan "$plan" -o jsonpath='{.status.phase}')" = Pending
 done
 test "$(kubectl get pgplan -l pgroles.io/policy=plan-authority-policy -o json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))')" = 1
+# A blocked auto plan waits long enough for a reviewer to deny it. The denial
+# is honoured: that plan is rejected and never executes, and a fresh plan for
+# the same effects replaces it.
+denied="$plan"
+reject_plan "$denied"
+wait_for_plan_phase "$denied" Rejected
+for i in $(seq 1 30); do
+  plan="$(kubectl get pgr plan-authority-policy -o jsonpath='{.status.current_plan_ref.name}')"
+  [ -n "$plan" ] && [ "$plan" != "$denied" ] && break
+  sleep 2
+done
+test "$plan" != "$denied"
+wait_for_plan_phase "$plan" Pending
 approve_plan "$plan"
 # Emulate an Approved artifact retained from the older controller.
 kubectl patch pgplan "$plan" --subresource=status --type=merge -p='{"status":{"phase":"Approved"}}'
@@ -77,10 +90,13 @@ for pass in 1 2 3; do
   test "$(wait_for_current_plan_ref plan-authority-policy)" = "$plan"
   test "$(kubectl get pgplan "$plan" -o jsonpath='{.status.phase}')" = Approved
 done
-test "$(kubectl get pgplan -l pgroles.io/policy=plan-authority-policy -o json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))')" = 1
+# One actionable plan remains beside the rejected one.
+test "$(kubectl get pgplan -l pgroles.io/policy=plan-authority-policy -o json | python3 -c 'import json,sys; print(sum(p.get("status",{}).get("phase") in ("Pending","Approved") for p in json.load(sys.stdin)["items"]))')" = 1
 test "$(pg_query "SELECT pg_has_role('pln_member','pln_group','MEMBER');")" = t
 pg_query 'GRANT pln_grantor TO pln_executor WITH INHERIT TRUE, SET FALSE;'
 wait_for_ready_status_reason plan-authority-policy True Reconciled
 wait_for_plan_phase "$plan" Applied
+# The denied plan stayed denied: recovering authority never executed it.
+test "$(kubectl get pgplan "$denied" -o jsonpath='{.status.phase}')" = Rejected
 test "$(pg_query "SELECT pg_has_role('pln_member','pln_group','MEMBER');")" = f
-echo 'Blocked Pending/Approved plan deduplication and ordinary-executor recovery passed.'
+echo 'Blocked Pending/Approved plan deduplication, denial and ordinary-executor recovery passed.'

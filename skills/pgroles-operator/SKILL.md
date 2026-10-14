@@ -176,6 +176,13 @@ second `Approved` entry alongside the `Approved=False` a plan is created with,
 or the CRD's terminality rule wedges the plan. A decision is terminal and
 write-once; iterating means a new plan, not an edited decision.
 
+Under `approval: auto`, a plan stays `Pending` while the executor lacks the
+authority it needs (`Ready=False`, reason `ExecutorAuthority`); nothing runs, and
+later reconciles reuse that plan rather than opening new ones. Fix the authority
+gap or change the policy — do not grant broad provider administration to get
+past the check. Denying the waiting plan voids only that plan; set
+`approval: manual` or `suspend` to stop automatic execution.
+
 After approval, wait for `Applied` and then verify the parent policy's convergence
 conditions. A plan object supports review and recent history, but is not
 independent proof of current database state and may be removed by terminal-plan

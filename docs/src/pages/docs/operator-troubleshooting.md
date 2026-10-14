@@ -62,6 +62,7 @@ release or namespace names.
 | `InvalidDatabaseTarget` | A database grant names a database other than the one the connection reaches. Set `object.name` to `current_database()`. [Check database objects](#missing-database-objects). |
 | `InvalidRoutineTarget` | A function or procedure grant names a routine PostgreSQL cannot resolve. The message lists the input-type signatures to use. [Check database objects](#missing-database-objects). |
 | `InsufficientPrivileges` | The executor can connect but cannot inspect or apply an operation. [Check executor privileges](#executor-privileges). |
+| `ExecutorAuthority` | The authority preflight found a statement the executor cannot run, before any SQL executed. [Resolve the authority gap](#executor-authority-blocks-execution). |
 | `MissingDatabaseObject` | An external object referenced by the policy is absent. [Check database objects](#missing-database-objects). |
 | `UnsatisfiableWildcardGrant` | A wildcard matched objects the executor cannot grant on. [Check wildcard grants](#wildcard-grants). |
 | `ConflictingPolicy` | Two policies claim overlapping state on the same database. [Resolve the conflict](#policy-conflicts). |
@@ -166,6 +167,30 @@ sometimes `ADMIN OPTION`; object grants need ownership or `WITH GRANT OPTION`;
 default privileges need membership in their owner role. The complete matrix and
 bootstrap SQL are in [executor privileges](/docs/executor-privileges).
 
+### Executor authority blocks execution
+
+`ExecutorAuthority` means the read-only preflight found a planned statement the
+executor cannot run, and stopped before the first one. The whole plan waits —
+PostgreSQL applies it in one transaction — including changes the executor could
+make on their own. The message names each blocker; the commonest is a
+membership or object grant attributed to a grantor the executor cannot act as,
+such as a provider administrator on a managed service.
+
+Nothing has changed in the database, and reconciling again will not supply the
+missing authority. Under `approval: auto` the plan stays `Pending` with
+`status.current_plan_ref` pointing at it, and is reused until authority exists.
+Resolve it one of three ways:
+
+- change the policy so it no longer needs that statement — keep the edge, or
+  match the live membership options — and review the resulting plan
+- grant the executor the specific authority named, never broad provider
+  administration to get past the check
+- have someone holding that authority run the named statement once, then let
+  the next reconcile converge
+
+Denying the waiting plan stops that plan only; see [plan and
+approval](/docs/operator-plan-approval#what-executes-mode-and-approval-together).
+
 ## Missing database objects
 
 `InvalidDatabaseTarget` is narrower than a missing object: a `type: database`
@@ -245,7 +270,9 @@ kubectl get pgr "$POLICY" --namespace "$NAMESPACE" \
 - `mode: observe` computes plans but never executes mutating SQL
 - `mode: apply` with `approval: manual` waits for a terminal `Approved`
   decision on the current plan's status
-- `mode: apply` with `approval: auto` applies without a human gate
+- `mode: apply` with `approval: auto` applies without a human gate, once the
+  executor has the authority the plan needs; until then the plan stays
+  `Pending` and the policy reports [`ExecutorAuthority`](#executor-authority-blocks-execution)
 
 Follow the current plan and inspect its phase and conditions:
 

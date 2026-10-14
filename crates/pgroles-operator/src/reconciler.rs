@@ -180,6 +180,9 @@ pub enum ReconcileError {
     #[error("{0}")]
     ExecutorAuthority(String),
 
+    #[error("plan {0} carries a Denied decision and will not be approved or executed")]
+    PlanDenied(String),
+
     #[error("{0}")]
     ConflictingPolicy(String),
 
@@ -615,6 +618,7 @@ fn retry_class_for_reconcile_error(error: &ReconcileError) -> RetryClass {
         // Waiting out the plan's retry window is exactly the normal interval:
         // requeuing sooner would re-enter the back-off and re-defer.
         ReconcileError::PlanRetryDeferred(_, _)
+        | ReconcileError::PlanDenied(_)
         | ReconcileError::NonConvergentPlan(_)
         | ReconcileError::ManifestExpansion(_)
         | ReconcileError::InvalidInterval(_, _)
@@ -1640,6 +1644,7 @@ async fn apply_under_lock(
                 &applied_password_source_versions,
                 ctx.plan_retention,
                 None,
+                crate::plan::PlanReuse::PendingOnly,
                 false,
             )
             .await?;
@@ -1762,6 +1767,7 @@ async fn apply_under_lock(
                     &applied_password_source_versions,
                     ctx.plan_retention,
                     None,
+                    crate::plan::PlanReuse::AutoApproval,
                     true,
                 )
                 .await?;
@@ -1908,6 +1914,15 @@ async fn apply_under_lock(
                 info!(name, namespace, "no changes needed");
             }
 
+            // A plan published while executor authority was missing stays
+            // referenced and Pending. With no changes left its effects are
+            // gone, so it is retired with no replacement, as in observe mode.
+            let stale_pending_ref = if changes.is_empty() {
+                referenced_pending_plan(ctx, resource).await
+            } else {
+                None
+            };
+
             // The database now holds this content, however it got there — an
             // auto-approved apply, or nothing to do because it was already
             // converged. Either way a candidate proposing exactly this content
@@ -1935,8 +1950,16 @@ async fn apply_under_lock(
                 status.last_error = None;
                 status.applied_password_source_versions = applied_password_source_versions;
                 status.transient_failure_count = 0;
+                if stale_pending_ref.is_some() {
+                    status.current_plan_ref = None;
+                }
             })
             .await?;
+
+            // After the status write, as in observe mode: a crash in between
+            // leaves a Pending plan the next pass retires, never a reference
+            // to a retired plan.
+            supersede_referenced_plan_if_pending(ctx, resource, stale_pending_ref.as_ref()).await;
 
             Ok((
                 Action::requeue(requeue_interval),
@@ -2136,6 +2159,7 @@ async fn apply_under_lock(
                                 &applied_password_source_versions,
                                 ctx.plan_retention,
                                 None,
+                                crate::plan::PlanReuse::PendingOnly,
                                 false,
                             )
                             .await?;
@@ -2479,6 +2503,7 @@ async fn apply_under_lock(
                                 &applied_password_source_versions,
                                 ctx.plan_retention,
                                 None,
+                                crate::plan::PlanReuse::PendingOnly,
                                 false,
                             )
                             .await?;
@@ -2627,6 +2652,7 @@ async fn apply_under_lock(
                 &applied_password_source_versions,
                 ctx.plan_retention,
                 None,
+                crate::plan::PlanReuse::PendingOnly,
                 false,
             )
             .await?;
@@ -3307,6 +3333,28 @@ async fn mark_reconciled_no_changes(
 /// Best-effort by design: the reference is already gone, so a failure here
 /// costs a stale Pending plan that the next reconcile or plan retention
 /// collects — not a wedged reconcile.
+/// The policy's referenced plan, when it is still Pending.
+async fn referenced_pending_plan(
+    ctx: &OperatorContext,
+    resource: &PostgresPolicy,
+) -> Option<crate::crd::PlanReference> {
+    let plan_ref = resource.status.as_ref()?.current_plan_ref.clone()?;
+    let namespace = resource.namespace()?;
+    let plans_api: Api<PostgresPolicyPlan> = Api::namespaced(ctx.kube_client.clone(), &namespace);
+    match plans_api.get_opt(&plan_ref.name).await {
+        Ok(Some(plan))
+            if plan.status.as_ref().map(|s| &s.phase) == Some(&crate::crd::PlanPhase::Pending) =>
+        {
+            Some(plan_ref)
+        }
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(plan = %plan_ref.name, error = %err, "could not read the referenced plan");
+            None
+        }
+    }
+}
+
 async fn supersede_referenced_plan_if_pending(
     ctx: &OperatorContext,
     resource: &PostgresPolicy,
@@ -3623,6 +3671,7 @@ impl ReconcileError {
             ReconcileError::ConflictingPolicy(_) => "ConflictingPolicy",
             ReconcileError::UnsatisfiableWildcardGrant(_) => "UnsatisfiableWildcardGrant",
             ReconcileError::ExecutorAuthority(_) => "ExecutorAuthority",
+            ReconcileError::PlanDenied(_) => "PlanDenied",
             ReconcileError::LockContention(_, _) => "LockContention",
             ReconcileError::RequestIndexNotReady(_) => "RequestIndexNotReady",
             ReconcileError::Context(context) => match context.as_ref() {
