@@ -110,6 +110,93 @@
         "sensitive_inputs_removed"
       ]
     },
+    "MembershipExpectedState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "absent"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "options": {
+              "$ref": "#/$defs/MembershipOptions"
+            },
+            "state": {
+              "type": "string",
+              "const": "present"
+            }
+          },
+          "required": [
+            "state",
+            "options"
+          ]
+        }
+      ]
+    },
+    "MembershipOptionBinding": {
+      "type": "object",
+      "properties": {
+        "executor": {
+          "type": "string"
+        },
+        "expected": {
+          "$ref": "#/$defs/MembershipExpectedState"
+        },
+        "expectedEdges": {
+          "description": "All independently attributed tuples for this pair at review time.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MembershipOptions"
+          }
+        },
+        "setEffect": {
+          "description": "Explicit SET effect bound into the reviewed change digest.",
+          "$ref": "#/$defs/MembershipSetEffect"
+        }
+      },
+      "required": [
+        "executor",
+        "setEffect",
+        "expected",
+        "expectedEdges"
+      ]
+    },
+    "MembershipOptions": {
+      "description": "Options on one catalog membership grant.",
+      "type": "object",
+      "properties": {
+        "admin": {
+          "type": "boolean"
+        },
+        "inherit": {
+          "type": "boolean"
+        },
+        "set": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "inherit",
+        "admin",
+        "set"
+      ]
+    },
+    "MembershipSetEffect": {
+      "type": "string",
+      "enum": [
+        "preserve",
+        "createFalse"
+      ]
+    },
     "ObjectType": {
       "description": "PostgreSQL object types that can have privileges granted on them.",
       "type": "string",
@@ -746,6 +833,53 @@
             "member",
             "inherit",
             "admin"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "admin": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MembershipOptionBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "grantor": {
+              "type": "string"
+            },
+            "inherit": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "update_member_options"
+            },
+            "member": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "role",
+            "member",
+            "grantor"
           ]
         },
         {
