@@ -17,6 +17,7 @@ pub mod password;
 pub mod plan;
 pub mod promotion;
 pub mod reconciler;
+pub mod request_deadline;
 pub mod request_index;
 
 mod telemetry_resource;

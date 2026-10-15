@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 use pgroles_operator::concurrency::ReconcileConcurrency;
-use pgroles_operator::context::{OperatorContext, request_client_config};
+use pgroles_operator::context::{OperatorContext, request_client};
 use pgroles_operator::crd::{
     EphemeralAccessPolicy, EphemeralAccessRequest, PostgresPolicy, PostgresPolicyCandidate,
     PostgresPolicyPlan, REQUESTED_RECONCILE_ANNOTATION,
@@ -135,10 +135,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Build kube client from in-cluster config or KUBECONFIG.
     // Watches keep kube's long read timeout so their long polls survive; every
-    // request a reconcile makes goes through a client bounded per request.
+    // request a reconcile makes has a deadline for the whole response.
     let kube_config = kube::Config::infer().await?;
     let client = Client::try_from(kube_config.clone())?;
-    let request_client = Client::try_from(request_client_config(kube_config))?;
+    let request_client = request_client(kube_config)?;
 
     let observability = OperatorObservability::from_env()?.with_logger_provider(logger_provider);
     let http_addr = std::env::var("OPERATOR_HTTP_ADDR")

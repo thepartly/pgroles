@@ -23,3 +23,4 @@ mod candidate_guards;
 mod harness;
 mod membership_options;
 mod plan_authority;
+mod plan_cleanup;

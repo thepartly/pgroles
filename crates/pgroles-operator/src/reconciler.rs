@@ -1747,13 +1747,10 @@ async fn apply_under_lock(
 
         // Create a PostgresPolicyPlan resource for changes (if any).
         let mut plan_ref_name = None;
-        // Observe mode used to only ever *set* this reference. When drift went
-        // away out of band the pending plan stayed Pending and the reference
-        // stayed pointing at it, while the policy reported InSync beside it.
-        let previous_plan_ref = resource
-            .status
-            .as_ref()
-            .and_then(|status| status.current_plan_ref.clone());
+        // Observe mode used to only ever *set* the plan reference. When drift
+        // went away out of band the pending plan stayed Pending and the
+        // reference stayed pointing at it, while the policy reported InSync
+        // beside it.
         // Tracks a plan that someone approved even though this policy never
         // executes, so the pointless approval is reported rather than ignored.
         let mut ignored_approval_plan = None;
@@ -1858,11 +1855,11 @@ async fn apply_under_lock(
         })
         .await?;
 
-        // Retire the plan the cleared reference pointed at. Ordered after the
-        // status write so a crash in between leaves a Pending plan the next
-        // reconcile finds and clears again, never a reference to nothing.
+        // Retire the plans no drift left anything for. Ordered after the
+        // status write so a crash in between never leaves a reference to a
+        // retired plan.
         if !drift_detected {
-            supersede_referenced_plan_if_pending(ctx, resource, previous_plan_ref.as_ref()).await;
+            retire_actionable_plans(ctx, resource).await;
         }
 
         info!(
@@ -2042,10 +2039,11 @@ async fn apply_under_lock(
             }
 
             // A plan published while executor authority was missing stays
-            // referenced and Pending. With no changes left its effects are
-            // gone, so it is retired with no replacement, as in observe mode.
-            let stale_pending_ref = if changes.is_empty() {
-                referenced_pending_plan(ctx, resource).await
+            // referenced and Pending; 0.13 left such plans Approved. With no
+            // changes left their effects are gone, so they are retired with no
+            // replacement, as in observe mode.
+            let stale_plan_ref = if changes.is_empty() {
+                referenced_actionable_plan(ctx, resource).await
             } else {
                 None
             };
@@ -2077,16 +2075,17 @@ async fn apply_under_lock(
                 status.last_error = None;
                 status.applied_password_source_versions = applied_password_source_versions;
                 status.transient_failure_count = 0;
-                if stale_pending_ref.is_some() {
+                if stale_plan_ref.is_some() {
                     status.current_plan_ref = None;
                 }
             })
             .await?;
 
             // After the status write, as in observe mode: a crash in between
-            // leaves a Pending plan the next pass retires, never a reference
-            // to a retired plan.
-            supersede_referenced_plan_if_pending(ctx, resource, stale_pending_ref.as_ref()).await;
+            // never leaves a reference to a retired plan.
+            if changes.is_empty() {
+                retire_actionable_plans(ctx, resource).await;
+            }
 
             Ok((
                 Action::requeue(requeue_interval),
@@ -3419,11 +3418,6 @@ async fn mark_reconciled_no_changes(
     plan_warnings: Vec<String>,
     applied_password_source_versions: std::collections::BTreeMap<String, String>,
 ) -> Result<(), ReconcileError> {
-    let previous_plan_ref = resource
-        .status
-        .as_ref()
-        .and_then(|status| status.current_plan_ref.clone());
-
     update_status(ctx, resource, |status| {
         status.set_condition(ready_condition(true, "Reconciled", "No changes needed"));
         status.set_condition(drifted_condition(false, "InSync", "No pending changes"));
@@ -3448,22 +3442,15 @@ async fn mark_reconciled_no_changes(
     })
     .await?;
 
-    // Only after the reference is gone: a crash here leaves a Pending plan
-    // that the next reconcile still finds, whereas superseding first and
-    // crashing would strand the reference on a plan nobody can act on.
-    supersede_referenced_plan_if_pending(ctx, resource, previous_plan_ref.as_ref()).await;
+    // Only after the reference is gone, so a crash in between never leaves a
+    // reference to a retired plan.
+    retire_actionable_plans(ctx, resource).await;
 
     Ok(())
 }
 
-/// Retire a plan a just-cleared `current_plan_ref` pointed at, if it is still
-/// Pending.
-///
-/// Best-effort by design: the reference is already gone, so a failure here
-/// costs a stale Pending plan that the next reconcile or plan retention
-/// collects — not a wedged reconcile.
-/// The policy's referenced plan, when it is still Pending.
-async fn referenced_pending_plan(
+/// The policy's referenced plan, when it is still Pending or Approved.
+async fn referenced_actionable_plan(
     ctx: &OperatorContext,
     resource: &PostgresPolicy,
 ) -> Option<crate::crd::PlanReference> {
@@ -3472,7 +3459,12 @@ async fn referenced_pending_plan(
     let plans_api: Api<PostgresPolicyPlan> = Api::namespaced(ctx.kube_client.clone(), &namespace);
     match plans_api.get_opt(&plan_ref.name).await {
         Ok(Some(plan))
-            if plan.status.as_ref().map(|s| &s.phase) == Some(&crate::crd::PlanPhase::Pending) =>
+            if plan.status.as_ref().is_some_and(|s| {
+                matches!(
+                    s.phase,
+                    crate::crd::PlanPhase::Pending | crate::crd::PlanPhase::Approved
+                )
+            }) =>
         {
             Some(plan_ref)
         }
@@ -3484,45 +3476,41 @@ async fn referenced_pending_plan(
     }
 }
 
-async fn supersede_referenced_plan_if_pending(
-    ctx: &OperatorContext,
-    resource: &PostgresPolicy,
-    plan_ref: Option<&crate::crd::PlanReference>,
-) {
-    let (Some(plan_ref), Some(namespace)) = (plan_ref, resource.namespace()) else {
-        return;
-    };
-
-    let plans_api: Api<PostgresPolicyPlan> = Api::namespaced(ctx.kube_client.clone(), &namespace);
-    let plan = match plans_api.get_opt(&plan_ref.name).await {
-        Ok(Some(plan)) => plan,
-        Ok(None) => return,
+/// Retire every plan of the policy's own that is still Pending or Approved,
+/// once a reconcile has found nothing left to change.
+///
+/// Found by listing, not through `current_plan_ref`: the reference is cleared
+/// in the same pass, so a supersede that fails here is retried by the next
+/// converged reconcile instead of stranding a live plan nothing points at.
+/// Nothing else would collect it — retention never evicts a live plan — and
+/// the candidate gate counts any live plan as a decision still outstanding,
+/// so one stranded plan would hold every candidate at `AwaitingDecision`
+/// while the policy reports `InSync`. Approved plans are included: 0.13
+/// approved auto-apply plans it lacked the authority to run and left them
+/// behind.
+async fn retire_actionable_plans(ctx: &OperatorContext, resource: &PostgresPolicy) {
+    let plans = match crate::plan::actionable_policy_plans(&ctx.kube_client, resource).await {
+        Ok(plans) => plans,
         Err(err) => {
-            tracing::warn!(
-                plan = %plan_ref.name,
-                error = %err,
-                "could not read the plan a cleared reference pointed at"
-            );
+            tracing::warn!(error = %err, "could not list plans left with nothing to execute");
             return;
         }
     };
-
-    if plan.status.as_ref().map(|s| &s.phase) != Some(&crate::crd::PlanPhase::Pending) {
-        return;
-    }
-
-    if let Err(err) = crate::plan::mark_plan_superseded(
-        &ctx.kube_client,
-        &plan,
-        crate::plan::SupersedeCause::PolicyStoppedPlanning,
-    )
-    .await
-    {
-        tracing::warn!(
-            plan = %plan_ref.name,
-            error = %err,
-            "could not supersede the plan a cleared reference pointed at"
-        );
+    for plan in plans {
+        if let Err(err) = crate::plan::mark_plan_superseded(
+            &ctx.kube_client,
+            &plan,
+            crate::plan::SupersedeCause::PolicyStoppedPlanning,
+        )
+        .await
+        {
+            tracing::warn!(
+                plan = %plan.name_any(),
+                error = %err,
+                "could not retire a plan left with nothing to execute; the next converged \
+                 reconcile retries"
+            );
+        }
     }
 }
 

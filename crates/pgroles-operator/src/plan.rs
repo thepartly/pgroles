@@ -2473,36 +2473,46 @@ pub async fn get_current_actionable_plan(
     client: &Client,
     policy: &PostgresPolicy,
 ) -> Result<Option<PostgresPolicyPlan>, ReconcileError> {
+    Ok(actionable_policy_plans(client, policy)
+        .await?
+        .into_iter()
+        .next())
+}
+
+/// The policy's own plans that are still Pending or Approved, newest first.
+///
+/// Found by label and controller owner rather than through
+/// `status.current_plan_ref`, so a plan the reference no longer names is
+/// still found. Candidate-origin plans are owned by their candidate and are
+/// not included.
+pub async fn actionable_policy_plans(
+    client: &Client,
+    policy: &PostgresPolicy,
+) -> Result<Vec<PostgresPolicyPlan>, ReconcileError> {
     let namespace = policy.namespace().ok_or(ReconcileError::NoNamespace)?;
     let policy_name = policy.name_any();
 
     let plans_api: Api<PostgresPolicyPlan> = Api::namespaced(client.clone(), &namespace);
     let selector = policy_selector(&policy_name);
-    let existing_plans: Vec<PostgresPolicyPlan> = plans_api
+    let mut actionable: Vec<PostgresPolicyPlan> = plans_api
         .list(&ListParams::default().labels_from(&selector))
         .await?
         .into_iter()
         .filter(|plan| is_owned_by_policy(plan, policy))
-        .collect();
-
-    // Find the most recent actionable plan (Pending or Approved, by creation time).
-    let mut pending_plans: Vec<PostgresPolicyPlan> = existing_plans
-        .into_iter()
         .filter(|plan| {
             plan.status
                 .as_ref()
-                .map(|s| matches!(s.phase, PlanPhase::Pending | PlanPhase::Approved))
-                .unwrap_or(false)
+                .is_some_and(|s| matches!(s.phase, PlanPhase::Pending | PlanPhase::Approved))
         })
         .collect();
 
-    pending_plans.sort_by(|a, b| {
+    actionable.sort_by(|a, b| {
         let a_time = a.metadata.creation_timestamp.as_ref();
         let b_time = b.metadata.creation_timestamp.as_ref();
         b_time.cmp(&a_time) // newest first
     });
 
-    Ok(pending_plans.into_iter().next())
+    Ok(actionable)
 }
 
 /// Look up the most recent plan for a policy in a given phase.

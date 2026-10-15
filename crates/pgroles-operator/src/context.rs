@@ -22,23 +22,28 @@ use crate::request_index::RequestIndex;
 /// Longest a reconcile waits on one Kubernetes API request.
 pub const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Client configuration for the requests reconciles make — gets, lists,
-/// patches, status writes, Events, finalizer updates — and never for watches.
+/// The client for the requests reconciles make — gets, lists, patches, status
+/// writes, Events, finalizer updates — and never for watches.
 ///
-/// kube's default read timeout is 295 seconds so that a watch's long poll
-/// survives. Applied to a single request, that lets one stalled call, such as
-/// the finalizer patch kube's finalizer helper issues before a policy's first
-/// reconcile, hold the controller's only reconcile slot for minutes with
-/// nothing logged. Bounded, the call fails, the controller logs the error and
-/// requeues, and the next attempt opens a fresh request.
-pub fn request_client_config(config: kube::Config) -> kube::Config {
-    with_request_timeout(config, API_REQUEST_TIMEOUT)
+/// Each request must finish, response body included, within
+/// [`API_REQUEST_TIMEOUT`]. kube's own timeouts are idle timeouts sized for a
+/// watch's long poll: a stalled call, such as the finalizer patch kube's
+/// finalizer helper issues before a policy's first reconcile, or a response
+/// that trickles in, could otherwise hold the controller's only reconcile
+/// slot for minutes with nothing logged. Bounded, the call fails, the
+/// controller logs the error and requeues, and the next attempt opens a fresh
+/// request.
+pub fn request_client(config: kube::Config) -> Result<kube::Client, kube::Error> {
+    request_client_with_deadline(config, API_REQUEST_TIMEOUT)
 }
 
-fn with_request_timeout(mut config: kube::Config, timeout: Duration) -> kube::Config {
-    config.read_timeout = Some(timeout);
-    config.write_timeout = Some(timeout);
-    config
+fn request_client_with_deadline(
+    config: kube::Config,
+    timeout: Duration,
+) -> Result<kube::Client, kube::Error> {
+    Ok(kube::client::ClientBuilder::try_from(config)?
+        .with_layer(&crate::request_deadline::RequestDeadlineLayer::new(timeout))
+        .build())
 }
 
 /// Minimum pool size required for reconciliation.
@@ -1026,42 +1031,75 @@ impl ContextError {
 mod tests {
     use super::*;
 
-    /// A server that accepts the connection and never answers is the stall
-    /// this bound exists for: the request must fail, not wait out kube's
-    /// watch-length default.
-    #[tokio::test]
-    async fn a_request_to_an_unresponsive_api_server_fails_within_the_bound() {
+    /// Serves every connection with `respond` and keeps the sockets open.
+    async fn api_server<F, Fut>(respond: F) -> String
+    where
+        F: Fn(tokio::net::TcpStream) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let held = Arc::new(Mutex::new(Vec::new()));
-        let accepted = held.clone();
+        let respond = Arc::new(respond);
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
-                accepted.lock().await.push(socket);
+                tokio::spawn(respond(socket));
             }
         });
-        let url = format!("http://{address}").parse().unwrap();
-        let config = with_request_timeout(kube::Config::new(url), Duration::from_millis(200));
-        let client = kube::Client::try_from(config).unwrap();
-        let secrets: kube::Api<k8s_openapi::api::core::v1::Secret> =
-            kube::Api::namespaced(client, "default");
-
-        let result = tokio::time::timeout(Duration::from_secs(10), secrets.get("any")).await;
-
-        let outcome = result.expect("the request outlived its bound");
-        assert!(outcome.is_err(), "an unanswered request cannot succeed");
-        assert!(
-            !held.lock().await.is_empty(),
-            "the server accepted the request"
-        );
+        format!("http://{address}")
     }
 
-    #[test]
-    fn request_clients_do_not_inherit_the_watch_read_timeout() {
-        let url = "http://127.0.0.1:1".parse().unwrap();
-        let config = request_client_config(kube::Config::new(url));
-        assert_eq!(config.read_timeout, Some(API_REQUEST_TIMEOUT));
-        assert_eq!(config.write_timeout, Some(API_REQUEST_TIMEOUT));
+    /// Issue one GET through a request client bounded at 200 ms, and report
+    /// how long it took to fail.
+    async fn bounded_get(url: String) -> Duration {
+        let client = request_client_with_deadline(
+            kube::Config::new(url.parse().unwrap()),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let secrets: kube::Api<k8s_openapi::api::core::v1::Secret> =
+            kube::Api::namespaced(client, "default");
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), secrets.get("any"))
+            .await
+            .expect("the request outlived its deadline");
+        assert!(outcome.is_err(), "the request cannot succeed");
+        started.elapsed()
+    }
+
+    /// A server that accepts the connection and never answers.
+    #[tokio::test]
+    async fn a_request_to_an_unresponsive_api_server_fails_within_its_deadline() {
+        let url = api_server(|socket| async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        })
+        .await;
+        assert!(bounded_get(url).await < Duration::from_secs(2));
+    }
+
+    /// Headers arrive at once, then the body trickles in a byte at a time,
+    /// fast enough that no idle timeout would ever fire. The deadline covers
+    /// the whole response, so the request still fails on time.
+    #[tokio::test]
+    async fn a_trickling_response_fails_within_its_deadline() {
+        let url = api_server(|mut socket| async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                           content-length: 100000\r\n\r\n";
+            if socket.write_all(headers.as_bytes()).await.is_err() {
+                return;
+            }
+            for _ in 0..1000 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if socket.write_all(b" ").await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(bounded_get(url).await < Duration::from_secs(2));
     }
 
     /// Pools are cached for the operator's lifetime, so the only thing that
