@@ -2,7 +2,7 @@
   "schema_version": "pgroles.review-artifact.v3",
   "provenance": {
     "tool_version": "0.14.0",
-    "captured_at": "2026-10-14T22:48:05.539107261Z",
+    "captured_at": "2026-10-15T00:20:20.381936503Z",
     "policy": {
       "content_digest": "sha256:8c24a336d84453f447df2ed0b55e0860d6e15afbfdb0e0d7866ba19b89451e9d"
     },
