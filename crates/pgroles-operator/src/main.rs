@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 use pgroles_operator::concurrency::ReconcileConcurrency;
-use pgroles_operator::context::OperatorContext;
+use pgroles_operator::context::{OperatorContext, request_client_config};
 use pgroles_operator::crd::{
     EphemeralAccessPolicy, EphemeralAccessRequest, PostgresPolicy, PostgresPolicyCandidate,
     PostgresPolicyPlan, REQUESTED_RECONCILE_ANNOTATION,
@@ -134,7 +134,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build kube client from in-cluster config or KUBECONFIG.
-    let client = Client::try_default().await?;
+    // Watches keep kube's long read timeout so their long polls survive; every
+    // request a reconcile makes goes through a client bounded per request.
+    let kube_config = kube::Config::infer().await?;
+    let client = Client::try_from(kube_config.clone())?;
+    let request_client = Client::try_from(request_client_config(kube_config))?;
 
     let observability = OperatorObservability::from_env()?.with_logger_provider(logger_provider);
     let http_addr = std::env::var("OPERATOR_HTTP_ADDR")
@@ -153,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = shutdown_rx.map(|_| ()).shared();
 
     let event_recorder = Recorder::new(
-        client.clone(),
+        request_client.clone(),
         Reporter {
             controller: "pgroles-operator".to_string(),
             instance: std::env::var("CONTROLLER_POD_NAME").ok(),
@@ -193,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
     // Create the shared operator context.
     let ctx = Arc::new(
         OperatorContext::new_with_runtime_config(
-            client.clone(),
+            request_client,
             observability.clone(),
             event_recorder,
             request_index.clone(),

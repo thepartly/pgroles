@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The operator's apply, its candidate previews, and the CLI's `apply` and `diff` evaluate one set of apply guards, so no preview can pass a plan the apply it predicts would refuse. `diff --review-out` records the ownership refusal as a failed `schema_owner_transfer` check.
 - Role-drop safety no longer describes another database's dependencies with this database's catalog, which could name an unrelated local object; it reports them by catalog and object id.
 - PG16+ membership option changes retain independent grantor edges and SET capabilities. Increases use proven ADMIN attribution; reductions use option revocation with RESTRICT, and changed or incomplete catalog expectations require replanning.
+- Every Kubernetes API request a reconcile makes now fails after 30 seconds instead of kube's 295-second watch default. A stalled request, such as the finalizer patch before a policy's first reconcile, could hold the controller's single reconcile slot for minutes without logging anything; it now fails, is logged, and is retried. Watches keep the long timeout.
 
 ### For library users
 

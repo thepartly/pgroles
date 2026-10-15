@@ -19,6 +19,28 @@ use crate::observability::OperatorObservability;
 use crate::plan::PlanRetention;
 use crate::request_index::RequestIndex;
 
+/// Longest a reconcile waits on one Kubernetes API request.
+pub const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Client configuration for the requests reconciles make — gets, lists,
+/// patches, status writes, Events, finalizer updates — and never for watches.
+///
+/// kube's default read timeout is 295 seconds so that a watch's long poll
+/// survives. Applied to a single request, that lets one stalled call, such as
+/// the finalizer patch kube's finalizer helper issues before a policy's first
+/// reconcile, hold the controller's only reconcile slot for minutes with
+/// nothing logged. Bounded, the call fails, the controller logs the error and
+/// requeues, and the next attempt opens a fresh request.
+pub fn request_client_config(config: kube::Config) -> kube::Config {
+    with_request_timeout(config, API_REQUEST_TIMEOUT)
+}
+
+fn with_request_timeout(mut config: kube::Config, timeout: Duration) -> kube::Config {
+    config.read_timeout = Some(timeout);
+    config.write_timeout = Some(timeout);
+    config
+}
+
 /// Minimum pool size required for reconciliation.
 ///
 /// One connection is held for the session-scoped advisory lock while the
@@ -1003,6 +1025,44 @@ impl ContextError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that accepts the connection and never answers is the stall
+    /// this bound exists for: the request must fail, not wait out kube's
+    /// watch-length default.
+    #[tokio::test]
+    async fn a_request_to_an_unresponsive_api_server_fails_within_the_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let accepted = held.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                accepted.lock().await.push(socket);
+            }
+        });
+        let url = format!("http://{address}").parse().unwrap();
+        let config = with_request_timeout(kube::Config::new(url), Duration::from_millis(200));
+        let client = kube::Client::try_from(config).unwrap();
+        let secrets: kube::Api<k8s_openapi::api::core::v1::Secret> =
+            kube::Api::namespaced(client, "default");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), secrets.get("any")).await;
+
+        let outcome = result.expect("the request outlived its bound");
+        assert!(outcome.is_err(), "an unanswered request cannot succeed");
+        assert!(
+            !held.lock().await.is_empty(),
+            "the server accepted the request"
+        );
+    }
+
+    #[test]
+    fn request_clients_do_not_inherit_the_watch_read_timeout() {
+        let url = "http://127.0.0.1:1".parse().unwrap();
+        let config = request_client_config(kube::Config::new(url));
+        assert_eq!(config.read_timeout, Some(API_REQUEST_TIMEOUT));
+        assert_eq!(config.write_timeout, Some(API_REQUEST_TIMEOUT));
+    }
 
     /// Pools are cached for the operator's lifetime, so the only thing that
     /// ever closes an unused connection is the idle reaper. If the reap window

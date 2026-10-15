@@ -195,7 +195,15 @@ runs:
         echo "::group::operator deployment and pods"
         kubectl -n pgroles-system get pods -o wide || true
         kubectl -n pgroles-system describe deployment/pgroles-operator || true
-        kubectl -n pgroles-system describe pods -l app=pgroles-operator || true
+        kubectl -n pgroles-system describe pods -l app.kubernetes.io/name=pgroles-operator || true
+        echo "::endgroup::"
+        # Watch events per watch and reconciles in flight separate a reconcile
+        # stuck on a request from a policy event that never reached the
+        # controller; the collector logs every export.
+        echo "::group::operator metrics (latest exports seen by the collector)"
+        kubectl -n pgroles-system logs deployment/otel-collector --tail=20000 2>/dev/null \
+          | grep -E -A14 'Name: pgroles\.(watch\.(events|synced)|reconcile\.(inflight|total)|controller\.progress)\b' \
+          | tail -n 400 || true
         echo "::endgroup::"
         echo "::group::operator logs (current)"
         kubectl -n pgroles-system logs deployment/pgroles-operator --tail=-1 || true
