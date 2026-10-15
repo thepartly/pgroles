@@ -213,6 +213,8 @@ another role.
 
 When a non-superuser plan creates an owner and grants its defaults before membership additions, PostgreSQL 16+ needs `CREATEROLE` and `createrole_self_grant = 'inherit'` (or `'set, inherit'`) on the connection for immediate inherited authority. `'set'` alone is insufficient. Configure the authenticated login/session: `SET ROLE` does not load target-role settings. pgroles reads the setting without enabling it. Later default revokes can instead use inherited authority established by the plan's membership additions; removals and inheritance downgrades must not leave them without authority. A planned grant requires a surviving usable administrator, not just membership or SET access to one. Preflight conservatively excludes administrator paths established by other additions; stage those bootstrap steps separately.
 
+On PostgreSQL 16+, a non-superuser executor never plans to revoke a membership edge that gives it `ADMIN OPTION`, or to remove `ADMIN` from one. That includes the bootstrap-superuser edge PostgreSQL adds when the executor creates a role. Leave those memberships undeclared, or declare them. Declaring the executor with `admin: false` does not remove its `ADMIN`.
+
 Schema defaults add to the global layer and cannot subtract from it. Removing
 PostgreSQL's built-in `PUBLIC EXECUTE` on functions therefore needs a global
 rule with `ensure: absent`; a schema-scoped one only removes a schema-scoped

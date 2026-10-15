@@ -504,9 +504,8 @@ fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
         apply(&executor, &replacement).await.unwrap();
         assert!(rows(&root).await.iter().any(|r| r.0 == "mop_exec" && r.3));
         executor.close().await;
-        // When the actual executor loses both of its own options, INHERIT
-        // must be reduced before ADMIN so the second revoke remains possible.
-        // The orphaned grantor cannot supply alternative ADMIN authority.
+        // Declaring away both of the executor's own options reduces only
+        // INHERIT: the diff never removes ADMIN the executor itself holds.
         reset(&root).await;
         root.execute("GRANT mop_role TO mop_g1 WITH ADMIN TRUE, INHERIT FALSE, SET FALSE; GRANT mop_g1 TO mop_exec WITH INHERIT TRUE, SET FALSE; GRANT mop_role TO mop_exec WITH ADMIN TRUE, INHERIT TRUE, SET TRUE GRANTED BY mop_g1; GRANT mop_role TO mop_g1 WITH ADMIN FALSE").await.unwrap();
         let executor = ordinary_executor().await;
@@ -525,35 +524,25 @@ fn ordinary_executor_option_changes_preserve_attribution_and_fail_closed() {
             .await
             .unwrap();
         assert!(
+            matches!(
+                changes.as_slice(),
+                [Change::UpdateMemberOptions {
+                    inherit: Some(false),
+                    admin: None,
+                    ..
+                }]
+            ),
+            "{changes:?}"
+        );
+        assert!(
             preflight_authority_issues(&executor, &changes, &before)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        let mut wrong_order = executor.begin().await.unwrap();
-        let mut rejected = None;
-        for statement in render_batch_with_context(&changes, &SqlContext::default())
-            .unwrap()
-            .into_iter()
-            .rev()
-        {
-            if let Err(error) = wrong_order.execute(statement.sql.as_str()).await {
-                rejected = Some(error);
-                break;
-            }
-        }
-        wrong_order.rollback().await.unwrap();
-        assert_eq!(
-            rejected
-                .unwrap()
-                .as_database_error()
-                .and_then(|e| e.code())
-                .as_deref(),
-            Some("42501")
-        );
         apply(&executor, &changes).await.unwrap();
         let flags: (bool,bool,bool) = sqlx::query_as("SELECT a.inherit_option,a.admin_option,a.set_option FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member JOIN pg_roles g ON g.oid=a.grantor WHERE r.rolname='mop_role' AND m.rolname='mop_exec' AND g.rolname='mop_g1'").fetch_one(&root).await.unwrap();
-        assert_eq!(flags, (false, false, true));
+        assert_eq!(flags, (false, true, true));
         executor.close().await;
 
         // A new independent supplier must invalidate a reviewed reduction,

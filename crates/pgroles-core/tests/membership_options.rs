@@ -601,3 +601,106 @@ fn unattributed_pg16_replacements_and_inconsistent_set_effect_fail_closed() {
     };
     assert!(pgroles_core::sql::render_all_with_context(&changes, &context).is_ok());
 }
+
+/// The executor's own ADMIN edge on a role it manages (for example the one
+/// PostgreSQL 16 records, as granted by the bootstrap superuser, when a
+/// CREATEROLE executor creates the role).
+fn executor_authority_graph(
+    options: std::collections::BTreeMap<String, MembershipOptions>,
+) -> RoleGraph {
+    let mut graph = graph_with_options(options);
+    graph
+        .executor_authority_edges
+        .insert(("reader".into(), "app".into(), "alloydbadmin".into()));
+    graph
+}
+
+fn options(inherit: bool, admin: bool) -> MembershipOptions {
+    MembershipOptions {
+        inherit,
+        admin,
+        set: false,
+    }
+}
+
+#[test]
+fn undeclared_executor_authority_edge_is_never_revoked() {
+    let current = executor_authority_graph(
+        [
+            ("alloydbadmin".to_string(), options(false, true)),
+            ("someone_else".to_string(), options(true, false)),
+        ]
+        .into(),
+    );
+    let mut desired = current.clone();
+    desired.memberships.clear();
+    assert_eq!(
+        pgroles_core::diff::diff(&current, &desired),
+        vec![Change::RemoveMember {
+            role: "reader".into(),
+            member: "app".into(),
+            grantor: Some("someone_else".into()),
+        }]
+    );
+
+    let current =
+        executor_authority_graph([("alloydbadmin".to_string(), options(false, true))].into());
+    let mut desired = current.clone();
+    desired.memberships.clear();
+    assert!(pgroles_core::diff::diff(&current, &desired).is_empty());
+}
+
+#[test]
+fn declared_executor_membership_never_reduces_its_own_admin() {
+    let current =
+        executor_authority_graph([("alloydbadmin".to_string(), options(false, true))].into());
+    let declare = |inherit, admin| {
+        let mut desired = current.clone();
+        desired.memberships = [MembershipEdge {
+            role: "reader".into(),
+            member: "app".into(),
+            inherit,
+            admin,
+        }]
+        .into();
+        pgroles_core::diff::diff(&current, &desired)
+    };
+    // `{ name: executor }` declares admin: false; only the increase remains.
+    assert_eq!(
+        declare(true, false),
+        vec![Change::UpdateMemberOptions {
+            role: "reader".into(),
+            member: "app".into(),
+            grantor: "alloydbadmin".into(),
+            inherit: Some(true),
+            admin: None,
+            binding: None,
+        }]
+    );
+    assert!(declare(false, false).is_empty());
+    assert!(declare(false, true).is_empty());
+
+    // Only ADMIN is protected: an explicitly declared INHERIT reduction is
+    // still planned (and left to the authority preflight).
+    let current =
+        executor_authority_graph([("alloydbadmin".to_string(), options(true, true))].into());
+    let mut desired = current.clone();
+    desired.memberships = [MembershipEdge {
+        role: "reader".into(),
+        member: "app".into(),
+        inherit: false,
+        admin: false,
+    }]
+    .into();
+    assert_eq!(
+        pgroles_core::diff::diff(&current, &desired),
+        vec![Change::UpdateMemberOptions {
+            role: "reader".into(),
+            member: "app".into(),
+            grantor: "alloydbadmin".into(),
+            inherit: Some(false),
+            admin: None,
+            binding: None,
+        }]
+    );
+}

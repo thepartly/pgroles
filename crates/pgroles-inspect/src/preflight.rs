@@ -635,6 +635,7 @@ pub async fn preflight_authority_issues(
     // Explicit attribution is required for updates. PostgreSQL checks both
     // privileges of the grantor and that grantor's surviving ADMIN authority.
     // Do not use CASCADE or replace independent downstream grants.
+    let mut initially_inherited: Option<BTreeSet<String>> = None;
     for (index, change) in changes.iter().enumerate() {
         if let Change::UpdateMemberOptions {
             role,
@@ -654,13 +655,26 @@ pub async fn preflight_authority_issues(
             let removed_edges = &prior.inherit_lost;
             let admin_removed_edges = &prior.admin_lost;
             if !executor_is_superuser && !prior.inherited_roles.contains(grantor) {
+                if initially_inherited.is_none() {
+                    initially_inherited = Some(
+                        crate::membership_options::membership_removal_phase(pool, &[], &executor)
+                            .await?
+                            .inherited_roles,
+                    );
+                }
+                let reason = if initially_inherited
+                    .as_ref()
+                    .is_some_and(|roles| roles.contains(grantor))
+                {
+                    "earlier membership reductions remove the grantor's inherited privileges"
+                } else {
+                    "GRANTED BY requires the grantor's privileges, which the executor does not inherit"
+                };
                 issues.push(AuthorityIssue::MembershipOptionsBlocked {
                     role: role.clone(),
                     member: member.clone(),
                     grantor: grantor.clone(),
-                    reason:
-                        "earlier membership reductions remove the grantor's inherited privileges"
-                            .into(),
+                    reason: reason.into(),
                 });
             }
             // Bind the actual executor and exact selected tuple before SQL
