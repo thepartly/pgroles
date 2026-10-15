@@ -48,7 +48,7 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 ## Moving from 0.13 to 0.14
 
 - The CRDs add status fields only: `status.lastAttemptedReconcileAt` on policies, `status.executionPreflight` on candidates, and a `members_options_changed` count in change summaries. Apply the version-matched CRDs before the controller. Chart values are unchanged.
-- Under `approval: auto`, a plan the executor lacks the authority to apply stays `Pending` instead of being marked `Approved`. Alerts that read an `Approved` plan as about to apply should treat a `Pending` plan on a policy with `Ready=False/ExecutorAuthority` as blocked.
+- An automatically applied plan that the executor lacks the authority to run now waits for that authority instead of being abandoned and planned again. Check alerts on plan phases against [how such a plan waits](/docs/operator-plan-approval).
 - Candidates are checked against every guard apply runs. A candidate that apply would refuse, such as an adopt-mode schema ownership transfer the policy does not allow, now reports `Ready=False/ExecutionBlocked` with its issues in `status.executionPreflight`.
 - On PostgreSQL 16+, membership option changes are planned per grantor. Expect replanned SQL for policies whose `inherit` or `admin` options differ from the database.
 - `pgroles diff --review-out` writes review format v3. The explorer still opens v2 files written by 0.13.
