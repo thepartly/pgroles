@@ -128,6 +128,9 @@ operator:
   # -- Annotations to add to the operator pod.
   podAnnotations: {}
 
+  # -- Additional pod labels.
+  podLabels: {}
+
   http:
     # -- Port serving the `/livez` and `/readyz` probes.
     port: 8080

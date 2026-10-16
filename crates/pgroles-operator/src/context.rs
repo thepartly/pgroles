@@ -14,10 +14,12 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::crd::{ConnectionAuth, ConnectionSpec, SecretKeySelector};
+use crate::crd::{ConnectionAuth, ConnectionSpec, GcpWorkloadIdentityAuth, SecretKeySelector};
 use crate::observability::OperatorObservability;
 use crate::plan::PlanRetention;
 use crate::request_index::RequestIndex;
+use pgroles_inspect::auth::{AccessToken, truncate_for_error};
+use pgroles_inspect::azure_auth::{AzureTokenSource, WorkloadIdentityConfig};
 
 /// Longest a reconcile waits on one Kubernetes API request.
 pub const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,7 +82,7 @@ const POOL_MIN_CONNECTIONS: u32 = 0;
 const GCP_METADATA_TOKEN_ENDPOINT: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const GCP_IAM_CREDENTIALS_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-const GCP_TOKEN_CACHE_SKEW_SECS: u64 = 300;
+const TOKEN_REFRESH_SKEW_SECS: u64 = 300;
 const GCP_IMPERSONATED_TOKEN_LIFETIME_SECS: u64 = 3600;
 const GCP_AUTH_HTTP_TIMEOUT_SECS: u64 = 10;
 
@@ -139,25 +141,55 @@ fn classify_pool_connect_error(set_role: Option<&str>, err: sqlx::Error) -> Cont
     ContextError::DatabaseConnect { source: err }
 }
 
-#[derive(Clone)]
-struct GcpAccessToken {
-    token: String,
-    expires_at: SystemTime,
-}
-
-trait GcpAccessTokenProvider: Send + Sync {
+trait ConnectionTokenProvider: Send + Sync {
     fn fetch_token<'a>(
         &'a self,
         auth: &'a ConnectionAuth,
-    ) -> BoxFuture<'a, Result<GcpAccessToken, ContextError>>;
+    ) -> BoxFuture<'a, Result<AccessToken, ContextError>>;
+}
+
+struct DefaultConnectionTokenProvider {
+    gcp: MetadataGcpTokenSource,
+    azure: Result<AzureTokenSource, pgroles_inspect::azure_auth::AzureAuthError>,
+}
+
+impl Default for DefaultConnectionTokenProvider {
+    fn default() -> Self {
+        Self {
+            gcp: MetadataGcpTokenSource::default(),
+            azure: WorkloadIdentityConfig::from_env().map(AzureTokenSource::new),
+        }
+    }
+}
+
+impl ConnectionTokenProvider for DefaultConnectionTokenProvider {
+    fn fetch_token<'a>(
+        &'a self,
+        auth: &'a ConnectionAuth,
+    ) -> BoxFuture<'a, Result<AccessToken, ContextError>> {
+        async move {
+            match auth {
+                ConnectionAuth::GcpWorkloadIdentity(config) => self.gcp.fetch(config).await,
+                ConnectionAuth::AzureWorkloadIdentity { .. } => {
+                    let source = self.azure.as_ref().map_err(|error| {
+                        ContextError::AzureAuthConfiguration {
+                            detail: error.to_string(),
+                        }
+                    })?;
+                    source.fetch().await.map_err(ContextError::AzureAuth)
+                }
+            }
+        }
+        .boxed()
+    }
 }
 
 #[derive(Clone)]
-struct MetadataGcpAccessTokenProvider {
+struct MetadataGcpTokenSource {
     client: reqwest::Client,
 }
 
-impl Default for MetadataGcpAccessTokenProvider {
+impl Default for MetadataGcpTokenSource {
     fn default() -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -169,28 +201,17 @@ impl Default for MetadataGcpAccessTokenProvider {
     }
 }
 
-impl GcpAccessTokenProvider for MetadataGcpAccessTokenProvider {
-    fn fetch_token<'a>(
-        &'a self,
-        auth: &'a ConnectionAuth,
-    ) -> BoxFuture<'a, Result<GcpAccessToken, ContextError>> {
-        async move {
-            let scope = auth.gcp_scope();
-            if let Some(target) = auth.gcp_impersonate_service_account() {
-                self.fetch_impersonated_access_token(target, scope).await
-            } else {
-                self.fetch_metadata_access_token(scope).await
-            }
+impl MetadataGcpTokenSource {
+    async fn fetch(&self, auth: &GcpWorkloadIdentityAuth) -> Result<AccessToken, ContextError> {
+        let scope = auth.gcp_scope();
+        if let Some(target) = auth.gcp_impersonate_service_account() {
+            self.fetch_impersonated_access_token(target, scope).await
+        } else {
+            self.fetch_metadata_access_token(scope).await
         }
-        .boxed()
     }
-}
 
-impl MetadataGcpAccessTokenProvider {
-    async fn fetch_metadata_access_token(
-        &self,
-        scope: &str,
-    ) -> Result<GcpAccessToken, ContextError> {
+    async fn fetch_metadata_access_token(&self, scope: &str) -> Result<AccessToken, ContextError> {
         let response = self
             .client
             .get(GCP_METADATA_TOKEN_ENDPOINT)
@@ -233,8 +254,8 @@ impl MetadataGcpAccessTokenProvider {
             });
         }
 
-        Ok(GcpAccessToken {
-            token: body.access_token,
+        Ok(AccessToken {
+            value: body.access_token,
             expires_at: SystemTime::now() + Duration::from_secs(body.expires_in),
         })
     }
@@ -243,7 +264,7 @@ impl MetadataGcpAccessTokenProvider {
         &self,
         target_service_account: &str,
         scope: &str,
-    ) -> Result<GcpAccessToken, ContextError> {
+    ) -> Result<AccessToken, ContextError> {
         let source = self
             .fetch_metadata_access_token(GCP_IAM_CREDENTIALS_SCOPE)
             .await?;
@@ -263,7 +284,7 @@ impl MetadataGcpAccessTokenProvider {
         let response = self
             .client
             .post(&endpoint)
-            .bearer_auth(&source.token)
+            .bearer_auth(&source.value)
             .json(&request)
             .send()
             .await
@@ -305,8 +326,8 @@ impl MetadataGcpAccessTokenProvider {
             }
         })?;
 
-        Ok(GcpAccessToken {
-            token: body.access_token,
+        Ok(AccessToken {
+            value: body.access_token,
             expires_at,
         })
     }
@@ -339,20 +360,6 @@ async fn response_body_for_error(response: reqwest::Response) -> String {
     }
 }
 
-fn truncate_for_error(mut body: String) -> String {
-    const MAX_ERROR_BODY_BYTES: usize = 512;
-    if body.len() <= MAX_ERROR_BODY_BYTES {
-        return body;
-    }
-    let mut end = MAX_ERROR_BODY_BYTES;
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    body.truncate(end);
-    body.push_str("...");
-    body
-}
-
 fn parse_google_expire_time(expire_time: &str) -> Option<SystemTime> {
     expire_time
         .parse::<jiff::Timestamp>()
@@ -364,7 +371,7 @@ fn token_expires_after_skew(expires_at: Option<SystemTime>, now: SystemTime) -> 
     let Some(expires_at) = expires_at else {
         return true;
     };
-    let Some(refresh_at) = now.checked_add(Duration::from_secs(GCP_TOKEN_CACHE_SKEW_SECS)) else {
+    let Some(refresh_at) = now.checked_add(Duration::from_secs(TOKEN_REFRESH_SKEW_SECS)) else {
         return false;
     };
     expires_at > refresh_at
@@ -446,7 +453,7 @@ pub struct OperatorContext {
     pub plan_retention: PlanRetention,
 
     /// Fetches short-lived provider-backed database passwords.
-    gcp_token_provider: Arc<dyn GcpAccessTokenProvider>,
+    token_provider: Arc<dyn ConnectionTokenProvider>,
 }
 
 impl OperatorContext {
@@ -468,7 +475,7 @@ impl OperatorContext {
             watch_namespace,
             plan_retention: PlanRetention::default(),
             database_locks: Arc::new(Mutex::new(HashMap::new())),
-            gcp_token_provider: Arc::new(MetadataGcpAccessTokenProvider::default()),
+            token_provider: Arc::new(DefaultConnectionTokenProvider::default()),
         }
     }
 
@@ -679,8 +686,8 @@ impl OperatorContext {
             }
 
             let (password, token_expires_at) = if let Some(auth) = &params.auth {
-                let token = self.gcp_token_provider.fetch_token(auth).await?;
-                (token.token, Some(token.expires_at))
+                let token = self.token_provider.fetch_token(auth).await?;
+                (token.value, Some(token.expires_at))
             } else {
                 let password = self
                     .resolve_param(namespace, &params.password, &params.password_secret)
@@ -707,7 +714,12 @@ impl OperatorContext {
             let ssl_mode = self
                 .resolve_param(namespace, &params.ssl_mode, &params.ssl_mode_secret)
                 .await?
-                .or_else(|| params.auth.as_ref().map(|_| "require".to_string()));
+                .or_else(|| {
+                    params.auth.as_ref().map(|auth| match auth {
+                        ConnectionAuth::GcpWorkloadIdentity(_) => "require".to_string(),
+                        ConnectionAuth::AzureWorkloadIdentity { .. } => "verify-full".to_string(),
+                    })
+                });
             if let Some(ssl_mode) = ssl_mode {
                 // Validate sslMode at runtime — CRD validation only catches
                 // literal values; a secret ref could resolve to anything.
@@ -1004,6 +1016,12 @@ pub enum ContextError {
 
     #[error("GCP auth token response was invalid: {detail}")]
     GcpAuthInvalidResponse { detail: String },
+
+    #[error("Azure Workload Identity configuration failed: {detail}")]
+    AzureAuthConfiguration { detail: String },
+
+    #[error("Azure Workload Identity authentication failed: {0}")]
+    AzureAuth(#[source] pgroles_inspect::azure_auth::AzureAuthError),
 }
 
 impl ContextError {
@@ -1018,18 +1036,166 @@ impl ContextError {
         )
     }
 
-    pub fn is_gcp_auth_non_transient(&self) -> bool {
-        matches!(
-            self,
-            ContextError::GcpAuthRejected { status, .. }
-                if (400..500).contains(status) && *status != 429
-        ) || matches!(self, ContextError::GcpAuthInvalidResponse { .. })
+    pub fn is_auth_non_transient(&self) -> bool {
+        match self {
+            Self::GcpAuthRejected { status, .. } => (400..500).contains(status) && *status != 429,
+            Self::GcpAuthInvalidResponse { .. } | Self::AzureAuthConfiguration { .. } => true,
+            Self::AzureAuth(error) => error.is_non_transient(),
+            _ => false,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_azure_token_mount_is_non_transient() {
+        use pgroles_inspect::azure_auth::AzureAuthError;
+        assert!(
+            super::ContextError::AzureAuth(AzureAuthError::ReadAssertion(
+                std::io::ErrorKind::NotFound.into()
+            ))
+            .is_auth_non_transient()
+        );
+        assert!(
+            !super::ContextError::AzureAuth(AzureAuthError::ReadAssertion(
+                std::io::ErrorKind::Interrupted.into()
+            ))
+            .is_auth_non_transient()
+        );
+    }
+
     use super::*;
+
+    struct StubTokenProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl ConnectionTokenProvider for StubTokenProvider {
+        fn fetch_token<'a>(
+            &'a self,
+            _auth: &'a ConnectionAuth,
+        ) -> BoxFuture<'a, Result<AccessToken, ContextError>> {
+            async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.fail {
+                    return Err(ContextError::AzureAuth(
+                        pgroles_inspect::azure_auth::AzureAuthError::EmptyAssertion,
+                    ));
+                }
+                Ok(AccessToken {
+                    value: "token-with-special:characters@".into(),
+                    expires_at: SystemTime::now() + Duration::from_secs(3600),
+                })
+            }
+            .boxed()
+        }
+    }
+
+    fn context_with_provider(provider: Arc<dyn ConnectionTokenProvider>) -> OperatorContext {
+        let client =
+            kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap()))
+                .unwrap();
+        let recorder = Recorder::new(
+            client.clone(),
+            kube::runtime::events::Reporter {
+                controller: "test".into(),
+                instance: None,
+            },
+        );
+        let mut context = OperatorContext::new_with_runtime_config(
+            client,
+            OperatorObservability::disabled(),
+            recorder,
+            RequestIndex::default(),
+            None,
+        );
+        context.token_provider = provider;
+        context
+    }
+
+    fn token_connection(provider: &str) -> ConnectionSpec {
+        serde_yaml::from_str(&format!("params:\n  host: localhost\n  dbname: postgres\n  username: executor\n  auth:\n    type: {provider}\n")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn both_providers_use_injected_token_and_keep_tls_defaults() {
+        let provider = Arc::new(StubTokenProvider {
+            calls: 0.into(),
+            fail: false,
+        });
+        let context = context_with_provider(provider.clone());
+        for (kind, tls) in [
+            ("gcp_workload_identity", "require"),
+            ("azure_workload_identity", "verify-full"),
+        ] {
+            let resolved = context
+                .resolve_connection_url_with_metadata("default", &token_connection(kind))
+                .await
+                .unwrap();
+            let options = PgConnectOptions::from_str(&resolved.database_url).unwrap();
+            assert_eq!(options.get_username(), "executor");
+            assert!(
+                resolved
+                    .database_url
+                    .contains("token%2Dwith%2Dspecial%3Acharacters%40")
+            );
+            assert!(resolved.database_url.contains(&format!("sslmode={tls}")));
+            assert!(token_expires_after_skew(
+                resolved.token_expires_at,
+                SystemTime::now()
+            ));
+        }
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_token_pool_is_reused_until_refresh_then_calls_provider() {
+        let provider = Arc::new(StubTokenProvider {
+            calls: 0.into(),
+            fail: true,
+        });
+        let context = context_with_provider(provider.clone());
+        for kind in ["gcp_workload_identity", "azure_workload_identity"] {
+            let connection = token_connection(kind);
+            let key = connection.cache_key("default");
+            let pool = PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/postgres")
+                .unwrap();
+            context.pool_cache.write().await.insert(
+                key.clone(),
+                CachedPool {
+                    resource_version: None,
+                    secret_fingerprint: Some(String::new()),
+                    token_expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+                    pool,
+                },
+            );
+            let before = provider.calls.load(std::sync::atomic::Ordering::SeqCst);
+            context
+                .get_or_create_pool("default", &connection)
+                .await
+                .unwrap();
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                before
+            );
+            context
+                .pool_cache
+                .write()
+                .await
+                .get_mut(&key)
+                .unwrap()
+                .token_expires_at = Some(SystemTime::now());
+            let result = context.get_or_create_pool("default", &connection).await;
+            assert!(matches!(result, Err(ContextError::AzureAuth(_))));
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                before + 1
+            );
+        }
+    }
 
     /// Serves every connection with `respond` and keeps the sockets open.
     async fn api_server<F, Fut>(respond: F) -> String
@@ -1268,7 +1434,7 @@ mod tests {
             body: "forbidden".into(),
         };
 
-        assert!(error.is_gcp_auth_non_transient());
+        assert!(error.is_auth_non_transient());
     }
 
     #[test]
@@ -1279,18 +1445,18 @@ mod tests {
             body: "rate limited".into(),
         };
 
-        assert!(!error.is_gcp_auth_non_transient());
+        assert!(!error.is_auth_non_transient());
     }
 
     #[test]
     fn token_expiry_uses_five_minute_refresh_skew() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         assert!(token_expires_after_skew(
-            Some(now + Duration::from_secs(GCP_TOKEN_CACHE_SKEW_SECS + 1)),
+            Some(now + Duration::from_secs(TOKEN_REFRESH_SKEW_SECS + 1)),
             now
         ));
         assert!(!token_expires_after_skew(
-            Some(now + Duration::from_secs(GCP_TOKEN_CACHE_SKEW_SECS)),
+            Some(now + Duration::from_secs(TOKEN_REFRESH_SKEW_SECS)),
             now
         ));
     }

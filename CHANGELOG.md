@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Azure Database for PostgreSQL Flexible Server authentication through Microsoft Entra Workload Identity in the CLI and Kubernetes operator, with short-lived token acquisition and operator pool renewal.
+- AKS Workload Identity Helm settings and documentation for passwordless connections and externally managed Entra roles.
+
 ## [0.14.0] - 2026-10-15
 
 ### Highlights

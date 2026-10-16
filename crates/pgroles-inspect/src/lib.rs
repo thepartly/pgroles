@@ -4,6 +4,9 @@
 //! representing the current state of roles, grants, default privileges, and
 //! memberships in a PostgreSQL database.
 
+pub mod auth;
+#[cfg(feature = "azure")]
+pub mod azure_auth;
 pub mod cloud;
 mod defaults;
 mod guards;

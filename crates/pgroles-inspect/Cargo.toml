@@ -11,12 +11,17 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+[features]
+azure = ["dep:reqwest"]
+
 [dependencies]
 pgroles-core = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
