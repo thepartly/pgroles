@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,7 +10,7 @@ use clap::{Parser, Subcommand};
 use kube::api::{ApiResource, DynamicObject, Patch, PatchParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tracing::{info, warn};
 
@@ -48,6 +49,23 @@ struct Cli {
     command: Commands,
 }
 
+/// PostgreSQL settings shared only by commands that connect to a database.
+#[derive(clap::Args)]
+struct DatabaseArgs {
+    /// PostgreSQL connection string (or set DATABASE_URL).
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
+
+    /// Obtain a short-lived password from a token provider.
+    #[arg(long, value_enum, env = "PGROLES_DATABASE_AUTH")]
+    auth: Option<DatabaseAuth>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DatabaseAuth {
+    AzureWorkloadIdentity,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Validate a manifest or bundle file. No database connection required.
@@ -73,9 +91,8 @@ enum Commands {
         #[arg(long, conflicts_with = "file")]
         bundle: Option<PathBuf>,
 
-        /// PostgreSQL connection string (or set DATABASE_URL).
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+        #[command(flatten)]
+        database: DatabaseArgs,
 
         /// Output format: "sql" for raw SQL, "summary" for a brief summary, "json" for machine-readable JSON, "markdown" for a redacted review table.
         #[arg(long, default_value = "sql")]
@@ -130,9 +147,8 @@ enum Commands {
         #[arg(long, conflicts_with = "file")]
         bundle: Option<PathBuf>,
 
-        /// PostgreSQL connection string (or set DATABASE_URL).
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+        #[command(flatten)]
+        database: DatabaseArgs,
 
         /// Print the SQL that would be executed without actually running it.
         #[arg(long)]
@@ -168,9 +184,8 @@ enum Commands {
         #[arg(long, conflicts_with = "file")]
         bundle: Option<PathBuf>,
 
-        /// PostgreSQL connection string (or set DATABASE_URL).
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+        #[command(flatten)]
+        database: DatabaseArgs,
     },
 
     /// Generate a manifest YAML from the current database state (brownfield adoption).
@@ -178,9 +193,8 @@ enum Commands {
     /// Introspects all non-system roles, their grants, default privileges, and
     /// memberships, then emits a flat manifest that reproduces the current state.
     Generate {
-        /// PostgreSQL connection string (or set DATABASE_URL).
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+        #[command(flatten)]
+        database: DatabaseArgs,
 
         /// Write output to this file instead of stdout.
         #[arg(short, long)]
@@ -360,9 +374,8 @@ enum GraphSource {
         #[arg(long, conflicts_with = "file")]
         bundle: Option<PathBuf>,
 
-        /// PostgreSQL connection string (or set DATABASE_URL).
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+        #[command(flatten)]
+        database: DatabaseArgs,
 
         /// Which roles to include: "managed" (requires -f) or "all".
         #[arg(long, default_value = "managed")]
@@ -459,7 +472,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Diff {
             file,
             bundle,
-            database_url,
+            database,
             format,
             mode,
             exit_code,
@@ -473,7 +486,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             cmd_diff(
                 file.as_deref(),
                 bundle.as_deref(),
-                &database_url,
+                &database,
                 &format,
                 ApplySettings {
                     mode: mode.into(),
@@ -492,7 +505,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Apply {
             file,
             bundle,
-            database_url,
+            database,
             dry_run,
             mode,
             allow_schema_owner_transfers,
@@ -500,7 +513,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             cmd_apply(
                 file.as_deref(),
                 bundle.as_deref(),
-                &database_url,
+                &database,
                 dry_run,
                 mode.into(),
                 allow_schema_owner_transfers,
@@ -511,19 +524,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Inspect {
             file,
             bundle,
-            database_url,
+            database,
         } => {
-            cmd_inspect(file.as_deref(), bundle.as_deref(), &database_url).await?;
+            cmd_inspect(file.as_deref(), bundle.as_deref(), &database).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Generate {
-            database_url,
+            database,
             output,
             suggest_profiles,
             suggest_min_schemas,
         } => {
             cmd_generate(
-                &database_url,
+                &database,
                 output.as_deref(),
                 suggest_profiles,
                 suggest_min_schemas,
@@ -584,7 +597,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             GraphSource::Current {
                 file,
                 bundle,
-                database_url,
+                database,
                 scope,
                 format,
                 output,
@@ -592,7 +605,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 cmd_graph_current(
                     file.as_deref(),
                     bundle.as_deref(),
-                    &database_url,
+                    &database,
                     &scope,
                     &format,
                     output.as_deref(),
@@ -1557,7 +1570,7 @@ fn finish_diff(
 async fn cmd_diff(
     file: Option<&Path>,
     bundle: Option<&Path>,
-    database_url: &str,
+    connection: &DatabaseArgs,
     format: &OutputFormat,
     apply: ApplySettings,
     use_exit_code: bool,
@@ -1578,7 +1591,7 @@ async fn cmd_diff(
     }
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
-        let pool = connect_db(database_url).await?;
+        let pool = connect_db(connection).await?;
         let inspect_config = inspect_config_for_bundle(&validated);
         let current = inspect_current_for_plan_with_config(&pool, &inspect_config).await?;
         info!(%mode, "reconciliation mode");
@@ -1693,7 +1706,7 @@ async fn cmd_diff(
     let yaml = read_manifest_file(file_path)?;
     let validated = validate_manifest(&yaml)?;
 
-    let pool = connect_db(database_url).await?;
+    let pool = connect_db(connection).await?;
     let current = inspect_current_for_plan(&pool, &validated).await?;
 
     info!(%mode, "reconciliation mode");
@@ -1791,14 +1804,14 @@ async fn cmd_diff(
 async fn cmd_apply(
     file: Option<&Path>,
     bundle: Option<&Path>,
-    database_url: &str,
+    connection: &DatabaseArgs,
     dry_run: bool,
     mode: ReconciliationMode,
     allow_schema_owner_transfers: bool,
 ) -> Result<()> {
     if let Some(bundle_path) = bundle {
         let validated = validate_bundle_file(bundle_path)?;
-        let pool = connect_db(database_url).await?;
+        let pool = connect_db(connection).await?;
         let inspect_config = inspect_config_for_bundle(&validated);
         let sql_ctx = detect_sql_context_with_config(&pool, &inspect_config).await?;
 
@@ -1904,7 +1917,7 @@ async fn cmd_apply(
     let yaml = read_manifest_file(file_path)?;
     let validated = validate_manifest(&yaml)?;
 
-    let pool = connect_db(database_url).await?;
+    let pool = connect_db(connection).await?;
     let sql_ctx = detect_sql_context(&pool, &validated.expanded).await?;
 
     // Detect cloud provider privilege level and warn about unsupported operations.
@@ -1999,7 +2012,11 @@ async fn cmd_apply(
     Ok(())
 }
 
-async fn cmd_inspect(file: Option<&Path>, bundle: Option<&Path>, database_url: &str) -> Result<()> {
+async fn cmd_inspect(
+    file: Option<&Path>,
+    bundle: Option<&Path>,
+    connection: &DatabaseArgs,
+) -> Result<()> {
     // Validate manifest or bundle before connecting so YAML errors fail fast.
     let validated_manifest = match (file, bundle) {
         (Some(path), None) => {
@@ -2015,7 +2032,7 @@ async fn cmd_inspect(file: Option<&Path>, bundle: Option<&Path>, database_url: &
         (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
     };
 
-    let pool = connect_db(database_url).await?;
+    let pool = connect_db(connection).await?;
 
     let current = if let Some(ref validated) = validated_manifest {
         inspect_current(&pool, validated).await?
@@ -2067,12 +2084,12 @@ async fn cmd_inspect(file: Option<&Path>, bundle: Option<&Path>, database_url: &
 }
 
 async fn cmd_generate(
-    database_url: &str,
+    connection: &DatabaseArgs,
     output: Option<&Path>,
     suggest_profiles: bool,
     suggest_min_schemas: usize,
 ) -> Result<()> {
-    let pool = connect_db(database_url).await?;
+    let pool = connect_db(connection).await?;
 
     // Introspect all non-system roles by using an unscoped inspect config.
     info!("introspecting all non-system roles for manifest generation");
@@ -2250,7 +2267,7 @@ fn cmd_graph_desired(
 async fn cmd_graph_current(
     file: Option<&Path>,
     bundle: Option<&Path>,
-    database_url: &str,
+    connection: &DatabaseArgs,
     scope: &GraphScope,
     format: &GraphFormat,
     output: Option<&Path>,
@@ -2262,7 +2279,7 @@ async fn cmd_graph_current(
         );
     }
 
-    let pool = connect_db(database_url).await?;
+    let pool = connect_db(connection).await?;
 
     let graph = match scope {
         GraphScope::Managed => {
@@ -2327,14 +2344,29 @@ fn write_output(content: &str, output: Option<&Path>) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn connect_db(database_url: &str) -> Result<PgPool> {
+async fn connect_db(connection: &DatabaseArgs) -> Result<PgPool> {
     info!("connecting to database");
     // The CLI is a one-shot tool, so prefer a single pooled connection. This
     // avoids hopping across different backends when a hostname resolves to
     // multiple PostgreSQL servers.
+    let options = match connection.auth {
+        None => PgConnectOptions::from_str(&connection.database_url)
+            .context("invalid PostgreSQL connection URL")?,
+        Some(DatabaseAuth::AzureWorkloadIdentity) => {
+            let options =
+                pgroles_inspect::azure_auth::connection_options(&connection.database_url)?;
+            let config = pgroles_inspect::azure_auth::WorkloadIdentityConfig::from_env()
+                .context("invalid Azure Workload Identity configuration")?;
+            let token = pgroles_inspect::azure_auth::AzureTokenSource::new(config)
+                .fetch()
+                .await
+                .context("could not acquire Azure PostgreSQL access token")?;
+            options.password(&token.value)
+        }
+    };
     PgPoolOptions::new()
         .max_connections(1)
-        .connect(database_url)
+        .connect_with(options)
         .await
         .context("failed to connect to database")
 }
@@ -2924,6 +2956,22 @@ mod tests {
         assert_eq!(written, "graph output");
     }
 
+    #[tokio::test]
+    async fn azure_connection_rejects_static_password_before_token_acquisition() {
+        for url in [
+            "postgres://operator:password@localhost/postgres",
+            "postgres://operator@localhost/postgres?password=secret",
+        ] {
+            let error = connect_db(&DatabaseArgs {
+                database_url: url.into(),
+                auth: Some(DatabaseAuth::AzureWorkloadIdentity),
+            })
+            .await
+            .expect_err("Azure auth must reject a persistent password");
+            assert!(error.to_string().contains("without a password"));
+        }
+    }
+
     #[test]
     fn graph_current_managed_requires_file_before_connecting() {
         let runtime = tokio::runtime::Runtime::new().expect("failed to create runtime");
@@ -2931,7 +2979,10 @@ mod tests {
             .block_on(cmd_graph_current(
                 None,
                 None,
-                "postgres://unused",
+                &DatabaseArgs {
+                    database_url: "postgres://unused".into(),
+                    auth: None,
+                },
                 &GraphScope::Managed,
                 &GraphFormat::Tree,
                 None,

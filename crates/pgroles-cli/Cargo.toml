@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 pgroles-core = { workspace = true }
-pgroles-inspect = { workspace = true }
+pgroles-inspect = { workspace = true, features = ["azure"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 flate2 = "1.1.5"

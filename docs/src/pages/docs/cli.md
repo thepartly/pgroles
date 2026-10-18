@@ -18,6 +18,18 @@ If omitted, manifest-based commands default to `pgroles.yaml` in the current dir
 
 Commands that connect to a database accept `--database-url` or read from the `DATABASE_URL` environment variable.
 
+For Azure Database for PostgreSQL Flexible Server, add the
+`--auth azure-workload-identity` flag (or set
+`PGROLES_DATABASE_AUTH=azure-workload-identity`). The CLI exchanges the projected AKS
+assertion for an Entra database access token and uses it as the connection
+password. Set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_FEDERATED_TOKEN_FILE`; optionally set `AZURE_AUTHORITY_HOST`
+(default: `https://login.microsoftonline.com/`). Omit any password from the URL. TLS defaults to
+`verify-full` unless the URL specifies `sslmode`. This option works with `diff`,
+`apply`, `inspect`, `generate`, and `graph current`; each command obtains a new
+token. See [operator connections](/docs/operator-connections#aks-workload-identity-for-azure-postgresql-flexible-server)
+for the AKS setup and external-role guidance.
+
 ## validate
 
 Parse and validate a manifest file or composed bundle without connecting to a database.

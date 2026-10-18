@@ -24,7 +24,7 @@ cluster-e2e = []
 
 [dependencies]
 pgroles-core = { workspace = true }
-pgroles-inspect = { workspace = true }
+pgroles-inspect = { workspace = true, features = ["azure"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
 kube = { workspace = true }
