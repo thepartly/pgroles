@@ -268,3 +268,87 @@ memberships:
         "{issues:#?}"
     );
 }
+
+/// Removing one of the executor's edges in a role leaves the retained ADMIN
+/// edge's INHERIT in place, so a later default-privilege revoke for that role
+/// still has authority. Runs in a rolled-back transaction.
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
+async fn partial_membership_removal_keeps_inherited_default_privilege_authority() {
+    use pgroles_core::manifest::{ObjectType, Privilege};
+    use pgroles_core::model::{DefaultPrivilegeScope, Grantee, RoleGraph};
+    use pgroles_core::sql::render_statements;
+
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if version < 160_000 {
+        return;
+    }
+    for retained_inherits in [true, false] {
+        pool.execute(
+            format!(
+                "BEGIN;
+                 CREATE ROLE eap_part_exec CREATEROLE NOINHERIT;
+                 CREATE ROLE eap_part_owner;
+                 GRANT eap_part_owner TO eap_part_exec
+                     WITH ADMIN TRUE, INHERIT {retained_inherits}, SET FALSE;
+                 SET LOCAL ROLE eap_part_exec;
+                 GRANT eap_part_owner TO eap_part_exec
+                     WITH INHERIT TRUE, SET TRUE GRANTED BY eap_part_exec"
+            )
+            .as_str(),
+        )
+        .await
+        .unwrap();
+        let changes = vec![
+            Change::RemoveMember {
+                role: "eap_part_owner".into(),
+                member: "eap_part_exec".into(),
+                grantor: Some("eap_part_exec".into()),
+            },
+            Change::RevokeDefaultPrivilege {
+                owner: "eap_part_owner".into(),
+                scope: DefaultPrivilegeScope::Global,
+                on_type: ObjectType::Function,
+                grantee: Grantee::Public,
+                privileges: [Privilege::Execute].into(),
+            },
+        ];
+        let issues = preflight_authority_issues(&pool, &changes, &RoleGraph::default()).await;
+        let mut failure = None;
+        'plan: for change in &changes {
+            for statement in render_statements(change).unwrap() {
+                if let Err(error) = pool.execute(statement.as_str()).await {
+                    failure = Some((statement, error));
+                    break 'plan;
+                }
+            }
+        }
+        pool.execute("ROLLBACK").await.unwrap();
+        let issues = issues.unwrap();
+        let case = format!("retained edge inherits={retained_inherits}");
+        if retained_inherits {
+            assert!(issues.is_empty(), "{case}: {issues:?}");
+            assert!(failure.is_none(), "{case}: {failure:?}");
+        } else {
+            assert!(
+                !issues.is_empty(),
+                "{case}: removing the last INHERIT must be flagged"
+            );
+            let (statement, _) = failure.expect("ALTER DEFAULT PRIVILEGES must fail");
+            assert!(
+                statement.starts_with("ALTER DEFAULT PRIVILEGES"),
+                "{case}: {statement}"
+            );
+        }
+    }
+    pool.close().await;
+}

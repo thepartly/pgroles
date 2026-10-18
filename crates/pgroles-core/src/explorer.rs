@@ -416,7 +416,8 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
     let manifest = prepared.manifest;
     let expanded = prepared.expanded;
     let desired = prepared.desired;
-    let graph = request.current.into_graph();
+    let mut graph = request.current.into_graph();
+    mark_executor_authority_edges(&mut graph, &request.executor, pg_major_version);
     let changes = plan_changes(&graph, &desired, &manifest, &expanded, request.mode);
     let authority = analysis_membership_authority(
         &graph,
@@ -464,6 +465,31 @@ pub fn analyze(request: AnalyzeRequest) -> Result<AnalyzeResponse, AnalysisError
         plan_fingerprint,
         fingerprint_kind: FingerprintKind::Illustrative,
     })
+}
+
+/// Record the snapshot's edges through which a non-superuser executor holds
+/// ADMIN itself on PostgreSQL 16+, as live inspection does, so the diff keeps
+/// them. Only per-grantor options identify which edge carries ADMIN.
+fn mark_executor_authority_edges(
+    graph: &mut RoleGraph,
+    executor: &ExecutorFacts,
+    pg_major_version: u16,
+) {
+    if pg_major_version < 16 || ExecutorAttributes::initial(graph, executor).superuser {
+        return;
+    }
+    let edges: Vec<(String, String, String)> = graph
+        .membership_edge_options
+        .iter()
+        .filter(|((_, member), _)| *member == executor.role)
+        .flat_map(|((role, member), options)| {
+            options
+                .iter()
+                .filter(|(_, options)| options.admin)
+                .map(|(grantor, _)| (role.clone(), member.clone(), grantor.clone()))
+        })
+        .collect();
+    graph.executor_authority_edges.extend(edges);
 }
 
 /// Analyze ordered changes against the inspected starting graph without
@@ -1888,7 +1914,11 @@ fn apply_change(
             grantor,
         } => {
             let key = (role.clone(), member.clone());
+            let complete = graph.complete_membership_options(role, member).is_some();
             let preserve_edge = grantor.as_ref().is_some_and(|grantor| {
+                if let Some(options) = graph.membership_edge_options.get_mut(&key) {
+                    options.remove(grantor);
+                }
                 graph
                     .membership_edge_grantors
                     .get_mut(&key)
@@ -1899,11 +1929,40 @@ fn apply_change(
                     .unwrap_or(false)
             });
             if preserve_edge {
-                set_role.insert(key.clone(), membership_set_role_default(pg_major_version));
-                usage.insert(key.clone(), SetRoleCapability::Unknown);
-                admin_options.insert(key, SetRoleCapability::Unknown);
+                // Complete per-grantor facts prove what the surviving edges
+                // still supply; otherwise do not claim the effective result.
+                let surviving = graph
+                    .membership_edge_options
+                    .get(&key)
+                    .filter(|_| complete)
+                    .map(|options| {
+                        (
+                            options.values().any(|edge| edge.inherit),
+                            options.values().any(|edge| edge.admin),
+                            options.values().any(|edge| edge.set),
+                        )
+                    });
+                let Some((inherit, admin, set)) = surviving else {
+                    set_role.insert(key.clone(), membership_set_role_default(pg_major_version));
+                    usage.insert(key.clone(), SetRoleCapability::Unknown);
+                    admin_options.insert(key, SetRoleCapability::Unknown);
+                    return;
+                };
+                graph
+                    .memberships
+                    .retain(|edge| edge.role != *role || edge.member != *member);
+                graph.memberships.insert(MembershipEdge {
+                    role: role.clone(),
+                    member: member.clone(),
+                    inherit,
+                    admin,
+                });
+                set_role.insert(key.clone(), capability(set));
+                usage.insert(key.clone(), capability(inherit));
+                admin_options.insert(key, capability(admin));
                 return;
             }
+            graph.membership_edge_options.remove(&key);
             graph.membership_edge_grantors.remove(&key);
             graph
                 .memberships
@@ -2058,6 +2117,130 @@ mod tests {
         assert_eq!(usable(&[removal]), BTreeSet::from(["g2".into()]));
         let drop = Change::DropRole { name: "g2".into() };
         assert_eq!(usable(&[drop]), BTreeSet::from(["g1".into()]));
+    }
+
+    #[test]
+    fn executor_admin_edges_in_the_snapshot_are_kept_like_live_planning() {
+        let options = |inherit, admin| crate::model::MembershipOptions {
+            inherit,
+            admin,
+            set: false,
+        };
+        for (pg_major_version, superuser, kept) in
+            [(16, false, true), (15, false, false), (16, true, false)]
+        {
+            let mut input = request(ReconciliationMode::Authoritative);
+            input.pg_major_version = Some(pg_major_version);
+            input.executor.superuser = superuser;
+            input.desired_yaml = "roles: [{name: owner}]\n".into();
+            input.current.roles.insert("deployer".into(), role());
+            input.current.roles.insert("owner".into(), role());
+            input.current.memberships.push(SnapshotMembership {
+                role: "owner".into(),
+                member: "deployer".into(),
+                inherit: true,
+                admin: true,
+                grantors: BTreeSet::from(["alloydbadmin".into(), "deployer_self".into()]),
+                grantor_options: BTreeMap::from([
+                    ("alloydbadmin".into(), options(false, true)),
+                    ("deployer_self".into(), options(true, false)),
+                ]),
+            });
+            let removed: Vec<Option<String>> = analyze(input)
+                .unwrap()
+                .changes
+                .into_iter()
+                .filter_map(|change| match change {
+                    Change::RemoveMember { grantor, .. } => Some(grantor),
+                    _ => None,
+                })
+                .collect();
+            let mut expected = vec![Some("deployer_self".to_string())];
+            if !kept {
+                expected.insert(0, Some("alloydbadmin".into()));
+            }
+            assert_eq!(
+                removed, expected,
+                "pg{pg_major_version} superuser={superuser}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_membership_removal_keeps_surviving_inherited_authority() {
+        use crate::manifest::{ObjectType, Privilege};
+        use crate::model::{DefaultPrivilegeScope, Grantee};
+        let options = |inherit, admin, set| crate::model::MembershipOptions {
+            inherit,
+            admin,
+            set,
+        };
+        for retained_inherits in [true, false] {
+            let mut graph = RoleGraph::default();
+            for name in ["owner", "deployer"] {
+                graph.roles.insert(name.into(), Default::default());
+            }
+            let key = ("owner".to_string(), "deployer".to_string());
+            graph.memberships.insert(MembershipEdge {
+                role: key.0.clone(),
+                member: key.1.clone(),
+                inherit: true,
+                admin: true,
+            });
+            graph.membership_edge_grantors.insert(
+                key.clone(),
+                BTreeSet::from(["alloydbadmin".into(), "deployer".into()]),
+            );
+            graph.membership_edge_options.insert(
+                key,
+                BTreeMap::from([
+                    (
+                        "alloydbadmin".into(),
+                        options(retained_inherits, true, false),
+                    ),
+                    ("deployer".into(), options(true, false, true)),
+                ]),
+            );
+            let changes = [
+                Change::RemoveMember {
+                    role: "owner".into(),
+                    member: "deployer".into(),
+                    grantor: Some("deployer".into()),
+                },
+                Change::RevokeDefaultPrivilege {
+                    owner: "owner".into(),
+                    scope: DefaultPrivilegeScope::Global,
+                    on_type: ObjectType::Function,
+                    grantee: Grantee::Public,
+                    privileges: [Privilege::Execute].into(),
+                },
+            ];
+            let executor = request(ReconciliationMode::Adopt).executor;
+            let findings = analyze_changes_with_options(
+                graph,
+                &changes,
+                &executor,
+                PlanAnalysisOptions {
+                    pg_major_version: 16,
+                    authority_graph_complete: true,
+                },
+            )
+            .findings;
+            let owner_finding = |kind: FindingKind| {
+                findings
+                    .iter()
+                    .any(|f| f.kind == kind && f.role.as_deref() == Some("owner"))
+            };
+            assert!(
+                !owner_finding(FindingKind::RequiredRoleReachabilityUnknown),
+                "{findings:#?}"
+            );
+            assert_eq!(
+                owner_finding(FindingKind::RequiredRoleUnavailable),
+                !retained_inherits,
+                "retained inherits={retained_inherits}: {findings:#?}"
+            );
+        }
     }
 
     #[test]
