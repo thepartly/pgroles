@@ -89,6 +89,7 @@ kubectl apply -f k8s/security/plan-decision-kyverno.yaml
 | operator.imagePullSecrets | list | `[]` | Image pull secrets for private registries. |
 | operator.nodeSelector | object | `{}` | Node selector for operator pod scheduling. |
 | operator.podAnnotations | object | `{}` | Annotations to add to the operator pod. |
+| operator.podLabels | object | `{}` | Additional pod labels. |
 | operator.podSecurityContext | object | `{"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level security context. |
 | operator.probes.liveness | object | `{"failureThreshold":3,"initialDelaySeconds":5,"periodSeconds":10,"timeoutSeconds":2}` | Liveness probe timing. The operator holds a per-database advisory lock while reconciling, so a probe aggressive enough to restart it mid-reconcile trades a transient failure for a lock wait. |
 | operator.probes.readiness | object | `{"failureThreshold":3,"initialDelaySeconds":2,"periodSeconds":10,"timeoutSeconds":2}` | Readiness probe timing. |

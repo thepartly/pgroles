@@ -7118,3 +7118,53 @@ default_privileges:
         );
     }
 }
+
+#[test]
+fn auth_option_is_scoped_to_database_commands() {
+    for args in [
+        vec!["validate", "--auth", "azure-workload-identity"],
+        vec!["graph", "desired", "--auth", "azure-workload-identity"],
+        vec!["--auth", "azure-workload-identity", "validate"],
+    ] {
+        cargo_bin_cmd!("pgroles")
+            .env_remove("PGROLES_DATABASE_AUTH")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unexpected argument '--auth'"));
+    }
+    for args in [
+        vec!["diff", "--help"],
+        vec!["apply", "--help"],
+        vec!["inspect", "--help"],
+        vec!["generate", "--help"],
+        vec!["graph", "current", "--help"],
+    ] {
+        cargo_bin_cmd!("pgroles")
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--auth <AUTH>"))
+            .stdout(predicate::str::contains("azure-workload-identity"));
+    }
+}
+
+#[test]
+fn azure_auth_cli_flag_and_environment_select_provider() {
+    for use_env in [false, true] {
+        let mut cmd = cargo_bin_cmd!("pgroles");
+        cmd.env_remove("PGROLES_DATABASE_AUTH").args([
+            "generate",
+            "--database-url",
+            "postgres://user:password@localhost/db",
+        ]);
+        if use_env {
+            cmd.env("PGROLES_DATABASE_AUTH", "azure-workload-identity");
+        } else {
+            cmd.args(["--auth", "azure-workload-identity"]);
+        }
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("without a password"));
+    }
+}

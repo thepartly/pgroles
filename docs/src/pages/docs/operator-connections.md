@@ -138,6 +138,79 @@ principal name such as `sa@project.iam` is rejected. Name the PostgreSQL group
 role to switch into, not the identity you authenticate as. See
 [executor privileges](/docs/executor-privileges) for what that role needs.
 
+### AKS Workload Identity for Azure PostgreSQL Flexible Server
+
+Use `connection.params.auth.type: azure_workload_identity` for Microsoft Entra
+authentication. The operator reads the projected AKS service account assertion,
+exchanges it for the PostgreSQL resource scope, and uses the short lived access
+token as the PostgreSQL password. It refreshes the token and connection pool
+before expiry. No PostgreSQL password Secret is required. `password` and
+`passwordSecret` are rejected in this mode; omitted `sslMode` defaults to
+`verify-full` so the server certificate and hostname are checked.
+
+The Entra identity comes from the operator pod environment and is shared by all
+Azure policies handled by that operator. Per-policy impersonation is not
+supported; use separate operator deployments when different Entra identities
+are needed. `scope` and `impersonateServiceAccount` are GCP-only fields and are
+rejected for Azure authentication.
+
+```yaml
+operator:
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: <managed-identity-client-id>
+  podLabels:
+    azure.workload.identity/use: "true"
+```
+
+```yaml
+connection:
+  params:
+    host: myserver.postgres.database.azure.com
+    dbname: postgres
+    username: pgroles-operator
+    auth:
+      type: azure_workload_identity
+```
+
+Configure the AKS federated identity credential, [enable Entra authentication](https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-configure)
+on the Flexible Server, and [create/map the Entra principal](https://learn.microsoft.com/en-us/azure/postgresql/security/security-connect-with-managed-identity#create-an-azure-database-for-postgresql-user-for-your-managed-identity)
+as a PostgreSQL role before reconciliation. The pod needs `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, and `AZURE_FEDERATED_TOKEN_FILE`, injected by the AKS
+Workload Identity webhook. Treat the Entra role as externally owned in policy:
+
+```yaml
+roles:
+  - name: pgroles-operator
+    external: true
+```
+
+`external: true` leaves role creation, attributes, password, and deletion to
+Azure, while declared memberships and grants can still refer to that role.
+Use a separate PostgreSQL role and `setRole` if the login identity needs the
+executor privileges described in [executor privileges](/docs/executor-privileges).
+
+Azure can attribute automatic creator ADMIN memberships to `azuresu`. Inspect
+and preserve their live options in the desired memberships; see
+[memberships](/docs/memberships). On Azure PostgreSQL 16, creating a role and
+explicitly granting ADMIN back to its creator in the same transaction can fail
+with `ADMIN option cannot be granted back to your own grantor`. Bootstrap role
+creation separately, then adopt the existing membership and reconcile object
+grants. Treat this SQL-authority constraint separately when validating token
+authentication and policy convergence.
+
+The operator reads its Azure configuration once at startup and reuses its HTTP
+client. It re-reads the projected assertion on every token exchange.
+`AZURE_AUTHORITY_HOST` can override the default `https://login.microsoftonline.com/`
+with an HTTPS authority origin. Restart the operator after changing its identity
+or authority configuration.
+
+The CLI supports the same projected identity with
+`pgroles diff --auth azure-workload-identity --database-url 'postgres://pgroles-operator@myserver.postgres.database.azure.com/postgres?sslmode=verify-full'`.
+The flag also applies to `apply`, `inspect`, `generate`, and current-state
+`graph`; omit a password from the connection URL. The CLI obtains a fresh
+access token for each invocation.
+
 {% callout type="note" title="Host resolution" %}
 The `host` must be reachable from the operator pod. For an in-cluster database in a different namespace, use the fully qualified service name (e.g. `my-postgres.my-namespace.svc`). For a database outside the cluster, use the external hostname or IP directly (e.g. `db.example.com` or `10.0.1.50`).
 {% /callout %}

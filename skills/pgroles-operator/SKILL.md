@@ -75,12 +75,32 @@ Use the same canonical connection reference for policies intended to share a
 database. Different Secrets can point to the same database without being
 recognized as the same identity.
 
+For Azure Database for PostgreSQL Flexible Server on AKS, use structured
+`connection.params` with `auth.type: azure_workload_identity`. Set the operator
+ServiceAccount annotation `azure.workload.identity/client-id` and pod label
+`azure.workload.identity/use: "true"`; the AKS webhook supplies the projected
+assertion and Azure identity environment. Do not set `password` or
+`passwordSecret`. Declare the Entra PostgreSQL principal as `external: true`
+when referenced in the policy, and verify its server-side mapping and executor
+privileges separately. See [operator connections](https://thepartly.github.io/pgroles/docs/operator-connections/#aks-workload-identity-for-azure-postgresql-flexible-server)
+for the full configuration. Azure policies share the Entra identity supplied by
+the operator pod environment; per-policy impersonation is not supported.
+Configuration is loaded once at startup; restart the operator after changing
+identity settings or `AZURE_AUTHORITY_HOST`. The assertion file is re-read on
+every exchange.
+
+Azure may attribute creator ADMIN memberships to `azuresu`; inspect and
+preserve their actual options. If CREATE ROLE followed by a self-ADMIN grant
+fails, separate role bootstrap from membership adoption and object-grant
+reconciliation. Token authentication success alone does not certify this SQL
+lifecycle. See the Azure connection guide for the observed constraint.
+
 Observe-only policies retain claims. A suspended policy returns before checking
 peers, but an active peer can still detect overlap with its claims.
 
 ## Rollout Workflow
 
-1. Verify the target chart version, CRDs, connection Secret, executor privileges,
+1. Verify the target chart version, CRDs, connection configuration, executor privileges,
    and provider/IaC prerequisites.
 2. Render the actual Kubernetes overlay or Helm release.
 3. Start in `mode: observe` for brownfield or high-impact changes.

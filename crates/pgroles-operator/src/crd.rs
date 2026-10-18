@@ -563,67 +563,211 @@ pub struct ConnectionParams {
 /// Provider-backed authentication for `connection.params`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
-#[schemars(transform = schemars::transform::RecursiveTransform(describe_auth_tag))]
+#[schemars(transform = normalize_connection_auth_schema)]
 pub enum ConnectionAuth {
     /// Fetch a Cloud SQL IAM database login token using the GKE metadata
     /// server. `username` must be the Cloud SQL PostgreSQL IAM role name
     /// (for service accounts, the email without `.gserviceaccount.com`).
     #[serde(rename = "gcp_workload_identity", rename_all = "camelCase")]
-    GcpWorkloadIdentity {
-        /// Target Google service account to impersonate before requesting the
-        /// Cloud SQL login token. Omit to use the pod's bound identity.
-        #[serde(default)]
-        impersonate_service_account: Option<String>,
-        /// OAuth scope requested for the access token.
-        #[serde(default)]
-        scope: Option<String>,
+    GcpWorkloadIdentity(GcpWorkloadIdentityAuth),
+    /// Exchange the AKS projected service account token for an Entra access
+    /// token accepted by Azure Database for PostgreSQL Flexible Server.
+    #[serde(rename = "azure_workload_identity")]
+    AzureWorkloadIdentity {
+        // Preserve misplaced provider fields so an old invalid object can be
+        // decoded by the watcher and rejected by its own reconcile.
+        #[serde(flatten)]
+        #[schemars(skip)]
+        unsupported_fields: BTreeMap<String, serde_json::Value>,
     },
 }
 
-fn describe_auth_tag(schema: &mut schemars::Schema) {
-    if let Some(tag) = schema
-        .get_mut("properties")
-        .and_then(|p| p.get_mut("type"))
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        tag.insert(
-            "description".into(),
-            serde_json::json!("Provider authentication mechanism."),
-        );
+/// GCP-only options cannot be passed to an Azure token provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(inline)]
+pub struct GcpWorkloadIdentityAuth {
+    /// Target Google service account to impersonate before requesting the
+    /// Cloud SQL login token. Omit to use the pod's bound identity.
+    #[serde(default)]
+    impersonate_service_account: Option<String>,
+    /// OAuth scope requested for the access token.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+fn normalize_connection_auth_schema(schema: &mut schemars::Schema) {
+    // Build one structural object from the derived variants. kube cannot hoist
+    // different discriminator schemas; preserve every other derived field schema,
+    // including its documentation, instead of duplicating it by hand.
+    let mut properties = serde_json::Map::new();
+    let mut providers = Vec::new();
+    if let Some(serde_json::Value::Array(branches)) = schema.remove("oneOf") {
+        for branch in branches {
+            if let Some(fields) = branch
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (name, field) in fields {
+                    if name == "type" {
+                        if let Some(value) = field.get("const") {
+                            providers.push(value.clone());
+                        } else if let Some(values) =
+                            field.get("enum").and_then(serde_json::Value::as_array)
+                        {
+                            providers.extend(values.iter().cloned());
+                        }
+                    } else {
+                        properties.insert(name.clone(), field.clone());
+                    }
+                }
+            }
+        }
+    }
+    properties.insert(
+        "type".into(),
+        serde_json::json!({
+            "type": "string", "enum": providers,
+            "description": "Provider authentication mechanism."
+        }),
+    );
+    schema.insert("type".into(), "object".into());
+    schema.insert("properties".into(), properties.into());
+    schema.insert("required".into(), serde_json::json!(["type"]));
+    schema.insert("x-kubernetes-validations".into(), serde_json::json!([{
+        "rule": "self.type == 'gcp_workload_identity' || (!has(self.scope) && !has(self.impersonateServiceAccount))",
+        "message": "scope and impersonateServiceAccount are only supported with gcp_workload_identity"
+    }]));
+}
+
+impl GcpWorkloadIdentityAuth {
+    pub fn gcp_scope(&self) -> &str {
+        self.scope
+            .as_deref()
+            .unwrap_or(DEFAULT_GCP_CLOUD_SQL_LOGIN_SCOPE)
+    }
+
+    pub fn gcp_impersonate_service_account(&self) -> Option<&str> {
+        self.impersonate_service_account.as_deref()
     }
 }
 
 impl ConnectionAuth {
-    pub fn gcp_scope(&self) -> &str {
-        match self {
-            Self::GcpWorkloadIdentity { scope, .. } => scope
-                .as_deref()
-                .unwrap_or(DEFAULT_GCP_CLOUD_SQL_LOGIN_SCOPE),
-        }
-    }
-
-    pub fn gcp_impersonate_service_account(&self) -> Option<&str> {
-        match self {
-            Self::GcpWorkloadIdentity {
-                impersonate_service_account,
-                ..
-            } => impersonate_service_account.as_deref(),
-        }
-    }
-
     fn cache_key(&self) -> String {
         match self {
-            Self::GcpWorkloadIdentity {
+            Self::GcpWorkloadIdentity(GcpWorkloadIdentityAuth {
                 impersonate_service_account,
                 scope,
-            } => format!(
+            }) => format!(
                 "gcp_workload_identity\0impersonate={}\0scope={}",
                 impersonate_service_account.as_deref().unwrap_or_default(),
                 scope
                     .as_deref()
                     .unwrap_or(DEFAULT_GCP_CLOUD_SQL_LOGIN_SCOPE)
             ),
+            Self::AzureWorkloadIdentity { .. } => "azure_workload_identity".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod azure_auth_tests {
+    use super::*;
+
+    #[test]
+    fn azure_auth_round_trips_and_has_distinct_cache_key() {
+        let auth: ConnectionAuth =
+            serde_json::from_str(r#"{"type":"azure_workload_identity"}"#).unwrap();
+        assert_eq!(
+            auth,
+            ConnectionAuth::AzureWorkloadIdentity {
+                unsupported_fields: BTreeMap::new()
+            }
+        );
+        assert_eq!(auth.cache_key(), "azure_workload_identity");
+        assert_eq!(
+            serde_json::to_value(auth).unwrap(),
+            serde_json::json!({"type":"azure_workload_identity"})
+        );
+    }
+
+    #[test]
+    fn mixed_policy_list_decodes_and_only_invalid_azure_policy_is_rejected() {
+        for field in ["scope", "impersonateServiceAccount"] {
+            let connection: ConnectionSpec = serde_json::from_value(serde_json::json!({
+                "params": {
+                    "host": "server.postgres.database.azure.com", "dbname": "postgres",
+                    "username": "operator", "auth": {"type": "gcp_workload_identity"}
+                }
+            }))
+            .unwrap();
+            let valid =
+                PostgresPolicy::new("valid-gcp", super::tests::spec_with_connection(connection));
+            let mut invalid = serde_json::to_value(&valid).unwrap();
+            invalid["metadata"]["name"] = "invalid-azure".into();
+            invalid["spec"]["connection"]["params"]["auth"] = serde_json::json!({
+                "type": "azure_workload_identity", (field): "unexpected"
+            });
+            let list: kube::api::ObjectList<PostgresPolicy> =
+                serde_json::from_value(serde_json::json!({
+                    "apiVersion": "pgroles.io/v1alpha1", "kind": "PostgresPolicyList",
+                    "metadata": {}, "items": [valid, invalid]
+                }))
+                .expect("one invalid policy must not prevent the watch from decoding its list");
+            assert!(list.items[0].spec.validate_connection_spec().is_ok());
+            assert!(matches!(
+                list.items[1].spec.validate_connection_spec(),
+                Err(ConnectionValidationError::UnsupportedAuthField { field: rejected }) if rejected == field
+            ));
+        }
+    }
+
+    #[test]
+    fn crd_admission_restricts_gcp_fields_to_gcp_auth() {
+        use kube::CustomResourceExt;
+        let crd = serde_json::to_value(PostgresPolicy::crd()).unwrap();
+        let auth = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+            ["connection"]["properties"]["params"]["properties"]["auth"];
+        assert_eq!(
+            auth["x-kubernetes-validations"][0]["rule"],
+            "self.type == 'gcp_workload_identity' || (!has(self.scope) && !has(self.impersonateServiceAccount))"
+        );
+        assert_eq!(
+            auth["properties"]["type"]["enum"],
+            serde_json::json!(["gcp_workload_identity", "azure_workload_identity"])
+        );
+        assert!(
+            auth["properties"]["impersonateServiceAccount"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("requesting the\nCloud SQL")
+        );
+    }
+
+    #[test]
+    fn azure_connection_needs_no_password_and_rejects_one() {
+        let params: ConnectionParams = serde_yaml::from_str(
+            "host: server.postgres.database.azure.com\ndbname: postgres\nusername: pgroles-operator\nauth:\n  type: azure_workload_identity\n",
+        )
+        .unwrap();
+        let connection = |params| ConnectionSpec {
+            secret_ref: None,
+            secret_key: None,
+            params: Some(params),
+            require_physical_identity: None,
+        };
+        assert!(
+            super::tests::spec_with_connection(connection(params.clone()))
+                .validate_connection_spec()
+                .is_ok()
+        );
+        let mut with_password = params;
+        with_password.password = Some("static-password".into());
+        assert!(matches!(
+            super::tests::spec_with_connection(connection(with_password))
+                .validate_connection_spec(),
+            Err(ConnectionValidationError::AuthWithPassword)
+        ));
     }
 }
 
@@ -911,6 +1055,9 @@ pub enum ConnectionValidationError {
 
     #[error("connection.params: password/passwordSecret are mutually exclusive with auth")]
     AuthWithPassword,
+
+    #[error("connection.params.auth: {field} is only supported with gcp_workload_identity")]
+    UnsupportedAuthField { field: String },
 
     #[error(
         "connection.params.setRole: \"{value}\" is not a valid PostgreSQL role identifier (must match {pattern})",
@@ -2125,10 +2272,10 @@ impl PostgresPolicySpec {
                         return Err(ConnectionValidationError::AuthWithPassword);
                     }
                     match auth {
-                        ConnectionAuth::GcpWorkloadIdentity {
+                        ConnectionAuth::GcpWorkloadIdentity(GcpWorkloadIdentityAuth {
                             impersonate_service_account,
                             scope,
-                        } => {
+                        }) => {
                             if let Some(value) = impersonate_service_account
                                 && value.trim().is_empty()
                             {
@@ -2142,6 +2289,15 @@ impl PostgresPolicySpec {
                                 return Err(ConnectionValidationError::EmptyAuthField {
                                     field: "scope".to_string(),
                                 });
+                            }
+                        }
+                        ConnectionAuth::AzureWorkloadIdentity { unsupported_fields } => {
+                            for field in ["scope", "impersonateServiceAccount"] {
+                                if unsupported_fields.contains_key(field) {
+                                    return Err(ConnectionValidationError::UnsupportedAuthField {
+                                        field: field.to_string(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -3833,7 +3989,7 @@ mod tests {
     }
 
     /// Helper to build a minimal spec with the given connection and no roles/grants.
-    fn spec_with_connection(connection: ConnectionSpec) -> PostgresPolicySpec {
+    pub(super) fn spec_with_connection(connection: ConnectionSpec) -> PostgresPolicySpec {
         PostgresPolicySpec {
             connection,
             interval: "5m".into(),
@@ -4096,10 +4252,12 @@ mod tests {
                 username_secret: None,
                 password: None,
                 password_secret: None,
-                auth: Some(ConnectionAuth::GcpWorkloadIdentity {
-                    impersonate_service_account: None,
-                    scope: None,
-                }),
+                auth: Some(ConnectionAuth::GcpWorkloadIdentity(
+                    GcpWorkloadIdentityAuth {
+                        impersonate_service_account: None,
+                        scope: None,
+                    },
+                )),
                 ssl_mode: None,
                 ssl_mode_secret: None,
                 set_role: None,
@@ -4127,10 +4285,12 @@ mod tests {
                 username_secret: None,
                 password: Some("static-password".into()),
                 password_secret: None,
-                auth: Some(ConnectionAuth::GcpWorkloadIdentity {
-                    impersonate_service_account: None,
-                    scope: None,
-                }),
+                auth: Some(ConnectionAuth::GcpWorkloadIdentity(
+                    GcpWorkloadIdentityAuth {
+                        impersonate_service_account: None,
+                        scope: None,
+                    },
+                )),
                 ssl_mode: None,
                 ssl_mode_secret: None,
                 set_role: None,
@@ -4160,10 +4320,12 @@ mod tests {
                 username_secret: None,
                 password: None,
                 password_secret: None,
-                auth: Some(ConnectionAuth::GcpWorkloadIdentity {
-                    impersonate_service_account: Some(" ".into()),
-                    scope: None,
-                }),
+                auth: Some(ConnectionAuth::GcpWorkloadIdentity(
+                    GcpWorkloadIdentityAuth {
+                        impersonate_service_account: Some(" ".into()),
+                        scope: None,
+                    },
+                )),
                 ssl_mode: None,
                 ssl_mode_secret: None,
                 set_role: None,
@@ -4375,9 +4537,12 @@ params:
         let auth = params.auth.as_ref().expect("auth should deserialize");
 
         assert!(params.password.is_none());
-        assert_eq!(auth.gcp_scope(), "https://example.com/custom-scope");
+        let ConnectionAuth::GcpWorkloadIdentity(gcp) = auth else {
+            panic!("expected GCP auth")
+        };
+        assert_eq!(gcp.gcp_scope(), "https://example.com/custom-scope");
         assert_eq!(
-            auth.gcp_impersonate_service_account(),
+            gcp.gcp_impersonate_service_account(),
             Some("target@other-project.iam.gserviceaccount.com")
         );
         assert!(conn.cache_key("prod").contains("gcp_workload_identity"));
