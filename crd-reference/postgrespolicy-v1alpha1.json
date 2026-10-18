@@ -28,13 +28,6 @@
                 "auth": {
                   "description": "Provider-backed authentication for connections that use short-lived\ncredentials instead of a static PostgreSQL password.",
                   "nullable": true,
-                  "oneOf": [
-                    {
-                      "required": [
-                        "type"
-                      ]
-                    }
-                  ],
                   "properties": {
                     "impersonateServiceAccount": {
                       "description": "Target Google service account to impersonate before requesting the\nCloud SQL login token. Omit to use the pod's bound identity.",
@@ -49,12 +42,22 @@
                     "type": {
                       "description": "Provider authentication mechanism.",
                       "enum": [
-                        "gcp_workload_identity"
+                        "gcp_workload_identity",
+                        "azure_workload_identity"
                       ],
                       "type": "string"
                     }
                   },
-                  "type": "object"
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object",
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "scope and impersonateServiceAccount are only supported with gcp_workload_identity",
+                      "rule": "self.type == 'gcp_workload_identity' || (!has(self.scope) && !has(self.impersonateServiceAccount))"
+                    }
+                  ]
                 },
                 "dbname": {
                   "description": "Database name as a literal value.",
