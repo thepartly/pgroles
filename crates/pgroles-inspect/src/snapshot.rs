@@ -489,6 +489,13 @@ impl RawInspection {
             edge.inherit |= row.inherit_option;
             edge.admin |= row.admin_option;
             if let Some(grantor) = &row.grantor {
+                if row.executor_authority {
+                    graph.executor_authority_edges.insert((
+                        row.role_name.clone(),
+                        row.member_name.clone(),
+                        grantor.clone(),
+                    ));
+                }
                 graph
                     .membership_edge_options
                     .entry(key.clone())
@@ -738,6 +745,7 @@ mod tests {
         MembershipRow {
             set_option: true,
             grantor: None,
+            executor_authority: false,
             role_name: role.to_string(),
             member_name: member.to_string(),
             admin_option: false,

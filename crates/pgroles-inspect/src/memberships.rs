@@ -25,6 +25,11 @@ pub struct MembershipRow {
     /// edge (`REVOKE ... GRANTED BY`). `None` on older servers, whose revokes
     /// are not grantor-attributed.
     pub grantor: Option<String>,
+    /// Whether this edge gives the connected executor ADMIN OPTION on the
+    /// granted role: the executor is the member, is not a superuser, and the
+    /// server is PostgreSQL 16+ (where non-superuser membership changes
+    /// require ADMIN). Always false on older servers.
+    pub executor_authority: bool,
 }
 
 impl MembershipRow {
@@ -81,7 +86,10 @@ pub async fn fetch_predefined_memberships(
                 m.admin_option,
                 m.inherit_option,
                 m.set_option,
-                g.rolname AS grantor
+                g.rolname AS grantor,
+                mr.rolname = current_user AND m.admin_option
+                    AND NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+                    AS executor_authority
             FROM pg_auth_members m
             JOIN pg_roles gr ON gr.oid = m.roleid
             JOIN pg_roles mr ON mr.oid = m.member
@@ -103,7 +111,8 @@ pub async fn fetch_predefined_memberships(
                 m.admin_option,
                 mr.rolinherit AS inherit_option,
                 true AS set_option,
-                NULL::text AS grantor
+                NULL::text AS grantor,
+                false AS executor_authority
             FROM pg_auth_members m
             JOIN pg_roles gr ON gr.oid = m.roleid
             JOIN pg_roles mr ON mr.oid = m.member
@@ -175,7 +184,10 @@ async fn fetch_memberships_pg16(
                     m.admin_option,
                     m.inherit_option,
                     m.set_option,
-                    g.rolname AS grantor
+                    g.rolname AS grantor,
+                    mr.rolname = current_user AND m.admin_option
+                        AND NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+                        AS executor_authority
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
                 JOIN pg_roles mr ON mr.oid = m.member
@@ -197,7 +209,10 @@ async fn fetch_memberships_pg16(
                     m.admin_option,
                     m.inherit_option,
                     m.set_option,
-                    g.rolname AS grantor
+                    g.rolname AS grantor,
+                    mr.rolname = current_user AND m.admin_option
+                        AND NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+                        AS executor_authority
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
                 JOIN pg_roles mr ON mr.oid = m.member
@@ -228,7 +243,8 @@ async fn fetch_memberships_legacy(
                     m.admin_option,
                     mr.rolinherit AS inherit_option,
                     true AS set_option,
-                    NULL::text AS grantor
+                    NULL::text AS grantor,
+                    false AS executor_authority
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
                 JOIN pg_roles mr ON mr.oid = m.member
@@ -249,7 +265,8 @@ async fn fetch_memberships_legacy(
                     m.admin_option,
                     mr.rolinherit AS inherit_option,
                     true AS set_option,
-                    NULL::text AS grantor
+                    NULL::text AS grantor,
+                    false AS executor_authority
                 FROM pg_auth_members m
                 JOIN pg_roles gr ON gr.oid = m.roleid
                 JOIN pg_roles mr ON mr.oid = m.member
@@ -275,6 +292,7 @@ mod tests {
     fn membership_row_maps_to_membership_edge() {
         let row = MembershipRow {
             grantor: None,
+            executor_authority: false,
             set_option: true,
             role_name: "editors".to_string(),
             member_name: "alice@example.com".to_string(),

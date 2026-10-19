@@ -93,6 +93,25 @@ GRANT adopted_role TO executor WITH ADMIN TRUE;
 
 Without this, pgroles can still create new roles and manage grants on objects the executor owns, but altering or dropping the adopted role, or changing its memberships, fails with a permission error. See the [staged adoption guide](/docs/adoption) for the broader brownfield rollout sequence.
 
+### The executor's own ADMIN edges
+
+On PostgreSQL 16+, a non-superuser executor never plans to revoke a membership
+edge that gives it `ADMIN OPTION` on a role. It also never plans to remove
+`ADMIN` from such an edge. That covers the automatic edge from `CREATE ROLE`,
+which PostgreSQL records as granted by the bootstrap superuser (`alloydbadmin`
+on AlloyDB, `cloudsqladmin` on Cloud SQL), and the brownfield
+`GRANT ... WITH ADMIN TRUE` above. Removing either edge would remove the
+authority pgroles manages the role with, and the bootstrap-attributed one can
+only be revoked by a role holding the bootstrap superuser's privileges.
+
+These edges can stay undeclared in the manifest, even in `adopt` and
+`authoritative` modes, and with `exclusive: true`. Declaring the executor as a
+member works too. pgroles still raises `inherit` when you declare it, but
+declaring `admin: false` leaves the live `ADMIN` in place. Other edges the
+executor holds are unaffected. That includes the separate `INHERIT`/`SET` edge
+that `createrole_self_grant` adds, which the executor grants itself, and any
+edge without `ADMIN`. Those are declared or revoked like any other membership.
+
 ## Bootstrap SQL
 
 Run once, by a superuser or an existing admin (RDS `rds_superuser` member, Cloud SQL `cloudsqlsuperuser` member, AlloyDB `alloydbsuperuser` member, etc.), before pointing pgroles at a database for the first time:

@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Azure Database for PostgreSQL Flexible Server authentication through Microsoft Entra Workload Identity in the CLI and Kubernetes operator, with short-lived token acquisition and operator pool renewal.
 - AKS Workload Identity Helm settings and documentation for passwordless connections and externally managed Entra roles.
 
+### Fixed
+
+- On PostgreSQL 16+, a non-superuser executor no longer plans to revoke its own `ADMIN OPTION` edges, or to remove `ADMIN` from them, in `adopt` or `authoritative` mode. When a CREATEROLE executor creates a role, PostgreSQL grants it `ADMIN` on that role, attributed to the bootstrap superuser (`alloydbadmin` on AlloyDB). The next `diff` then planned `REVOKE ... GRANTED BY` the bootstrap superuser, which the authority preflight blocked as `UnsatisfiableRevoke`. The same happened to an undeclared or `admin: false` executor membership on a role a superuser had granted the executor `WITH ADMIN`. Executor edges without `ADMIN` are still reconciled as declared. The docs explorer derives the same edges from its snapshot's per-grantor options, so its plans match.
+- On PostgreSQL 16+, the authority preflight and the docs explorer judge a membership removal per grantor edge. Removing one of the executor's edges in a role no longer counts as losing the role's inherited privileges while another edge, such as its retained `ADMIN` edge, still supplies them, so a later default-privilege revoke for that role is no longer rejected.
+- `UnsatisfiableMembershipOptions` no longer blames "earlier membership reductions" when the executor never inherited the recorded grantor's privileges, for example when turning `inherit` off on a bootstrap-superuser edge. It now says `GRANTED BY` needs privileges the executor does not inherit.
+
+### For library users
+
+- `RoleGraph::executor_authority_edges` holds the `(role, member, grantor)` edges through which the inspecting executor holds `ADMIN`, and `MembershipRow::executor_authority` flags them. `diff()` never removes these edges or reduces their `ADMIN`. Code that builds a `RoleGraph` with a struct literal needs the new field.
+
 ## [0.14.0] - 2026-10-15
 
 ### Highlights

@@ -321,6 +321,7 @@ fn gen_graph(rng: &mut Rng, allow_none: bool, messy: bool) -> RoleGraph {
         // models.
         membership_edge_grantors: BTreeMap::new(),
         membership_edge_options: BTreeMap::new(),
+        executor_authority_edges: BTreeSet::new(),
         grant_entry_grantors: BTreeMap::new(),
     }
 }

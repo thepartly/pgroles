@@ -1491,12 +1491,23 @@ fn diff_memberships(
     // distinct grantors, and a plain REVOKE removes only the edge attributed
     // to the revoker. When inspection recorded the grantors, emit one
     // grantor-targeted RemoveMember per edge; otherwise a single plain one.
+    // Edges holding the executor's own ADMIN authority are never removed.
+    let executor_authority = |role: &str, member: &str, grantor: &str| {
+        current.executor_authority_edges.contains(&(
+            role.to_string(),
+            member.to_string(),
+            grantor.to_string(),
+        ))
+    };
     let remove_all_edges = |role: &str, member: &str, remove_out: &mut Vec<Change>| match current
         .membership_edge_grantors
         .get(&(role.to_string(), member.to_string()))
     {
         Some(grantors) if !grantors.is_empty() => {
-            for grantor in grantors {
+            for grantor in grantors
+                .iter()
+                .filter(|grantor| !executor_authority(role, member, grantor))
+            {
                 remove_out.push(Change::RemoveMember {
                     role: role.to_string(),
                     member: member.to_string(),
@@ -1544,7 +1555,8 @@ fn diff_memberships(
                             .then_some(false);
                             let admin = (current_edge.admin
                                 && !desired_edge.admin
-                                && live.is_none_or(|edge| edge.admin))
+                                && live.is_none_or(|edge| edge.admin)
+                                && !executor_authority(role, member, grantor))
                             .then_some(false);
                             if inherit.is_some() || admin.is_some() {
                                 remove_out.push(Change::UpdateMemberOptions {

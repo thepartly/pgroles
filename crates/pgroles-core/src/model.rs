@@ -407,6 +407,14 @@ pub struct RoleGraph {
     /// membership, these retain each independent edge's options so updates
     /// can leave unrelated grantors and SET authority intact.
     pub membership_edge_options: BTreeMap<(String, String), BTreeMap<String, MembershipOptions>>,
+    /// Live membership edges, as `(granted role, member, grantor)`, that hold
+    /// ADMIN OPTION for the connected non-superuser executor itself
+    /// (PostgreSQL 16+). They are the executor's own authority over the
+    /// granted role — including the edge PostgreSQL adds when a CREATEROLE
+    /// role creates another, attributed to the bootstrap superuser — so the
+    /// diff never plans their removal or an ADMIN reduction on them. Only
+    /// inspection populates this.
+    pub executor_authority_edges: BTreeSet<(String, String, String)>,
     /// Grantors recorded on each live object-privilege ACL entry for managed
     /// grantees, keyed by grant target, then grantor, holding that grantor's
     /// privileges. PostgreSQL's plain REVOKE removes only the entry of the
