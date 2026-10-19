@@ -190,14 +190,16 @@ Azure, while declared memberships and grants can still refer to that role.
 Use a separate PostgreSQL role and `setRole` if the login identity needs the
 executor privileges described in [executor privileges](/docs/executor-privileges).
 
-Azure can attribute automatic creator ADMIN memberships to `azuresu`. Inspect
-and preserve their live options in the desired memberships; see
-[memberships](/docs/memberships). On Azure PostgreSQL 16, creating a role and
-explicitly granting ADMIN back to its creator in the same transaction can fail
-with `ADMIN option cannot be granted back to your own grantor`. Bootstrap role
-creation separately, then adopt the existing membership and reconcile object
-grants. Treat this SQL-authority constraint separately when validating token
-authentication and policy convergence.
+Azure can attribute automatic creator ADMIN memberships to `azuresu`. pgroles
+keeps the executor's own ADMIN memberships without them being declared; see
+[executor privileges](/docs/executor-privileges). Other members' `azuresu`
+memberships are reconciled like any other, so declare their live options to keep
+them; see [memberships](/docs/memberships). On PostgreSQL 16+, a plan that
+creates a role and also declares the executor as its member with `admin: true`
+fails with `ADMIN option cannot be granted back to your own grantor`. Create the
+role first, then add that membership in a later reconcile. Treat this
+SQL-authority constraint separately when validating token authentication and
+policy convergence.
 
 The operator reads its Azure configuration once at startup and reuses its HTTP
 client. It re-reads the projected assertion on every token exchange.

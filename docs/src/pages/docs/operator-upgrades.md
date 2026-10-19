@@ -11,10 +11,10 @@ Read the target release's upgrade notes. Save your current chart version, values
 and policy manifests in your deployment repository. Keep database recovery
 procedures separate: rolling back a controller does not reverse committed SQL.
 
-Set the exact release you reviewed, for example `VERSION=0.14.0`. Render and review its resources using your existing values:
+Set the exact release you reviewed, for example `VERSION=0.15.0`. Render and review its resources using your existing values:
 
 ```bash
-VERSION=0.14.0
+VERSION=0.15.0
 helm template pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --include-crds \
   --values values.yaml > operator-rendered.yaml
@@ -44,6 +44,12 @@ kubectl apply --server-side -f operator-crds.yaml
 helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
   --version "$VERSION" --namespace pgroles-system --values values.yaml --wait
 ```
+
+## Moving from 0.14 to 0.15
+
+- The `PostgresPolicy` CRD adds `azure_workload_identity` to `connection.params.auth.type`. Apply the version-matched CRDs before the controller; until then the API server rejects policies that use it.
+- The chart adds `operator.podLabels`, for example `azure.workload.identity/use: "true"` when authenticating with [AKS Workload Identity](/docs/operator-connections). Existing values are unchanged.
+- On PostgreSQL 16+, plans no longer revoke the executor's own `ADMIN` memberships or remove its `ADMIN`. A policy blocked by `UnsatisfiableRevoke` on such a membership converges after the upgrade. Executor membership declarations added as a workaround can stay.
 
 ## Moving from 0.13 to 0.14
 

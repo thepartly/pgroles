@@ -7,20 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-19
+
+### Highlights
+
+- **Azure Database for PostgreSQL with Microsoft Entra Workload Identity.** The operator and CLI can authenticate to Azure Database for PostgreSQL Flexible Server through AKS Workload Identity. Use `connection.params.auth.type: azure_workload_identity` in a policy, or `--auth azure-workload-identity` on the CLI. The short-lived Entra access token is the password and is renewed before it expires, so no password Secret is needed. See [operator connections](https://thepartly.github.io/pgroles/docs/operator-connections/). (#246)
+- **pgroles no longer plans to revoke its own authority.** On PostgreSQL 16+, a non-superuser executor never plans to revoke a membership that gives it `ADMIN` on a role, or to remove `ADMIN` from one. When the executor creates a role, PostgreSQL gives it `ADMIN` through a membership attributed to the bootstrap superuser (`alloydbadmin` on AlloyDB, `azuresu` on Azure). The next reconcile in `adopt` or `authoritative` mode planned to revoke it, and the authority preflight blocked the policy with `UnsatisfiableRevoke`. Those policies now converge, whether the executor's membership is undeclared or declared without `admin`. (#254)
+
+### Upgrade notes
+
+- **Apply the 0.15 CRDs before upgrading the controller.** `PostgresPolicy` adds `azure_workload_identity` to `connection.params.auth.type`. Until the CRDs are updated, the API server rejects policies that use it. Other connection settings are unchanged. See [Upgrading the operator](https://thepartly.github.io/pgroles/docs/operator-upgrades/). (#246)
+- **New chart value `operator.podLabels`.** It adds labels to the operator pod, such as `azure.workload.identity/use: "true"` for AKS Workload Identity. Existing values are unchanged. (#246)
+- **Blocked executor revokes disappear from plans.** A policy that was blocked on revoking the executor's own `ADMIN` membership plans without that revoke after upgrading. Declarations added as a workaround, such as `{ name: <executor>, admin: true, inherit: true }`, can stay. Declaring the executor with `admin: false` no longer removes its `ADMIN`. (#254)
+
 ### Added
 
-- Azure Database for PostgreSQL Flexible Server authentication through Microsoft Entra Workload Identity in the CLI and Kubernetes operator, with short-lived token acquisition and operator pool renewal.
-- AKS Workload Identity Helm settings and documentation for passwordless connections and externally managed Entra roles.
+- Azure Database for PostgreSQL Flexible Server authentication through Microsoft Entra Workload Identity in the CLI and Kubernetes operator, with short-lived token acquisition and operator pool renewal. (#246)
+- AKS Workload Identity Helm settings and documentation for passwordless connections and externally managed Entra roles. (#246)
 
 ### Fixed
 
-- On PostgreSQL 16+, a non-superuser executor no longer plans to revoke its own `ADMIN OPTION` edges, or to remove `ADMIN` from them, in `adopt` or `authoritative` mode. When a CREATEROLE executor creates a role, PostgreSQL grants it `ADMIN` on that role, attributed to the bootstrap superuser (`alloydbadmin` on AlloyDB). The next `diff` then planned `REVOKE ... GRANTED BY` the bootstrap superuser, which the authority preflight blocked as `UnsatisfiableRevoke`. The same happened to an undeclared or `admin: false` executor membership on a role a superuser had granted the executor `WITH ADMIN`. Executor edges without `ADMIN` are still reconciled as declared. The docs explorer derives the same edges from its snapshot's per-grantor options, so its plans match.
-- On PostgreSQL 16+, the authority preflight and the docs explorer judge a membership removal per grantor edge. Removing one of the executor's edges in a role no longer counts as losing the role's inherited privileges while another edge, such as its retained `ADMIN` edge, still supplies them, so a later default-privilege revoke for that role is no longer rejected.
-- `UnsatisfiableMembershipOptions` no longer blames "earlier membership reductions" when the executor never inherited the recorded grantor's privileges, for example when turning `inherit` off on a bootstrap-superuser edge. It now says `GRANTED BY` needs privileges the executor does not inherit.
+- On PostgreSQL 16+, a non-superuser executor no longer plans to revoke its own `ADMIN OPTION` memberships, or to remove `ADMIN` from them. That covers the membership `CREATE ROLE` gives the executor and a superuser's `GRANT ... WITH ADMIN OPTION` to it. Executor memberships without `ADMIN`, such as the separate one `createrole_self_grant` adds, are still reconciled as declared. The docs explorer derives the same memberships from its snapshot, so its plans match. (#254)
+- On PostgreSQL 16+, the authority preflight and the docs explorer judge a membership removal per grantor. Removing one of a member's grants no longer counts as losing the role's inherited privileges while another grant still supplies them, so a later default-privilege revoke for that role is no longer rejected. (#254)
+- `UnsatisfiableMembershipOptions` no longer blames "earlier membership reductions" when the executor never inherited the recorded grantor's privileges, for example when turning `inherit` off on a bootstrap-superuser membership. It now says `GRANTED BY` needs privileges the executor does not inherit. (#254)
 
 ### For library users
 
-- `RoleGraph::executor_authority_edges` holds the `(role, member, grantor)` edges through which the inspecting executor holds `ADMIN`, and `MembershipRow::executor_authority` flags them. `diff()` never removes these edges or reduces their `ADMIN`. Code that builds a `RoleGraph` with a struct literal needs the new field.
+- `RoleGraph::executor_authority_edges` holds the `(role, member, grantor)` memberships through which the inspecting executor holds `ADMIN`, and `MembershipRow::executor_authority` flags them. `diff()` never removes them or reduces their `ADMIN`. Code that builds a `RoleGraph` with a struct literal needs the new field. (#254)
+- `pgroles_inspect::auth` and `pgroles_inspect::azure_auth` are public modules providing token-based authentication; `AccessToken` carries a token and its expiry. (#246)
 
 ## [0.14.0] - 2026-10-15
 
