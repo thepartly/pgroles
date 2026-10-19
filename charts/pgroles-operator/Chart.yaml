@@ -5,8 +5,8 @@ description: >-
   Define roles, memberships, grants, and default privileges in YAML
   and let the operator converge your database to the desired state.
 type: application
-version: 0.14.0
-appVersion: "0.14.0"
+version: 0.15.0
+appVersion: "0.15.0"
 icon: https://raw.githubusercontent.com/thepartly/pgroles/main/docs/public/logo.svg
 sources:
   - https://github.com/thepartly/pgroles
@@ -16,14 +16,12 @@ maintainers:
     url: https://hardbyte.nz
 annotations:
   artifacthub.io/changes: |
-    - kind: changed
-      description: 'Under approval auto, a plan the executor lacks authority to apply stays Pending and is reused, instead of being approved and abandoned on every reconcile.'
-    - kind: fixed
-      description: 'Candidate previews run every guard apply runs (executor authority, adopt-mode schema ownership transfers, role-drop safety) and report them in status.executionPreflight.'
-    - kind: fixed
-      description: 'PostgreSQL 16+ membership option changes keep edges other roles granted and report changes the executor cannot make before they apply.'
     - kind: added
-      description: 'status.lastAttemptedReconcileAt acknowledges every requested reconcile that ran, whatever its outcome. CRDs add status fields only; chart values are unchanged from 0.13.0.'
+      description: 'Azure Database for PostgreSQL Flexible Server authentication through Microsoft Entra Workload Identity (connection.params.auth.type azure_workload_identity), with the operator.podLabels chart value for AKS Workload Identity.'
+    - kind: fixed
+      description: 'On PostgreSQL 16+, a non-superuser executor no longer plans to revoke its own ADMIN memberships, such as the one PostgreSQL gives it on roles it creates, which blocked policies with UnsatisfiableRevoke.'
+    - kind: changed
+      description: 'The PostgresPolicy CRD adds the azure_workload_identity auth type; apply the 0.15 CRDs before the controller. Other chart values are unchanged from 0.14.0.'
   artifacthub.io/category: database
   artifacthub.io/operator: "true"
   artifacthub.io/prerelease: "false"
