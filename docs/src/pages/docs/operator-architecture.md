@@ -102,12 +102,21 @@ Multiple policies may target the same database only if their ownership claims ar
 
 The controller derives ownership claims from declared roles and schema/profile expansions, then rejects overlapping policies by setting conflict status instead of letting policies revoke each other's grants.
 
+"The same database" is decided by the server, not by how a policy names it. After connecting, each policy reads `system_identifier`, `inet_server_addr()`, `inet_server_port()` and `current_database()` and records a digest of them in `status.resolved_database_target`. Policies compare against each other's recorded targets, so two policies reaching one database through different Secrets, or from different namespaces, are checked against each other. The lineage and the address are combined because each alone misleads: a snapshot restore shares its source's `system_identifier`, and unrelated servers in separate networks can share a private address.
+
+Two policies that use the same Secret and key in the same namespace are always compared, including before either has connected. A recorded target is ignored once the policy's connection no longer matches the one it was resolved through. Reaching one server through two different interfaces, such as its private and public address, is not recognised as the same database; the advisory lock below still serializes those reconciles.
+
+Detection has two limits:
+
+- **Policies that have not connected yet.** A policy is compared with a peer through a different Secret or namespace only once that peer has recorded its target. When two such policies start together, or both were reconciling before an upgrade, the first to reconcile can apply once before the second records its target. Both report `ConflictingPolicy` from their next reconcile. The operator does not hold a policy until every peer has resolved, because one peer that cannot connect would then hold every other policy indefinitely.
+- **What the operator watches.** An operator only compares policies it can list. With `WATCH_NAMESPACE` set, each install sees its own namespace, so separate namespace-scoped installs that manage one database do not detect conflicts between each other. Run one cluster-scoped operator for a database shared across namespaces, or keep the installs' ownership claims disjoint.
+
 ### Per-database serialization
 
 Reconciliation is serialized per database target in two layers:
 
 1. in-process locking to prevent concurrent reconciles in one operator replica
-2. PostgreSQL advisory locking to prevent concurrent reconciles across replicas
+2. PostgreSQL advisory locking to prevent concurrent reconciles across replicas. The key is computed on the server from `current_database()`, so every policy reaching the database contends on it, whichever Secret or namespace it connects through
 
 This is the core safety boundary for production use. It ensures one database target has one active inspect/diff/apply cycle at a time.
 

@@ -1162,6 +1162,12 @@ pub struct PostgresPolicyStatus {
     #[serde(default)]
     pub managed_database_identity: Option<String>,
 
+    /// The database this policy's connection reached, as the server reports
+    /// it. Other policies compare against this to detect ownership conflicts
+    /// on one database reached through different Secrets or namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_database_target: Option<ResolvedDatabaseTarget>,
+
     /// Roles claimed by this policy's declared ownership scope.
     #[serde(default)]
     pub owned_roles: Vec<String>,
@@ -2039,6 +2045,90 @@ impl DatabaseIdentity {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// The database a policy's connection reached, as observed from the server.
+///
+/// [`DatabaseIdentity`] names a database the way the policy refers to it —
+/// namespace, Secret and key — so two policies reaching one database through
+/// different Secrets or namespaces get different identities. Conflict
+/// detection needs the database itself, which only the server can report, and
+/// a peer's server is only reachable by connecting as that peer. Each policy
+/// therefore records what it resolved in its own status, and peers compare
+/// against the recorded value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedDatabaseTarget {
+    /// Opaque digest of the server-reported identity: `system_identifier`,
+    /// `inet_server_addr()`, `inet_server_port()` and `current_database()`.
+    pub key: String,
+    /// The [`DatabaseIdentity`] the key was resolved through. A peer's key is
+    /// trusted only while this still matches the peer's spec, so a key left
+    /// over from before a connection change cannot match.
+    pub connection_identity: String,
+}
+
+impl ResolvedDatabaseTarget {
+    /// Derive the target from what the server reported.
+    ///
+    /// `system_identifier` alone would equate a snapshot restore or clone with
+    /// its source, since they share storage lineage; pairing it with the
+    /// server-side address keeps a staging clone distinct from production.
+    /// The address alone would equate unrelated servers that happen to listen
+    /// on the same private address in different networks; pairing it with the
+    /// lineage keeps them apart. Returns `None` when the server reports
+    /// neither, because the database name on its own identifies nothing.
+    pub fn from_server(
+        connection_identity: &DatabaseIdentity,
+        system_identifier: Option<&str>,
+        endpoint: &pgroles_inspect::ServerEndpoint,
+    ) -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+
+        if system_identifier.is_none() && endpoint.address.is_none() {
+            return None;
+        }
+        let canonical = serde_json::json!({
+            "v": 1,
+            "system_identifier": system_identifier,
+            "address": endpoint.address,
+            "port": endpoint.port,
+            "database": endpoint.database,
+        });
+        let digest = Sha256::digest(canonical.to_string().as_bytes());
+        let mut key = String::with_capacity(7 + digest.len() * 2);
+        key.push_str("sha256:");
+        for byte in digest {
+            write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Some(Self {
+            key,
+            connection_identity: connection_identity.as_str().to_string(),
+        })
+    }
+}
+
+/// Whether a peer policy targets the same database as this one.
+///
+/// Matching connection identities always count, which preserves the
+/// pre-resolution behaviour for peers that have not connected yet. Beyond that,
+/// a peer counts when the target it last resolved equals ours and was resolved
+/// through the connection its spec still names.
+pub fn targets_same_database(
+    identity: &DatabaseIdentity,
+    resolved: Option<&ResolvedDatabaseTarget>,
+    peer_identity: &DatabaseIdentity,
+    peer_resolved: Option<&ResolvedDatabaseTarget>,
+) -> bool {
+    if identity == peer_identity {
+        return true;
+    }
+    match (resolved, peer_resolved) {
+        (Some(ours), Some(theirs)) => {
+            ours.key == theirs.key && theirs.connection_identity == peer_identity.as_str()
+        }
+        _ => false,
     }
 }
 
@@ -4739,6 +4829,62 @@ params:
                 "message should say the inference is deprecated, got: {message}"
             );
         }
+    }
+
+    fn secret_connection(secret: &str) -> ConnectionSpec {
+        ConnectionSpec {
+            secret_ref: Some(SecretReference {
+                name: secret.to_string(),
+            }),
+            secret_key: Some("DATABASE_URL".to_string()),
+            params: None,
+            require_physical_identity: None,
+        }
+    }
+
+    fn endpoint(address: Option<&str>) -> pgroles_inspect::ServerEndpoint {
+        pgroles_inspect::ServerEndpoint {
+            database: "app".to_string(),
+            address: address.map(str::to_string),
+            port: address.map(|_| 5432),
+        }
+    }
+
+    #[test]
+    fn resolved_target_is_independent_of_the_connection_used_to_reach_it() {
+        let a = DatabaseIdentity::from_connection("platform", &secret_connection("db-a"));
+        let b = DatabaseIdentity::from_connection("payments", &secret_connection("db-b"));
+        let via_a =
+            ResolvedDatabaseTarget::from_server(&a, Some("42"), &endpoint(Some("10.0.0.5")))
+                .unwrap();
+        let via_b =
+            ResolvedDatabaseTarget::from_server(&b, Some("42"), &endpoint(Some("10.0.0.5")))
+                .unwrap();
+        assert_eq!(via_a.key, via_b.key);
+        assert!(targets_same_database(&a, Some(&via_a), &b, Some(&via_b)));
+    }
+
+    #[test]
+    fn resolved_target_separates_clones_and_coincident_addresses() {
+        let id = DatabaseIdentity::from_connection("ns", &secret_connection("db"));
+        let key = |lineage: Option<&str>, address: Option<&str>| {
+            ResolvedDatabaseTarget::from_server(&id, lineage, &endpoint(address)).map(|t| t.key)
+        };
+        let primary = key(Some("42"), Some("10.0.0.5"));
+        // A snapshot restore shares lineage but runs on another server.
+        assert_ne!(primary, key(Some("42"), Some("10.0.0.6")));
+        // Another cluster can reuse a private address.
+        assert_ne!(primary, key(Some("43"), Some("10.0.0.5")));
+        // Engines without pg_control_system() still resolve by endpoint.
+        assert!(key(None, Some("10.0.0.5")).is_some());
+        // A database name alone identifies nothing.
+        assert_eq!(key(None, None), None);
+    }
+
+    #[test]
+    fn matching_connection_identities_count_without_resolved_targets() {
+        let id = DatabaseIdentity::from_connection("ns", &secret_connection("db"));
+        assert!(targets_same_database(&id, None, &id, None));
     }
 
     #[test]

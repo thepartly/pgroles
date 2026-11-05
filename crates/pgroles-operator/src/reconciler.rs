@@ -1219,8 +1219,35 @@ async fn reconcile_apply_inner(
         .map_err(|err| ReconcileError::InvalidSpec(err.to_string()))?;
 
     let ownership = spec.ownership_claims()?;
+
+    // Get a database pool.
+    //
+    // This is the connection probe: a bad URL, refused TCP connection, or
+    // failed authentication surfaces here as `ContextError::DatabaseConnect`,
+    // which the outer error handler in `reconcile_apply` translates into a
+    // `Ready=False/DatabaseConnectionFailed` status update. We do this BEFORE
+    // taking the in-process lock so multiple policies sharing the same
+    // `database_identity` can all observe a connection failure in parallel,
+    // instead of serializing on the lock and starving each other under
+    // sustained bad-credentials conditions.
+    //
+    // It also precedes conflict detection, which needs the server to say
+    // which database the connection actually reached.
+    let pool = ctx
+        .get_or_create_pool(&namespace, &spec.connection)
+        .await
+        .map_err(Box::new)?;
+
+    tracing::debug!(name, namespace, "database pool ready");
+
+    let resolved_target = resolve_database_target(&pool, identity).await?;
+
+    // Recorded before peers are listed: when two policies on one database
+    // start together, each writes its target before reading the other's, so
+    // at least one of them sees the overlap.
     update_status(ctx, resource, |status| {
         status.managed_database_identity = Some(identity.as_str().to_string());
+        status.resolved_database_target = resolved_target.clone();
         status.owned_roles = ownership.roles.iter().cloned().collect();
         status.owned_schemas = ownership.schemas.iter().cloned().collect();
     })
@@ -1228,8 +1255,14 @@ async fn reconcile_apply_inner(
 
     tracing::debug!(name, namespace, "ownership claims recorded");
 
-    if let Some(conflict_message) =
-        detect_policy_conflict(ctx, resource, identity, &ownership).await?
+    if let Some(conflict_message) = detect_policy_conflict(
+        ctx,
+        resource,
+        identity,
+        resolved_target.as_ref(),
+        &ownership,
+    )
+    .await?
     {
         update_status(ctx, resource, |status| {
             status.set_condition(ready_condition(
@@ -1277,23 +1310,6 @@ async fn reconcile_apply_inner(
         );
     }
     let desired = pgroles_core::model::RoleGraph::from_expanded(&expanded, default_owner)?;
-
-    // 4. Get a database pool.
-    //
-    // This is the connection probe: a bad URL, refused TCP connection, or
-    // failed authentication surfaces here as `ContextError::DatabaseConnect`,
-    // which the outer error handler in `reconcile_apply` translates into a
-    // `Ready=False/DatabaseConnectionFailed` status update. We do this BEFORE
-    // taking the in-process lock so multiple policies sharing the same
-    // `database_identity` can all observe a connection failure in parallel,
-    // instead of serializing on the lock and starving each other under
-    // sustained bad-credentials conditions.
-    let pool = ctx
-        .get_or_create_pool(&namespace, &spec.connection)
-        .await
-        .map_err(Box::new)?;
-
-    tracing::debug!(name, namespace, "database pool ready");
 
     // 5. Acquire the in-process per-database lock for the DDL phase.
     //
@@ -3687,10 +3703,29 @@ fn clear_stale_approval_ignored_condition(
     }
 }
 
+/// Ask the server which database this connection reached.
+///
+/// Read-only and lock-free. `None` when the server reports nothing that
+/// identifies it beyond a database name; conflict detection then falls back to
+/// comparing connection identities alone.
+async fn resolve_database_target(
+    pool: &sqlx::PgPool,
+    identity: &DatabaseIdentity,
+) -> Result<Option<crate::crd::ResolvedDatabaseTarget>, ReconcileError> {
+    let system_identifier = pgroles_inspect::detect_system_identifier(pool).await?;
+    let endpoint = pgroles_inspect::detect_server_endpoint(pool).await?;
+    Ok(crate::crd::ResolvedDatabaseTarget::from_server(
+        identity,
+        system_identifier.as_deref(),
+        &endpoint,
+    ))
+}
+
 async fn detect_policy_conflict(
     ctx: &OperatorContext,
     resource: &PostgresPolicy,
     identity: &DatabaseIdentity,
+    resolved_target: Option<&crate::crd::ResolvedDatabaseTarget>,
     ownership: &crate::crd::OwnershipClaims,
 ) -> Result<Option<String>, ReconcileError> {
     let api: Api<PostgresPolicy> = match &ctx.watch_namespace {
@@ -3702,6 +3737,7 @@ async fn detect_policy_conflict(
     Ok(detect_policy_conflict_in_list(
         resource,
         identity,
+        resolved_target,
         ownership,
         policies.into_iter(),
     ))
@@ -3710,6 +3746,7 @@ async fn detect_policy_conflict(
 fn detect_policy_conflict_in_list(
     resource: &PostgresPolicy,
     identity: &DatabaseIdentity,
+    resolved_target: Option<&crate::crd::ResolvedDatabaseTarget>,
     ownership: &crate::crd::OwnershipClaims,
     policies: impl IntoIterator<Item = PostgresPolicy>,
 ) -> Option<String> {
@@ -3728,7 +3765,16 @@ fn detect_policy_conflict_in_list(
         }
 
         let other_identity = DatabaseIdentity::from_connection(&other_ns, &other.spec.connection);
-        if &other_identity != identity {
+        let other_resolved = other
+            .status
+            .as_ref()
+            .and_then(|status| status.resolved_database_target.as_ref());
+        if !crate::crd::targets_same_database(
+            identity,
+            resolved_target,
+            &other_identity,
+            other_resolved,
+        ) {
             continue;
         }
 
@@ -3756,7 +3802,16 @@ fn detect_policy_conflict_in_list(
         };
         if ownership.overlaps(&other_ownership) {
             let overlap = ownership.overlap_summary(&other_ownership);
-            conflicts.push(format!("{other_ns}/{other_name} ({overlap})"));
+            if &other_identity == identity {
+                conflicts.push(format!("{other_ns}/{other_name} ({overlap})"));
+            } else {
+                // Reached through a different Secret or namespace; name it, or
+                // the reader cannot see why the two count as one database.
+                conflicts.push(format!(
+                    "{other_ns}/{other_name} via {} ({overlap})",
+                    other_identity.as_str()
+                ));
+            }
         }
     }
 
@@ -5897,8 +5952,13 @@ mod tests {
         let ownership = resource.spec.ownership_claims().unwrap();
         let invalid_peer = invalid_profile_policy("invalid-peer", "shared-db-secret");
 
-        let conflict =
-            detect_policy_conflict_in_list(&resource, &identity, &ownership, vec![invalid_peer]);
+        let conflict = detect_policy_conflict_in_list(
+            &resource,
+            &identity,
+            None,
+            &ownership,
+            vec![invalid_peer],
+        );
 
         assert_eq!(conflict, None);
     }
@@ -6273,6 +6333,7 @@ mod tests {
         let conflict = detect_policy_conflict_in_list(
             &resource,
             &identity,
+            None,
             &ownership,
             vec![invalid_peer, overlapping_peer],
         );
@@ -6280,6 +6341,112 @@ mod tests {
         let conflict = conflict.expect("expected overlapping peer to be reported");
         assert!(conflict.contains("overlapping-peer"));
         assert!(conflict.contains("roles: analytics"));
+    }
+
+    fn server_target(
+        identity: &DatabaseIdentity,
+        address: &str,
+    ) -> crate::crd::ResolvedDatabaseTarget {
+        crate::crd::ResolvedDatabaseTarget::from_server(
+            identity,
+            Some("7400000000000000001"),
+            &pgroles_inspect::ServerEndpoint {
+                database: "app".to_string(),
+                address: Some(address.to_string()),
+                port: Some(5432),
+            },
+        )
+        .expect("an identified server resolves to a target")
+    }
+
+    /// A peer in another namespace, through its own Secret, whose last
+    /// reconcile reached `address`.
+    fn peer_in_namespace(namespace: &str, address: &str) -> PostgresPolicy {
+        let mut peer = valid_role_policy("team-policy", "analytics", "team-db-secret");
+        peer.metadata.namespace = Some(namespace.to_string());
+        let peer_identity = DatabaseIdentity::from_connection(namespace, &peer.spec.connection);
+        peer.status = Some(PostgresPolicyStatus {
+            resolved_database_target: Some(server_target(&peer_identity, address)),
+            ..Default::default()
+        });
+        peer
+    }
+
+    #[test]
+    fn conflict_detection_spans_namespaces_and_secrets_on_one_database() {
+        let resource = valid_role_policy("platform-policy", "analytics", "platform-db-secret");
+        let identity = DatabaseIdentity::from_connection("default", &resource.spec.connection);
+        let ownership = resource.spec.ownership_claims().unwrap();
+        let ours = server_target(&identity, "10.0.0.5");
+
+        let conflict = detect_policy_conflict_in_list(
+            &resource,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![peer_in_namespace("payments", "10.0.0.5")],
+        )
+        .expect("the same database through another Secret and namespace still conflicts");
+        assert!(conflict.contains("payments/team-policy via payments/team-db-secret"));
+        assert!(conflict.contains("roles: analytics"));
+    }
+
+    #[test]
+    fn conflict_detection_keeps_distinct_servers_apart() {
+        let resource = valid_role_policy("platform-policy", "analytics", "platform-db-secret");
+        let identity = DatabaseIdentity::from_connection("default", &resource.spec.connection);
+        let ownership = resource.spec.ownership_claims().unwrap();
+        let ours = server_target(&identity, "10.0.0.5");
+
+        // Same lineage and database name, different server: a clone.
+        let conflict = detect_policy_conflict_in_list(
+            &resource,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![peer_in_namespace("staging", "10.9.0.5")],
+        );
+        assert_eq!(conflict, None);
+    }
+
+    #[test]
+    fn conflict_detection_ignores_a_peer_target_resolved_through_an_old_connection() {
+        let resource = valid_role_policy("platform-policy", "analytics", "platform-db-secret");
+        let identity = DatabaseIdentity::from_connection("default", &resource.spec.connection);
+        let ownership = resource.spec.ownership_claims().unwrap();
+        let ours = server_target(&identity, "10.0.0.5");
+
+        // The peer has since been repointed at another Secret; its recorded
+        // target describes where the old one led, not where it goes now.
+        let mut peer = peer_in_namespace("payments", "10.0.0.5");
+        peer.spec.connection.secret_ref = Some(SecretReference {
+            name: "other-db-secret".to_string(),
+        });
+
+        let conflict = detect_policy_conflict_in_list(
+            &resource,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![peer],
+        );
+        assert_eq!(conflict, None);
+    }
+
+    #[test]
+    fn conflict_detection_without_a_resolved_target_matches_connection_identity_only() {
+        let resource = valid_role_policy("platform-policy", "analytics", "platform-db-secret");
+        let identity = DatabaseIdentity::from_connection("default", &resource.spec.connection);
+        let ownership = resource.spec.ownership_claims().unwrap();
+
+        let conflict = detect_policy_conflict_in_list(
+            &resource,
+            &identity,
+            None,
+            &ownership,
+            vec![peer_in_namespace("payments", "10.0.0.5")],
+        );
+        assert_eq!(conflict, None);
     }
 
     #[test]

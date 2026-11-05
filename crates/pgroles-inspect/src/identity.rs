@@ -1,4 +1,4 @@
-//! Physical identity of the target cluster.
+//! Server-observed identity of the target: physical lineage and session endpoint.
 //!
 //! `pg_control_system().system_identifier` is the 64-bit value `initdb` writes
 //! into `pg_control`. It answers a question no Kubernetes reference can: *is
@@ -50,6 +50,35 @@ pub async fn detect_system_identifier(pool: &PgPool) -> Result<Option<String>, s
     }
 }
 
+/// Where the server says this session is connected, as the server itself sees it.
+///
+/// Every field is evaluated server-side, so two sessions that reach one
+/// database through different client-side names — two Secrets, a CNAME and
+/// the raw host, a pooler in front of the server — read the same values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerEndpoint {
+    /// `current_database()`.
+    pub database: String,
+    /// `inet_server_addr()` without a netmask; `None` over a Unix socket.
+    pub address: Option<String>,
+    /// `inet_server_port()`; `None` over a Unix socket.
+    pub port: Option<i32>,
+}
+
+/// Read the server-side endpoint of the current session.
+pub async fn detect_server_endpoint(pool: &PgPool) -> Result<ServerEndpoint, sqlx::Error> {
+    let (database, address, port): (String, Option<String>, Option<i32>) = sqlx::query_as(
+        "SELECT current_database()::text, host(inet_server_addr()), inet_server_port()",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(ServerEndpoint {
+        database,
+        address,
+        port,
+    })
+}
+
 fn is_identity_unavailable(err: &sqlx::Error) -> bool {
     let sqlx::Error::Database(db_err) = err else {
         return false;
@@ -68,6 +97,28 @@ mod tests {
     fn a_non_database_error_is_not_treated_as_unavailable() {
         assert!(!is_identity_unavailable(&sqlx::Error::PoolTimedOut));
         assert!(!is_identity_unavailable(&sqlx::Error::RowNotFound));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live PostgreSQL"]
+    async fn reads_the_server_endpoint_from_a_live_server() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+
+        let endpoint = detect_server_endpoint(&pool).await.expect("query succeeds");
+        let expected: (String,) = sqlx::query_as("SELECT current_database()::text")
+            .fetch_one(&pool)
+            .await
+            .expect("query succeeds");
+        assert_eq!(endpoint.database, expected.0);
+        // The integration suites connect over TCP.
+        assert!(endpoint.address.is_some(), "TCP sessions report an address");
+        assert!(endpoint.port.is_some(), "TCP sessions report a port");
+        assert_eq!(
+            endpoint,
+            detect_server_endpoint(&pool).await.expect("query succeeds"),
+            "the endpoint must be stable across reads"
+        );
     }
 
     #[tokio::test]

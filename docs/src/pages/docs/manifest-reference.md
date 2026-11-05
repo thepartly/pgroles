@@ -413,7 +413,6 @@ The CLI can compose a bundle from one root file plus multiple scoped policy docu
 ```yaml
 # pgroles.bundle.yaml
 shared:
-  default_owner: app_owner
   profiles:
     editor:
       grants:
@@ -464,7 +463,7 @@ Bundle composition is a CLI/core feature. The Kubernetes operator reconciles a s
 
 | Field | Description |
 |---|---|
-| `shared.default_owner` | Default owner context shared across source documents |
+| `shared.default_owner` | Default owner context shared across source documents. Like a top-level `default_owner`, it claims ownership of every schema binding without an explicit `owner`, so every fragment that lists a schema must then hold that schema's `owner` facet. Leave it unset when one fragment owns schemas and another only binds profiles to them, and set `owner` explicitly in the owning fragment instead |
 | `shared.auth_providers` | Shared auth provider metadata |
 | `shared.profiles` | Shared profile registry used by source documents |
 | `sources` | Relative file paths to policy documents that will be composed together |

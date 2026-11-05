@@ -239,7 +239,10 @@ those objects under a different ownership boundary. See
 
 `ConflictingPolicy` means another `PostgresPolicy` targeting the same database
 has overlapping ownership claims. The condition message names the other
-namespace/policy and summarizes the overlap.
+namespace/policy and summarizes the overlap. When the other policy reaches the
+database through a different Secret or namespace, the message adds `via
+<namespace>/<secret>/<key>`; the two count as one database because the server
+reported the same identity to both.
 
 Keep one policy per database and credential boundary where possible. Otherwise
 make their roles, schemas, grants, memberships, and other ownership claims

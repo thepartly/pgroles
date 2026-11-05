@@ -83,7 +83,8 @@ Use authoritative mode when your policy should also retire eligible roles in its
 
 If platform and application teams need separate ownership boundaries, use CLI bundle mode instead of forcing everyone into one large manifest.
 
-- put shared profiles and `default_owner` in the bundle root
+- put shared profiles in the bundle root
+- set each schema's `owner` explicitly in the source document that holds its `owner` facet; a shared `default_owner` would make every document that lists the schema claim its ownership
 - let one source document manage schema `owner` facets
 - let another source document manage schema `bindings` facets
 - run `validate`, `diff`, and `apply` against the bundle so pgroles rejects overlapping ownership before any database work begins
