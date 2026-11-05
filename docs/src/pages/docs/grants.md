@@ -198,9 +198,11 @@ Every grant entry carries `ensure`, which defaults to `present`. An absent rule
 revokes only the privileges it lists, and only where they are actually held. If
 nothing holds them, it plans nothing.
 
-`additive` reconciliation never revokes, so it ignores every `ensure: absent`
-assertion and emits a warning. Use `adopt` or `authoritative` when absence must
-be enforced.
+By default, `additive` reconciliation ignores `ensure: absent` assertions and
+emits a warning. Set `additive_enforce_absences: true` in the manifest to revoke
+only explicitly absent grants and default privileges while preserving undeclared
+access. See [additive reconciliation](/docs/cli#additive). `adopt` and
+`authoritative` enforce absences without this opt-in.
 
 `ensure: absent` is not a PostgreSQL deny. It controls one ACL edge. A role that
 also reaches the object through membership or ownership still reaches it.

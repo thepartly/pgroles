@@ -641,6 +641,7 @@ pub fn suggest_profiles(input: &PolicyManifest, opts: &SuggestOptions) -> Sugges
         .collect();
 
     let candidate = PolicyManifest {
+        additive_enforce_absences: input.additive_enforce_absences,
         role_pattern: input.role_pattern.clone(),
         default_owner: input.default_owner.clone(),
         auth_providers: input.auth_providers.clone(),

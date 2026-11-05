@@ -888,12 +888,16 @@ async fn plan_against_target(
 
     let reconciliation_mode: pgroles_core::diff::ReconciliationMode =
         content.reconciliation_mode.into();
-    if pgroles_core::diff::additive_ignores_absence_assertions(desired, reconciliation_mode) {
+    if pgroles_core::diff::additive_ignores_absence_assertions_with_options(
+        desired,
+        reconciliation_mode,
+        content.additive_enforce_absences,
+    ) {
         tracing::warn!(
             candidate = %candidate.name_any(),
-            "additive reconciliation ignores every absence assertion \
-             (`ensure: absent` and `exclusive: true` memberships); \
-             use adopt or authoritative mode to enforce absence"
+            "Some absence assertions are ignored in additive mode. Enable \
+             additive_enforce_absences for explicit grants and default privileges. \
+             Exclusive membership removals require adopt or authoritative mode."
         );
     }
     let mut changes = crate::reconciler::policy_changes(
@@ -2866,6 +2870,7 @@ mod tests {
         let candidate = candidate(
             "orders-change-x7k2p",
             PolicyContent {
+                additive_enforce_absences: false,
                 roles: vec![role("reporting_reader")],
                 ..Default::default()
             },

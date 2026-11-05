@@ -102,6 +102,12 @@ pub enum CompositionError {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyBundle {
+    /// Enforce explicit `ensure: absent` grants and default privileges in additive mode.
+    /// Undeclared access, membership removals and role retirement remain untouched.
+    /// Has no effect in authoritative or adopt mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub additive_enforce_absences: bool,
+
     #[serde(default)]
     pub shared: SharedPolicy,
 
@@ -238,6 +244,7 @@ pub fn compose_bundle(
     let mut ownership = OwnershipIndex::default();
     let mut merged_schemas: BTreeMap<String, SchemaBinding> = BTreeMap::new();
     let mut manifest = PolicyManifest {
+        additive_enforce_absences: bundle.additive_enforce_absences,
         role_pattern: bundle.shared.role_pattern.clone(),
         default_owner: bundle.shared.default_owner.clone(),
         auth_providers: bundle.shared.auth_providers.clone(),
@@ -291,6 +298,7 @@ pub fn compose_bundle(
 
 fn document_manifest(bundle: &PolicyBundle, fragment: &PolicyFragment) -> PolicyManifest {
     PolicyManifest {
+        additive_enforce_absences: bundle.additive_enforce_absences,
         role_pattern: fragment
             .role_pattern
             .clone()
@@ -799,6 +807,7 @@ schemas:
     #[test]
     fn compose_bundle_rejects_role_outside_scope() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![BundleSource {
                 file: "app.yaml".to_string(),
@@ -826,6 +835,7 @@ roles:
     #[test]
     fn compose_bundle_rejects_duplicate_generated_roles() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy {
                 profiles: BTreeMap::from([(
                     "viewer".to_string(),
@@ -892,6 +902,7 @@ roles:
     #[test]
     fn compose_bundle_rejects_duplicate_grants() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![
                 BundleSource {
@@ -970,6 +981,7 @@ grants:
     #[test]
     fn compose_bundle_rejects_split_exclusive_membership() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![
                 BundleSource {
@@ -1022,6 +1034,7 @@ memberships:
     #[test]
     fn compose_bundle_accepts_non_exclusive_membership_split() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![
                 BundleSource {
@@ -1068,6 +1081,7 @@ memberships:
     #[test]
     fn compose_bundle_rejects_duplicate_membership_selectors() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![
                 BundleSource {
@@ -1172,6 +1186,7 @@ memberships:
 
     fn single_source_bundle(file: &str) -> PolicyBundle {
         PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![BundleSource {
                 file: file.to_string(),
@@ -1236,6 +1251,7 @@ default_privileges:
     #[test]
     fn two_fragments_may_not_split_one_assertion_into_present_and_absent() {
         let bundle = PolicyBundle {
+            additive_enforce_absences: false,
             shared: SharedPolicy::default(),
             sources: vec![
                 BundleSource {

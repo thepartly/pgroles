@@ -193,6 +193,7 @@ pub fn role_graph_to_manifest(graph: &RoleGraph) -> PolicyManifest {
         .collect();
 
     PolicyManifest {
+        additive_enforce_absences: false,
         role_pattern: None,
         default_owner: None,
         auth_providers: Vec::new(),

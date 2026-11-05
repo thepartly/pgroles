@@ -6738,6 +6738,101 @@ default_privileges:
 
     #[test]
     #[ignore]
+    fn additive_opt_in_enforces_absences_and_preserves_other_policies() {
+        let (fixture, _cleanup) = PublicFixture::new("pubadditive");
+        execute_sql(&format!(
+            r#"SET ROLE "{owner}";
+               CREATE TABLE "{schema}".ledger (id integer);
+               GRANT SELECT, INSERT ON "{schema}".ledger TO "{caller}";
+               ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}"
+                   GRANT SELECT ON TABLES TO "{caller}";
+               RESET ROLE;"#,
+            owner = fixture.owner,
+            schema = fixture.schema,
+            caller = fixture.caller,
+        ));
+        let manifest = write_temp_manifest(&format!(
+            "additive_enforce_absences: true\n{}",
+            fixture.manifest()
+        ));
+        let apply = || {
+            pgroles_cmd()
+                .args([
+                    "apply",
+                    "--file",
+                    manifest.path().to_str().unwrap(),
+                    "--database-url",
+                    &database_url(),
+                    "--mode",
+                    "additive",
+                ])
+                .assert()
+                .success()
+                .stderr(predicate::str::contains("ignores every absence").not());
+        };
+        apply();
+        assert!(!query_has_function_privilege(
+            &fixture.bystander,
+            &fixture.secret_signature()
+        ));
+        assert!(query_has_function_privilege(
+            &fixture.caller,
+            &fixture.secret_signature()
+        ));
+        let table = format!("\"{}\".ledger", fixture.schema);
+        assert!(query_has_relation_privilege(
+            &fixture.caller,
+            &table,
+            "SELECT"
+        ));
+        assert!(query_has_relation_privilege(
+            &fixture.caller,
+            &table,
+            "INSERT"
+        ));
+
+        execute_sql(&format!(
+            r#"SET ROLE "{owner}";
+               CREATE FUNCTION "{schema}".future() RETURNS integer LANGUAGE sql AS 'SELECT 1';
+               CREATE TABLE "{schema}".future_ledger (id integer);
+               GRANT EXECUTE ON FUNCTION "{schema}".secret(integer) TO PUBLIC;
+               RESET ROLE;"#,
+            owner = fixture.owner,
+            schema = fixture.schema,
+        ));
+        assert!(!query_has_function_privilege(
+            &fixture.bystander,
+            &format!("\"{}\".future()", fixture.schema)
+        ));
+        assert!(query_has_relation_privilege(
+            &fixture.caller,
+            &format!("\"{}\".future_ledger", fixture.schema),
+            "SELECT"
+        ));
+        apply();
+        assert!(!query_has_function_privilege(
+            &fixture.bystander,
+            &fixture.secret_signature()
+        ));
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--database-url",
+                &database_url(),
+                "--mode",
+                "additive",
+                "--format",
+                "summary",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No changes needed"));
+    }
+
+    #[test]
+    #[ignore]
     fn overloaded_routines_converge_under_one_wildcard_absence() {
         let (fixture, _cleanup) = PublicFixture::new("puboverload");
         execute_sql(&format!(

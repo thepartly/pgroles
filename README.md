@@ -17,7 +17,7 @@ Declarative PostgreSQL access control. Define roles, schema ownership, grants, a
 
 For simple setups, use a single manifest. For larger teams, the CLI also supports bundle composition: shared profiles plus multiple scoped policy fragments merged into one desired plan with conflict checks before any database diff or apply.
 
-The default authoritative mode revokes undeclared access and drops eligible roles within the managed inspection scope. PUBLIC privileges require explicit rules; pgroles does not manage every role and object in the database. For incremental adoption, use `--mode additive` to only grant and never revoke, or `--mode adopt` to manage declared roles fully without dropping undeclared ones. In additive mode, pgroles also leaves attributes, comments, and config defaults unchanged on pre-existing roles.
+The default authoritative mode revokes undeclared access and drops eligible roles within the managed inspection scope. PUBLIC privileges require explicit rules; pgroles does not manage every role and object in the database. For incremental adoption, use `--mode additive` to only grant and never revoke, or `--mode adopt` to manage declared roles fully without dropping undeclared ones. In additive mode, pgroles also leaves attributes, comments, and config defaults unchanged on pre-existing roles. Opt in with manifest field `additive_enforce_absences: true` to enforce explicit `ensure: absent` grants and default privileges without revoking undeclared access.
 
 ## How it works
 

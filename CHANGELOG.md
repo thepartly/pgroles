@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `additive_enforce_absences` policy setting: additive reconciliation can enforce explicit `ensure: absent` grants and default privileges while preserving undeclared access. The default remains strictly additive. Supported by the CLI, bundles, explorer, operator and candidate policies. Upgrade the operator CRDs before using the new field.
+
 ## [0.15.0] - 2026-10-19
 
 ### Highlights

@@ -66,6 +66,10 @@
               "spec": {
                 "description": "Spec for a `PostgresPolicy` custom resource.\n\nDefines the desired state of PostgreSQL roles, grants, default privileges,\nand memberships for a single database connection.",
                 "properties": {
+                  "additive_enforce_absences": {
+                    "description": "Enforce explicit `ensure: absent` grants and default privileges in additive mode.\nUndeclared access, membership removals and role retirement remain untouched.\nHas no effect in authoritative or adopt mode.",
+                    "type": "boolean"
+                  },
                   "allow_schema_owner_transfers": {
                     "default": false,
                     "description": "Permit adopt mode to transfer schema ownership (`ALTER SCHEMA ...\nOWNER TO ...`) on schemas whose live owner differs. Without this,\napply-mode adopt policies fail such plans with an\n`OwnerTransferBlocked` condition — the operator equivalent of the\nCLI's `--allow-schema-owner-transfers`.",
@@ -821,7 +825,7 @@
                   },
                   "reconciliation_mode": {
                     "default": "authoritative",
-                    "description": "Convergence strategy: how aggressively to converge the database.\n\n- `authoritative` (default): revoke undeclared managed privileges and\n  drop undeclared roles within the configured inspection scope. External\n  roles are not altered or dropped; PUBLIC targets require explicit rules.\n- `additive`: only grant, never revoke — safe for incremental adoption;\n  `ensure: absent` assertions are ignored with a warning condition.\n- `adopt`: manage declared roles fully, but never drop undeclared roles.",
+                    "description": "Convergence strategy: how aggressively to converge the database.\n\n- `authoritative` (default): revoke undeclared managed privileges and\n  drop undeclared roles within the configured inspection scope. External\n  roles are not altered or dropped; PUBLIC targets require explicit rules.\n- `additive`: only grant by default — safe for incremental adoption;\n  enable `additive_enforce_absences` to enforce explicit grant and default-\n  privilege absences. Otherwise they are ignored with a warning condition.\n- `adopt`: manage declared roles fully, but never drop undeclared roles.",
                     "enum": [
                       "authoritative",
                       "additive",

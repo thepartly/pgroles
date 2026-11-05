@@ -436,7 +436,27 @@ pgroles apply --database-url postgres://localhost/mydb --mode additive
 
 Additive mode filters out: `ALTER ROLE`, `COMMENT ON ROLE`, `REVOKE`, `REVOKE DEFAULT PRIVILEGE`, `REMOVE MEMBER`, `ALTER SCHEMA ... OWNER TO ...`, `DROP ROLE`, `DROP OWNED`, `REASSIGN OWNED`, and `TERMINATE SESSIONS`.
 
-Because additive mode never revokes, it also ignores every `ensure: absent` rule. The rest of the plan still applies, and the run does not fail. Use `adopt` or `authoritative` when you need those assertions enforced.
+By default, additive mode also ignores `ensure: absent` rules with a warning. To enforce explicit grant and default-privilege removals while preserving undeclared access, opt in in the policy manifest:
+
+```yaml
+additive_enforce_absences: true
+roles:
+  - name: app_reader
+    external: true
+grants:
+  - role: app_reader
+    ensure: absent
+    privileges: [CREATE]
+    object: {type: schema, name: public}
+```
+
+Run the same `--mode additive` diff and apply commands. The option retains only the privileges explicitly listed as absent, even when inspection combines several privileges or normalizes objects into a wildcard. All other additive safeguards remain: undeclared grants and default privileges are preserved, and memberships, existing role attributes, schema ownership and retirement are not reduced. `exclusive: true` membership removals remain ignored and still produce a warning.
+
+This supports policies with separate responsibilities. A platform policy can withdraw a declared bootstrap grant without taking ownership of application privileges added by another policy. PostgreSQL still checks the executor's normal authority. An absence rule removes an ACL edge, not access inherited through other roles or ownership.
+
+For bundles, set `additive_enforce_absences: true` on the bundle root. The rendered manifest retains the option. For the operator, set the same field in `PostgresPolicy.spec` or candidate content and use `reconciliation_mode: additive`. Upgrade the CRDs before using the new field.
+
+The option defaults to false and has no effect in `adopt` or `authoritative` mode.
 
 If additive mode skips a schema ownership transfer, pgroles also defers owner-bound follow-up steps such as schema-owner privilege repair and `ALTER DEFAULT PRIVILEGES FOR ROLE ...` for that owner context.
 

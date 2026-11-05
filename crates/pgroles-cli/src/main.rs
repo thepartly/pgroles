@@ -21,7 +21,9 @@ use pgroles_cli::{
     inject_password_changes, read_manifest_file, resolve_passwords, validate_bundle_file,
     validate_manifest,
 };
-use pgroles_core::diff::{ReconciliationMode, additive_ignores_absence_assertions, plan_changes};
+use pgroles_core::diff::{
+    ReconciliationMode, additive_ignores_absence_assertions_with_options, plan_changes,
+};
 use pgroles_core::explorer::ExecutorFacts;
 use pgroles_core::ownership::validate_changes_against_managed_surface;
 use pgroles_core::review_artifact::{
@@ -1595,7 +1597,11 @@ async fn cmd_diff(
         let inspect_config = inspect_config_for_bundle(&validated);
         let current = inspect_current_for_plan_with_config(&pool, &inspect_config).await?;
         info!(%mode, "reconciliation mode");
-        warn_additive_absence_assertions(&validated.composed.desired, mode);
+        warn_additive_absence_assertions(
+            &validated.composed.desired,
+            mode,
+            validated.composed.manifest.additive_enforce_absences,
+        );
         warn_unenforceable_absence_assertions(&current, &validated.composed.desired);
         let changes = plan_changes(
             &current,
@@ -1710,7 +1716,11 @@ async fn cmd_diff(
     let current = inspect_current_for_plan(&pool, &validated).await?;
 
     info!(%mode, "reconciliation mode");
-    warn_additive_absence_assertions(&validated.desired, mode);
+    warn_additive_absence_assertions(
+        &validated.desired,
+        mode,
+        validated.manifest.additive_enforce_absences,
+    );
     warn_unenforceable_absence_assertions(&current, &validated.desired);
     let changes = plan_changes(
         &current,
@@ -1824,7 +1834,11 @@ async fn cmd_apply(
         let current = inspect_current_for_plan_with_config(&pool, &inspect_config).await?;
 
         info!(%mode, "reconciliation mode");
-        warn_additive_absence_assertions(&validated.composed.desired, mode);
+        warn_additive_absence_assertions(
+            &validated.composed.desired,
+            mode,
+            validated.composed.manifest.additive_enforce_absences,
+        );
         warn_unenforceable_absence_assertions(&current, &validated.composed.desired);
         let changes = plan_changes(
             &current,
@@ -1929,7 +1943,11 @@ async fn cmd_apply(
     let current = inspect_current_for_plan(&pool, &validated).await?;
 
     info!(%mode, "reconciliation mode");
-    warn_additive_absence_assertions(&validated.desired, mode);
+    warn_additive_absence_assertions(
+        &validated.desired,
+        mode,
+        validated.manifest.additive_enforce_absences,
+    );
     warn_unenforceable_absence_assertions(&current, &validated.desired);
     let changes = plan_changes(
         &current,
@@ -2694,8 +2712,13 @@ fn refuse_authority_issues(issues: &[pgroles_inspect::AuthorityIssue]) -> Result
 fn warn_additive_absence_assertions(
     desired: &pgroles_core::model::RoleGraph,
     mode: ReconciliationMode,
+    enforce_absences: bool,
 ) {
-    if additive_ignores_absence_assertions(desired, mode) {
+    if additive_ignores_absence_assertions_with_options(desired, mode, enforce_absences) {
+        if enforce_absences {
+            eprintln!("Warning: additive reconciliation ignores exclusive membership removals");
+            return;
+        }
         eprintln!(
             "Warning: additive reconciliation ignores every absence assertion \
              (`ensure: absent` and `exclusive: true` memberships); \

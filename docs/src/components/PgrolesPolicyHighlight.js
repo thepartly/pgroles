@@ -8,6 +8,7 @@ const fieldNotes = {
 
 const roleReferenceFields = new Set([
   'default_owner',
+  'additive_enforce_absences',
   'role_pattern',
   'owner',
   'role',

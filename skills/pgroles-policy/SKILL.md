@@ -94,8 +94,13 @@ changes remain in the plan:
 - `additive`: creates and additions only. It filters revokes, membership
   removals, existing schema-owner transfers, existing-role rewrites, and role
   retirement. It also omits role comments. Configured password updates are a
-  deliberate exception. Because it never revokes, it ignores every
-  `ensure: absent` rule with a warning instead of failing the run.
+  deliberate exception. By default it ignores every `ensure: absent` rule
+  with a warning instead of failing the run. With manifest option
+  `additive_enforce_absences: true`, explicit grant and default-privilege
+  absences are enforced while undeclared access stays untouched. Exclusive
+  membership removals remain ignored. For bundles set the option on the root;
+  for the operator set it in the policy spec or candidate content after
+  upgrading the CRDs. Review these explicit revocations before applying.
 - `adopt`: authoritative convergence except role drops and their retirement
   steps. Revokes and membership removals still occur.
 - `authoritative`: retains every change computed within pgroles' managed

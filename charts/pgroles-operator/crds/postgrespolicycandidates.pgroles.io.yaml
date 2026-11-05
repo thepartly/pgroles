@@ -59,6 +59,10 @@
                   "content": {
                     "description": "The proposed policy content.",
                     "properties": {
+                      "additive_enforce_absences": {
+                        "description": "Enforce explicit `ensure: absent` grants and default privileges in additive mode.\nUndeclared access, membership removals and role retirement remain untouched.\nHas no effect in authoritative or adopt mode.",
+                        "type": "boolean"
+                      },
                       "default_owner": {
                         "description": "Default owner for ALTER DEFAULT PRIVILEGES (e.g. \"app_owner\").",
                         "maxLength": 63,

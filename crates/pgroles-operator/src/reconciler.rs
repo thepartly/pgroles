@@ -1596,16 +1596,17 @@ async fn apply_under_lock(
     let reconciliation_mode: pgroles_core::diff::ReconciliationMode =
         resource.spec.reconciliation_mode.into();
     tracing::info!(%reconciliation_mode, "reconciliation mode");
-    if pgroles_core::diff::additive_ignores_absence_assertions(
+    if pgroles_core::diff::additive_ignores_absence_assertions_with_options(
         &effective_desired,
         reconciliation_mode,
+        resource.spec.additive_enforce_absences,
     ) {
         tracing::warn!(
             name,
             namespace,
-            "additive reconciliation ignores every absence assertion \
-             (`ensure: absent` and `exclusive: true` memberships); \
-             use adopt or authoritative mode to enforce absence"
+            "Some absence assertions are ignored in additive mode. Enable \
+             additive_enforce_absences for explicit grants and default privileges. \
+             Exclusive membership removals require adopt or authoritative mode."
         );
     }
     let diff_started = std::time::Instant::now();
@@ -3663,7 +3664,12 @@ fn apply_additive_absence_condition(resource: &PostgresPolicy, status: &mut Post
                 .any(|grant| grant.ensure == pgroles_core::manifest::Ensure::Absent)
         });
     if resource.spec.reconciliation_mode == crate::crd::CrdReconciliationMode::Additive
-        && declares_absence
+        && ((!resource.spec.additive_enforce_absences && declares_absence)
+            || resource
+                .spec
+                .memberships
+                .iter()
+                .any(|membership| membership.exclusive))
     {
         status.set_condition(crate::crd::absence_assertions_ignored_condition());
     } else {
@@ -4108,6 +4114,7 @@ mod tests {
 
     fn test_policy(interval: &str, transient_failure_count: i32) -> Arc<PostgresPolicy> {
         let spec = PostgresPolicySpec {
+            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "db-credentials".to_string(),
@@ -4151,6 +4158,7 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
+                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4315,7 +4323,34 @@ mod tests {
             .expect("additive absence assertions should be visible on status");
         assert_eq!(
             condition.reason.as_deref(),
-            Some("AdditiveModeNeverRevokes")
+            Some("AdditiveAssertionsIgnored")
+        );
+
+        policy.spec.additive_enforce_absences = true;
+        apply_additive_absence_condition(&policy, &mut status);
+        assert!(
+            status
+                .conditions
+                .iter()
+                .all(|condition| condition.condition_type
+                    != crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+        );
+
+        policy
+            .spec
+            .memberships
+            .push(pgroles_core::manifest::Membership {
+                role: "app".into(),
+                members: vec![],
+                exclusive: true,
+            });
+        apply_additive_absence_condition(&policy, &mut status);
+        assert!(
+            status
+                .conditions
+                .iter()
+                .any(|condition| condition.condition_type
+                    == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
         );
 
         policy.spec.reconciliation_mode = crate::crd::CrdReconciliationMode::Adopt;
@@ -4350,6 +4385,7 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
+                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4386,6 +4422,7 @@ mod tests {
         test_policy_with_spec(
             "password-policy",
             PostgresPolicySpec {
+                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: "db-credentials".to_string(),
