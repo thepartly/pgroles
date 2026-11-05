@@ -1332,6 +1332,25 @@
                     },
                     "type": "array"
                   },
+                  "resolved_database_target": {
+                    "description": "The database this policy's connection reached, as the server reports\nit. Other policies compare against this to detect ownership conflicts\non one database reached through different Secrets or namespaces.",
+                    "nullable": true,
+                    "properties": {
+                      "connection_identity": {
+                        "description": "The [`DatabaseIdentity`] the key was resolved through. A peer's key is\ntrusted only while this still matches the peer's spec, so a key left\nover from before a connection change cannot match.",
+                        "type": "string"
+                      },
+                      "key": {
+                        "description": "Opaque digest of the server-reported identity: `system_identifier`,\n`inet_server_addr()`, `inet_server_port()` and `current_database()`.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "connection_identity",
+                      "key"
+                    ],
+                    "type": "object"
+                  },
                   "transient_failure_count": {
                     "default": 0,
                     "description": "Consecutive transient operational failures used for exponential backoff.",
