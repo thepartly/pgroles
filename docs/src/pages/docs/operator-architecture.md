@@ -106,6 +106,11 @@ The controller derives ownership claims from declared roles and schema/profile e
 
 Two policies that use the same Secret and key in the same namespace are always compared, including before either has connected. A recorded target is ignored once the policy's connection no longer matches the one it was resolved through. Reaching one server through two different interfaces, such as its private and public address, is not recognised as the same database; the advisory lock below still serializes those reconciles.
 
+Detection has two limits:
+
+- **Policies that have not connected yet.** A policy is compared with a peer through a different Secret or namespace only once that peer has recorded its target. When two such policies start together, or both were reconciling before an upgrade, the first to reconcile can apply once before the second records its target. Both report `ConflictingPolicy` from their next reconcile. The operator does not hold a policy until every peer has resolved, because one peer that cannot connect would then hold every other policy indefinitely.
+- **What the operator watches.** An operator only compares policies it can list. With `WATCH_NAMESPACE` set, each install sees its own namespace, so separate namespace-scoped installs that manage one database do not detect conflicts between each other. Run one cluster-scoped operator for a database shared across namespaces, or keep the installs' ownership claims disjoint.
+
 ### Per-database serialization
 
 Reconciliation is serialized per database target in two layers:
