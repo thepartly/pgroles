@@ -1,0 +1,47 @@
+== 1. Platform registers appdb; three teams attach bootstrap policies
+  ok    platform/team-roles live
+  ok    billing/billing live
+  ok    shipping/shipping live
+  PASS  billing schema owned by billing_migrator
+  PASS  alice_payments is in team_payments
+== 2. Teams run their migrations, then attach full policies
+  ok    billing/billing live at its new generation
+  PASS  shipping_migrator may reference invoices (granted by billing)
+  ok    shipping/shipping live at its new generation
+  PASS  billing_worker cannot insert invoices
+  PASS  billing_api cannot read shipments
+  PASS  shipping_reports can read shipments
+  PASS  team_payments (platform-owned) can read invoices via billing's grant
+  PASS  team_payments CONNECT, granted by platform
+  PASS  attached policies accepted
+  PASS  billing policy mirrors composed readiness
+== 3. Rogue and careless policies attach
+  ok    rejections recorded
+  PASS  billing/escalate rejected
+  PASS  analytics/reporting rejected
+  PASS  shipping/open-up rejected
+  PASS  billing/late-duplicate rejected
+  PASS  earlier billing policy still accepted
+  PASS  database stays Ready despite rejected newcomers
+  PASS  no escalation reached PostgreSQL
+  PASS  billing_api is not superuser
+  PASS  PUBLIC did not get CREATE
+== 4. Credentials
+  PASS  database Secrets outside platform namespace
+  PASS  one operator-owned policy reconciles appdb
+== 5. A rejected newcomer is fixed and accepted
+  ok    rejections drop to 3
+== 6. Billing pushes an out-of-scope edit while a squatter waits for billing_api
+  ok    billing edit rejected, previous generation retained
+  PASS  squatter still rejected
+  PASS  composed policy still declares billing_migrator
+  PASS  database stays Ready
+  PASS  billing_api still reads invoices
+  PASS  billing_api not superuser
+  PASS  out-of-scope membership not applied
+  ok    billing accepted again after the fix
+== 7. (observation) Shipping deletes its policy
+  composed Ready: NonConvergentPlan: plan appdb-composed-plan-20261105-111252-99b51d2771fa applied these exact changes recently, but the database still reports them as drift: the SQL executed without error yet changed nothing pgroles can observe. This usually means the executor lacks the authority to enforce a change
+  shipping roles left in PostgreSQL: shipping_migrator,shipping_api,shipping_reports
+
+passed=27 failed=0

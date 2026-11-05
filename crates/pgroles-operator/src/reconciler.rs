@@ -468,6 +468,12 @@ pub async fn reconcile(
     resource: Arc<PostgresPolicy>,
     ctx: Arc<OperatorContext>,
 ) -> Result<Action, finalizer::Error<ReconcileError>> {
+    // An attached policy is content, not a reconcile target: its database's
+    // controller composes it and reports back on its status.
+    if resource.spec.database_ref.is_some() {
+        return Ok(Action::await_change());
+    }
+
     let api: Api<PostgresPolicy> = Api::namespaced(
         ctx.kube_client.clone(),
         resource.namespace().as_deref().unwrap_or("default"),
@@ -3763,6 +3769,12 @@ fn detect_policy_conflict_in_list(
         if other_ns == this_ns && other_name == this_name {
             continue;
         }
+        // Attached policies are checked against each other when their
+        // database composes them; their content reaches the database only
+        // through the composed policy, which is compared here.
+        if other.spec.database_ref.is_some() {
+            continue;
+        }
 
         let other_identity = DatabaseIdentity::from_connection(&other_ns, &other.spec.connection);
         let other_resolved = other
@@ -4163,6 +4175,7 @@ mod tests {
 
     fn test_policy(interval: &str, transient_failure_count: i32) -> Arc<PostgresPolicy> {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "db-credentials".to_string(),
@@ -4206,6 +4219,7 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
+                database_ref: None,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4405,6 +4419,7 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
+                database_ref: None,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4441,6 +4456,7 @@ mod tests {
         test_policy_with_spec(
             "password-policy",
             PostgresPolicySpec {
+                database_ref: None,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: "db-credentials".to_string(),

@@ -1,0 +1,20 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresDatabase
+metadata: {name: appdb, namespace: platform}
+spec:
+  connection:
+    secretRef: {name: appdb-executor}
+  interval: 1m
+  mode: apply
+  approval: auto
+  reconciliationMode: authoritative
+  executorRole: pgroles_executor
+  delegations:
+    - namespaces: [platform]
+      roles: ["team_*", "alice_*", "bob_*"]
+    - namespaces: [billing]
+      roles: ["billing_*"]
+      schemas: [{name: billing, facets: [owner, bindings]}]
+    - namespaces: [shipping]
+      roles: ["shipping_*"]
+      schemas: [{name: shipping, facets: [owner, bindings]}]

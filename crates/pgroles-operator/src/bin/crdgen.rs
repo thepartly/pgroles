@@ -14,6 +14,7 @@ use pgroles_operator::crd::{
     EphemeralAccessPolicy, EphemeralAccessRequest, PostgresPolicy, PostgresPolicyPlan,
     postgres_policy_candidate_crd,
 };
+use pgroles_operator::database::PostgresDatabase;
 
 struct CrdOutput {
     filename: &'static str,
@@ -22,6 +23,11 @@ struct CrdOutput {
 
 fn generate() -> Vec<CrdOutput> {
     vec![
+        CrdOutput {
+            filename: "postgresdatabases.pgroles.io.yaml",
+            json: serde_json::to_string_pretty(&PostgresDatabase::crd())
+                .expect("PostgresDatabase CRD should serialize"),
+        },
         CrdOutput {
             filename: "postgrespolicies.pgroles.io.yaml",
             json: serde_json::to_string_pretty(&PostgresPolicy::crd())

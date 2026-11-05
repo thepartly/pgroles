@@ -1,0 +1,23 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata:
+  name: shipping
+  namespace: shipping
+spec:
+  roles:
+  - name: shipping_migrator
+    login: true
+    comment: Runs shipping service migrations and owns shipping objects
+  schemas:
+  - name: shipping
+    owner: shipping_migrator
+  grants:
+  - role: shipping_migrator
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  databaseRef:
+    name: appdb
+    namespace: platform
