@@ -269,12 +269,6 @@ impl Ensure {
 /// Top-level policy manifest — the YAML file that users write.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyManifest {
-    /// Enforce explicit `ensure: absent` grants and default privileges in additive mode.
-    /// Undeclared access, membership removals and role retirement remain untouched.
-    /// Has no effect in authoritative or adopt mode.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub additive_enforce_absences: bool,
-
     /// Default role naming pattern for schema profile bindings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_pattern: Option<String>,

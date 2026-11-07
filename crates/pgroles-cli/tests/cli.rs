@@ -6691,12 +6691,11 @@ default_privileges:
 
     #[test]
     #[ignore]
-    fn additive_mode_ignores_absence_while_adopt_applies_it() {
+    fn additive_and_adopt_enforce_explicit_absences() {
         let (fixture, _cleanup) = PublicFixture::new("pubmode");
         let manifest = write_temp_manifest(&fixture.manifest());
 
-        // Additive never revokes, so the absence assertion is skipped rather
-        // than failing the run.
+        // Additive enforces explicit absences without an extra setting.
         pgroles_cmd()
             .args([
                 "apply",
@@ -6709,12 +6708,10 @@ default_privileges:
             ])
             .assert()
             .success()
-            .stderr(predicate::str::contains(
-                "additive reconciliation ignores every absence assertion",
-            ));
+            .stderr(predicate::str::contains("ignores every absence").not());
         assert!(
-            query_has_function_privilege(&fixture.bystander, &fixture.secret_signature()),
-            "additive mode must not revoke PUBLIC EXECUTE"
+            !query_has_function_privilege(&fixture.bystander, &fixture.secret_signature()),
+            "additive mode must enforce the explicit PUBLIC absence"
         );
 
         // Adopt applies the same assertion.
@@ -6738,7 +6735,7 @@ default_privileges:
 
     #[test]
     #[ignore]
-    fn additive_opt_in_enforces_absences_and_preserves_other_policies() {
+    fn additive_enforces_absences_and_preserves_other_policies() {
         let (fixture, _cleanup) = PublicFixture::new("pubadditive");
         execute_sql(&format!(
             r#"SET ROLE "{owner}";
@@ -6751,10 +6748,7 @@ default_privileges:
             schema = fixture.schema,
             caller = fixture.caller,
         ));
-        let manifest = write_temp_manifest(&format!(
-            "additive_enforce_absences: true\n{}",
-            fixture.manifest()
-        ));
+        let manifest = write_temp_manifest(&fixture.manifest());
         let apply = || {
             pgroles_cmd()
                 .args([
@@ -6821,6 +6815,111 @@ default_privileges:
                 manifest.path().to_str().unwrap(),
                 "--database-url",
                 &database_url(),
+                "--mode",
+                "additive",
+                "--format",
+                "summary",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No changes needed"));
+    }
+
+    #[test]
+    #[ignore]
+    fn additive_separate_executors_preserve_shared_grantee_access() {
+        let team_a = unique_name("additive_team_a");
+        let team_b = unique_name("additive_team_b");
+        let reader = unique_name("additive_shared_reader");
+        let schema_a = unique_name("additive_schema_a");
+        let schema_b = unique_name("additive_schema_b");
+        let _cleanup = TestDbCleanup::new(format!(
+            r#"DROP SCHEMA IF EXISTS "{schema_a}" CASCADE;
+               DROP SCHEMA IF EXISTS "{schema_b}" CASCADE;
+               DROP OWNED BY "{team_a}", "{team_b}", "{reader}";
+               DROP ROLE "{team_a}", "{team_b}", "{reader}";"#
+        ));
+        execute_sql(&format!(
+            r#"CREATE ROLE "{team_a}" LOGIN PASSWORD 'testpassword';
+               CREATE ROLE "{team_b}" LOGIN PASSWORD 'testpassword';
+               CREATE ROLE "{reader}";
+               CREATE SCHEMA "{schema_a}" AUTHORIZATION "{team_a}";
+               CREATE SCHEMA "{schema_b}" AUTHORIZATION "{team_b}";
+               SET ROLE "{team_a}";
+               CREATE TABLE "{schema_a}".records (id integer);
+               GRANT SELECT, INSERT ON "{schema_a}".records TO "{reader}";
+               ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_a}" GRANT SELECT, INSERT ON TABLES TO "{reader}";
+               RESET ROLE;
+               SET ROLE "{team_b}";
+               CREATE TABLE "{schema_b}".records (id integer);
+               GRANT SELECT ON "{schema_b}".records TO "{reader}";
+               ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_b}" GRANT SELECT ON TABLES TO "{reader}";
+               RESET ROLE;"#
+        ));
+        let policy = |owner: &str, schema: &str, absent: bool| {
+            write_temp_manifest(&format!(
+                r#"roles: [{{name: {reader}, external: true}}, {{name: {owner}, external: true}}]
+grants:
+  - role: {reader}
+    ensure: {ensure}
+    privileges: [SELECT]
+    object: {{type: table, schema: {schema}, name: records}}
+default_privileges:
+  - owner: {owner}
+    schema: {schema}
+    grant:
+      - role: {reader}
+        ensure: {ensure}
+        privileges: [SELECT]
+        on_type: table
+"#,
+                ensure = if absent { "absent" } else { "present" }
+            ))
+        };
+        let a = policy(&team_a, &schema_a, true);
+        let b = policy(&team_b, &schema_b, false);
+        for (owner, manifest) in [(&team_a, &a), (&team_b, &b), (&team_a, &a)] {
+            pgroles_cmd()
+                .args([
+                    "apply",
+                    "--file",
+                    manifest.path().to_str().unwrap(),
+                    "--database-url",
+                    &database_url_for_role(owner, "testpassword"),
+                    "--mode",
+                    "additive",
+                ])
+                .assert()
+                .success();
+        }
+        execute_sql(&format!(
+            r#"SET ROLE "{team_a}"; CREATE TABLE "{schema_a}".future (id integer);
+            RESET ROLE; SET ROLE "{team_b}"; CREATE TABLE "{schema_b}".future (id integer); RESET ROLE;"#
+        ));
+        for table in ["records", "future"] {
+            assert!(!query_has_relation_privilege(
+                &reader,
+                &format!("\"{schema_a}\".{table}"),
+                "SELECT"
+            ));
+            assert!(query_has_relation_privilege(
+                &reader,
+                &format!("\"{schema_a}\".{table}"),
+                "INSERT"
+            ));
+            assert!(query_has_relation_privilege(
+                &reader,
+                &format!("\"{schema_b}\".{table}"),
+                "SELECT"
+            ));
+        }
+        pgroles_cmd()
+            .args([
+                "diff",
+                "--file",
+                a.path().to_str().unwrap(),
+                "--database-url",
+                &database_url_for_role(&team_a, "testpassword"),
                 "--mode",
                 "additive",
                 "--format",

@@ -1596,17 +1596,14 @@ async fn apply_under_lock(
     let reconciliation_mode: pgroles_core::diff::ReconciliationMode =
         resource.spec.reconciliation_mode.into();
     tracing::info!(%reconciliation_mode, "reconciliation mode");
-    if pgroles_core::diff::additive_ignores_absence_assertions_with_options(
+    if pgroles_core::diff::additive_ignores_absence_assertions(
         &effective_desired,
         reconciliation_mode,
-        resource.spec.additive_enforce_absences,
     ) {
         tracing::warn!(
             name,
             namespace,
-            "Some absence assertions are ignored in additive mode. Enable \
-             additive_enforce_absences for explicit grants and default privileges. \
-             Exclusive membership removals require adopt or authoritative mode."
+            "Exclusive membership removals are ignored in additive mode; use adopt or authoritative mode to enforce them."
         );
     }
     let diff_started = std::time::Instant::now();
@@ -3652,24 +3649,12 @@ fn apply_mode_deprecation_condition(resource: &PostgresPolicy, status: &mut Post
 /// written for the policy, and clear the condition as soon as the combination
 /// no longer applies.
 fn apply_additive_absence_condition(resource: &PostgresPolicy, status: &mut PostgresPolicyStatus) {
-    let declares_absence = resource
-        .spec
-        .grants
-        .iter()
-        .any(|grant| grant.ensure == pgroles_core::manifest::Ensure::Absent)
-        || resource.spec.default_privileges.iter().any(|defaults| {
-            defaults
-                .grant
-                .iter()
-                .any(|grant| grant.ensure == pgroles_core::manifest::Ensure::Absent)
-        });
     if resource.spec.reconciliation_mode == crate::crd::CrdReconciliationMode::Additive
-        && ((!resource.spec.additive_enforce_absences && declares_absence)
-            || resource
-                .spec
-                .memberships
-                .iter()
-                .any(|membership| membership.exclusive))
+        && resource
+            .spec
+            .memberships
+            .iter()
+            .any(|membership| membership.exclusive)
     {
         status.set_condition(crate::crd::absence_assertions_ignored_condition());
     } else {
@@ -4114,7 +4099,6 @@ mod tests {
 
     fn test_policy(interval: &str, transient_failure_count: i32) -> Arc<PostgresPolicy> {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "db-credentials".to_string(),
@@ -4158,7 +4142,6 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
-                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4314,20 +4297,6 @@ mod tests {
         let mut status = PostgresPolicyStatus::default();
 
         apply_additive_absence_condition(&policy, &mut status);
-        let condition = status
-            .conditions
-            .iter()
-            .find(|condition| {
-                condition.condition_type == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED
-            })
-            .expect("additive absence assertions should be visible on status");
-        assert_eq!(
-            condition.reason.as_deref(),
-            Some("AdditiveAssertionsIgnored")
-        );
-
-        policy.spec.additive_enforce_absences = true;
-        apply_additive_absence_condition(&policy, &mut status);
         assert!(
             status
                 .conditions
@@ -4351,6 +4320,18 @@ mod tests {
                 .iter()
                 .any(|condition| condition.condition_type
                     == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+        );
+
+        assert_eq!(
+            status
+                .conditions
+                .iter()
+                .find(|condition| condition.condition_type
+                    == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("AdditiveExclusiveMembershipsIgnored")
         );
 
         policy.spec.reconciliation_mode = crate::crd::CrdReconciliationMode::Adopt;
@@ -4385,7 +4366,6 @@ mod tests {
         test_policy_with_spec(
             name,
             PostgresPolicySpec {
-                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: secret_name.to_string(),
@@ -4422,7 +4402,6 @@ mod tests {
         test_policy_with_spec(
             "password-policy",
             PostgresPolicySpec {
-                additive_enforce_absences: false,
                 connection: ConnectionSpec {
                     secret_ref: Some(SecretReference {
                         name: "db-credentials".to_string(),

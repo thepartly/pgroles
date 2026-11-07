@@ -6,10 +6,6 @@
     "description": "Top-level policy manifest — the YAML file that users write.",
     "type": "object",
     "properties": {
-      "additive_enforce_absences": {
-        "description": "Enforce explicit `ensure: absent` grants and default privileges in additive mode.\nUndeclared access, membership removals and role retirement remain untouched.\nHas no effect in authoritative or adopt mode.",
-        "type": "boolean"
-      },
       "auth_providers": {
         "description": "Cloud auth provider configurations for IAM-mapped role awareness.",
         "type": "array",
@@ -1890,10 +1886,6 @@
           "description": "Top-level policy manifest — the YAML file that users write.",
           "type": "object",
           "properties": {
-            "additive_enforce_absences": {
-              "description": "Enforce explicit `ensure: absent` grants and default privileges in additive mode.\nUndeclared access, membership removals and role retirement remain untouched.\nHas no effect in authoritative or adopt mode.",
-              "type": "boolean"
-            },
             "auth_providers": {
               "description": "Cloud auth provider configurations for IAM-mapped role awareness.",
               "type": "array",

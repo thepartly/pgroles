@@ -10,9 +10,8 @@ fn graph(yaml: &str) -> RoleGraph {
     RoleGraph::from_expanded(&expanded, manifest.default_owner.as_deref()).unwrap()
 }
 
-fn plan(current: &RoleGraph, yaml: &str, enforce: bool) -> Vec<Change> {
-    let mut manifest = parse_manifest(yaml).unwrap();
-    manifest.additive_enforce_absences = enforce;
+fn plan(current: &RoleGraph, yaml: &str) -> Vec<Change> {
+    let manifest = parse_manifest(yaml).unwrap();
     let expanded = expand_manifest(&manifest).unwrap();
     let desired = RoleGraph::from_expanded(&expanded, manifest.default_owner.as_deref()).unwrap();
     plan_changes(
@@ -82,24 +81,17 @@ default_privileges:
         privileges: [SELECT]
         on_type: table
 "#;
-    let strict = plan(&current, yaml, false);
-    assert!(strict.iter().all(|change| !matches!(
-        change,
-        Change::Revoke { .. } | Change::RevokeDefaultPrivilege { .. }
-    )));
-
-    let opted_in = plan(&current, yaml, true);
-    assert_eq!(opted_in.len(), strict.len() + 2);
-    assert!(opted_in.iter().any(|change| matches!(change,
+    let changes = plan(&current, yaml);
+    assert!(changes.iter().any(|change| matches!(change,
         Change::CreateRole { name, .. } if name == "newcomer")));
-    assert!(opted_in.iter().any(|change| matches!(
+    assert!(changes.iter().any(|change| matches!(
         change,
         Change::Grant {
             object_type: ObjectType::Database,
             ..
         }
     )));
-    let revokes: Vec<_> = opted_in
+    let revokes: Vec<_> = changes
         .iter()
         .filter(|change| {
             matches!(
@@ -108,6 +100,7 @@ default_privileges:
             )
         })
         .collect();
+    assert_eq!(revokes.len(), 2);
     assert!(
         matches!(revokes[0], Change::Revoke { role, name, privileges, .. }
         if role.as_str() == "reader" && name.as_deref() == Some("records")
@@ -121,7 +114,7 @@ default_privileges:
 }
 
 #[test]
-fn opting_in_without_absence_assertions_keeps_strict_additive_behavior() {
+fn without_absence_assertions_preserves_memberships_and_roles() {
     let current = graph(CURRENT);
     let yaml = r#"
 roles:
@@ -137,8 +130,7 @@ retirements:
   - role: legacy
     drop_owned: true
 "#;
-    assert_eq!(plan(&current, yaml, true), plan(&current, yaml, false));
-    assert!(plan(&current, yaml, true).is_empty());
+    assert!(plan(&current, yaml).is_empty());
 }
 
 #[test]
@@ -169,7 +161,7 @@ grants:
     privileges: [SELECT]
     object: {type: table, schema: app, name: records}
 "#;
-    let changes = plan(&current, yaml, true);
+    let changes = plan(&current, yaml);
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert!(
         matches!(&changes[0], Change::Revoke { name, grantor, privileges, .. }
@@ -189,7 +181,7 @@ grants:
     privileges: [SELECT]
     object: {type: table, schema: app, name: '*'}
 "#;
-    let changes = plan(&current, yaml, true);
+    let changes = plan(&current, yaml);
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert!(
         matches!(&changes[0], Change::Revoke { name, privileges, .. }
@@ -210,7 +202,7 @@ default_privileges:
         privileges: [EXECUTE]
         on_type: function
 "#;
-    let changes = plan(&RoleGraph::default(), yaml, true);
+    let changes = plan(&RoleGraph::default(), yaml);
     assert_eq!(changes.len(), 2, "{changes:?}");
     assert!(matches!(&changes[0], Change::CreateRole { name, .. } if name == "owner"));
     assert!(matches!(
@@ -246,7 +238,6 @@ grants:
     privileges: [EXECUTE]
     object: {type: function, schema: app, name: 'lookup(int2)'}
 "#,
-        true,
     );
     assert_eq!(changes.len(), 1);
     assert!(matches!(&changes[0], Change::Revoke { name, .. }
@@ -254,43 +245,44 @@ grants:
 }
 
 #[test]
-fn manifest_opt_in_is_explicit_and_false_keeps_existing_serialization() {
-    let ordinary = parse_manifest("roles: []").unwrap();
-    assert!(!ordinary.additive_enforce_absences);
-    assert!(
-        !serde_json::to_string(&ordinary)
-            .unwrap()
-            .contains("additive_enforce_absences")
+fn deleting_a_converged_absence_does_not_restore_access() {
+    let current = graph(
+        "roles: [{name: reader}]\ngrants:\n  - role: reader\n    privileges: [INSERT]\n    object: {type: table, schema: app, name: records}\n",
     );
-    let enabled = parse_manifest("additive_enforce_absences: true\nroles: []").unwrap();
-    assert!(enabled.additive_enforce_absences);
-    assert!(
-        serde_json::to_string(&enabled)
-            .unwrap()
-            .contains("\"additive_enforce_absences\":true")
-    );
+    assert!(plan(&current, "roles: [{name: reader, external: true}]").is_empty());
 }
 
 #[test]
-fn bundles_render_the_explicit_opt_in_into_the_composed_manifest() {
+fn bundle_absences_are_enforced_without_an_option() {
     use pgroles_core::composition::{
         PolicyDocument, compose_bundle, parse_policy_bundle, parse_policy_fragment,
     };
-    let bundle =
-        parse_policy_bundle("additive_enforce_absences: true\nsources:\n  - file: platform.yaml\n")
-            .unwrap();
-    let document = PolicyDocument {
-        source: "platform.yaml".into(),
-        fragment: parse_policy_fragment(
-            "policy: {name: platform}\nscope: {roles: [reader]}\nroles: [{name: reader}]\n",
-        )
-        .unwrap(),
-    };
-    let composed = compose_bundle(&bundle, &[document]).unwrap();
-    assert!(composed.manifest.additive_enforce_absences);
+    let bundle = parse_policy_bundle("sources: [{file: platform.yaml}]").unwrap();
+    let fragment = parse_policy_fragment(
+        r#"
+policy: {name: platform}
+scope: {roles: [reader], schemas: [{name: app, facets: [bindings]}]}
+roles: [{name: reader, external: true}]
+grants:
+  - role: reader
+    ensure: absent
+    privileges: [SELECT]
+    object: {type: table, schema: app, name: records}
+"#,
+    )
+    .unwrap();
+    let composed = compose_bundle(
+        &bundle,
+        &[PolicyDocument {
+            source: "platform.yaml".into(),
+            fragment,
+        }],
+    )
+    .unwrap();
+    let yaml = serde_yaml::to_string(&composed.manifest).unwrap();
+    let changes = plan(&graph(CURRENT), &yaml);
+    assert_eq!(changes.len(), 1, "{changes:?}");
     assert!(
-        serde_yaml::to_string(&composed.manifest)
-            .unwrap()
-            .contains("additive_enforce_absences: true")
+        matches!(&changes[0], Change::Revoke { privileges, .. } if privileges == &BTreeSet::from([Privilege::Select]))
     );
 }

@@ -58,7 +58,7 @@ release or namespace names.
 | `DatabaseConnectionFailed` | DNS, network, TLS, database, or PostgreSQL login failure. [Check the connection](#connection-and-authentication). |
 | `GcpAuthFailed`, `SetRoleFailed` | Workload Identity token or post-login role switch failed. [Check authentication](#connection-and-authentication). |
 | `InvalidSpec` | The object passed admission but is not a valid pgroles policy. [Check policy validation](#policy-validation). |
-| `AbsenceAssertionsIgnored=True` | The policy uses `ensure: absent` with additive reconciliation, which never revokes. Switch to `adopt` or `authoritative` to enforce it. |
+| `AbsenceAssertionsIgnored=True` | The additive policy uses `exclusive: true` memberships. Reason `AdditiveExclusiveMembershipsIgnored` reports that membership removals are ignored; use `adopt` or `authoritative` to enforce them. Explicit grant and default-privilege absences are enforced in additive mode. |
 | `InvalidDatabaseTarget` | A database grant names a database other than the one the connection reaches. Set `object.name` to `current_database()`. [Check database objects](#missing-database-objects). |
 | `InvalidRoutineTarget` | A function or procedure grant names a routine PostgreSQL cannot resolve. The message lists the input-type signatures to use. [Check database objects](#missing-database-objects). |
 | `InsufficientPrivileges` | The executor can connect but cannot inspect or apply an operation. [Check executor privileges](#executor-privileges). |

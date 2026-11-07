@@ -3673,7 +3673,6 @@ mod tests {
     /// A minimal spec — the ownership tests only care about metadata.
     fn test_policy_spec() -> crate::crd::PostgresPolicySpec {
         crate::crd::PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: crate::crd::ConnectionSpec {
                 secret_ref: Some(crate::crd::SecretReference {
                     name: "db-credentials".to_string(),

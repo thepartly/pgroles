@@ -51,12 +51,6 @@ pub const VALID_SSL_MODES: &[&str] = &[
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 pub struct PostgresPolicySpec {
-    /// Enforce explicit `ensure: absent` grants and default privileges in additive mode.
-    /// Undeclared access, membership removals and role retirement remain untouched.
-    /// Has no effect in authoritative or adopt mode.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub additive_enforce_absences: bool,
-
     /// Database connection configuration.
     pub connection: ConnectionSpec,
 
@@ -77,9 +71,9 @@ pub struct PostgresPolicySpec {
     /// - `authoritative` (default): revoke undeclared managed privileges and
     ///   drop undeclared roles within the configured inspection scope. External
     ///   roles are not altered or dropped; PUBLIC targets require explicit rules.
-    /// - `additive`: only grant by default — safe for incremental adoption;
-    ///   enable `additive_enforce_absences` to enforce explicit grant and default-
-    ///   privilege absences. Otherwise they are ignored with a warning condition.
+    /// - `additive`: preserve undeclared access, but enforce explicit grant and
+    ///   default-privilege absences. Exclusive membership removals are ignored
+    ///   with a warning condition.
     /// - `adopt`: manage declared roles fully, but never drop undeclared roles.
     #[serde(default)]
     pub reconciliation_mode: CrdReconciliationMode,
@@ -209,7 +203,7 @@ pub enum CrdReconciliationMode {
     /// Full convergence — the manifest is the entire truth.
     #[default]
     Authoritative,
-    /// Only grant, never revoke — safe for incremental adoption.
+    /// Preserve undeclared access and enforce explicit grant and default-privilege absences.
     Additive,
     /// Manage declared roles fully, but never drop undeclared roles.
     Adopt,
@@ -2474,7 +2468,6 @@ fn build_policy_manifest<'a>(
         .collect();
 
     PolicyManifest {
-        additive_enforce_absences: false,
         default_owner: default_owner.map(str::to_string),
         role_pattern: role_pattern.map(str::to_string),
         auth_providers: Vec::new(),
@@ -2494,7 +2487,7 @@ impl PolicyContent {
     /// Identical to [`PostgresPolicySpec::to_policy_manifest`] by construction
     /// — see [`build_policy_manifest`].
     pub fn to_policy_manifest(&self) -> pgroles_core::manifest::PolicyManifest {
-        let mut manifest = build_policy_manifest(
+        build_policy_manifest(
             self.default_owner.as_deref(),
             self.role_pattern.as_deref(),
             self.profiles.iter(),
@@ -2504,9 +2497,7 @@ impl PolicyContent {
             &self.default_privileges,
             &self.memberships,
             &self.retirements,
-        );
-        manifest.additive_enforce_absences = self.additive_enforce_absences;
-        manifest
+        )
     }
 
     /// The canonical content digest of this content.
@@ -2528,7 +2519,6 @@ impl PostgresPolicySpec {
     /// content produce the same digest on either kind.
     pub fn policy_content(&self) -> PolicyContent {
         PolicyContent {
-            additive_enforce_absences: self.additive_enforce_absences,
             reconciliation_mode: self.reconciliation_mode,
             role_pattern: self.role_pattern.clone(),
             default_owner: self.default_owner.clone(),
@@ -2557,7 +2547,7 @@ impl PostgresPolicySpec {
 
     /// Convert the CRD spec into a `PolicyManifest` for use with the core library.
     pub fn to_policy_manifest(&self) -> pgroles_core::manifest::PolicyManifest {
-        let mut manifest = build_policy_manifest(
+        build_policy_manifest(
             self.default_owner.as_deref(),
             self.role_pattern.as_deref(),
             self.profiles.iter(),
@@ -2567,9 +2557,7 @@ impl PostgresPolicySpec {
             &self.default_privileges,
             &self.memberships,
             &self.retirements,
-        );
-        manifest.additive_enforce_absences = self.additive_enforce_absences;
-        manifest
+        )
     }
 
     /// Derive a conservative ownership claim set from the policy spec.
@@ -2802,8 +2790,7 @@ pub const CONDITION_APPROVAL_UNSET: &str = "ApprovalUnset";
 /// Condition type for `spec.mode: plan`, the deprecated spelling of `observe`.
 pub const CONDITION_MODE_VALUE_DEPRECATED: &str = "ModeValueDeprecated";
 
-/// Condition type reporting that additive reconciliation cannot enforce
-/// declarative absence assertions present in the policy.
+/// Condition type reporting ignored exclusive membership removals in additive mode.
 pub const CONDITION_ABSENCE_ASSERTIONS_IGNORED: &str = "AbsenceAssertionsIgnored";
 
 /// Condition type reporting that a plan carries an approval annotation which
@@ -2815,11 +2802,9 @@ pub fn absence_assertions_ignored_condition() -> PolicyCondition {
     PolicyCondition {
         condition_type: CONDITION_ABSENCE_ASSERTIONS_IGNORED.to_string(),
         status: "True".to_string(),
-        reason: Some("AdditiveAssertionsIgnored".to_string()),
+        reason: Some("AdditiveExclusiveMembershipsIgnored".to_string()),
         message: Some(
-            "Some absence assertions are ignored in additive mode. Enable \
-             `additive_enforce_absences` for explicit grants and default privileges. \
-             Exclusive membership removals require adopt or authoritative mode."
+            "Exclusive membership removals are ignored in additive mode; use adopt or authoritative mode to enforce them."
                 .to_string(),
         ),
         last_transition_time: Some(now_rfc3339()),
@@ -2912,12 +2897,6 @@ pub fn drifted_condition(status: bool, reason: &str, message: &str) -> PolicyCon
 /// `candidate_content_matches_policy_content` test holds that line.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyContent {
-    /// Enforce explicit `ensure: absent` grants and default privileges in additive mode.
-    /// Undeclared access, membership removals and role retirement remain untouched.
-    /// Has no effect in authoritative or adopt mode.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub additive_enforce_absences: bool,
-
     /// Convergence strategy: how aggressively to converge the database.
     #[serde(default)]
     pub reconciliation_mode: CrdReconciliationMode,
@@ -3484,27 +3463,48 @@ mod tests {
     }
 
     #[test]
-    fn additive_absence_option_survives_candidate_projection_and_changes_the_digest() {
+    fn additive_candidate_projection_preserves_explicit_absences() {
+        use pgroles_core::{
+            diff::{Change, ReconciliationMode, plan_changes},
+            manifest::{expand_manifest, parse_manifest},
+            model::RoleGraph,
+        };
         let spec: PostgresPolicySpec = serde_json::from_value(serde_json::json!({
             "connection": {"secretRef": {"name": "db"}},
             "reconciliation_mode": "additive",
-            "additive_enforce_absences": true,
+            "roles": [{"name": "reader", "external": true}],
+            "grants": [{"role": "reader", "ensure": "absent", "privileges": ["SELECT"],
+                "object": {"type": "table", "schema": "app", "name": "records"}}]
         }))
         .unwrap();
-        assert!(spec.to_policy_manifest().additive_enforce_absences);
-        let content = spec.policy_content();
-        assert!(content.additive_enforce_absences);
-        assert!(content.to_policy_manifest().additive_enforce_absences);
-        assert_eq!(spec.content_digest(), content.content_digest());
-        let mut strict = content.clone();
-        strict.additive_enforce_absences = false;
-        assert_ne!(content.content_digest(), strict.content_digest());
+        let current_manifest = parse_manifest("roles: [{name: reader}]\ngrants:\n  - role: reader\n    privileges: [SELECT, INSERT]\n    object: {type: table, schema: app, name: records}").unwrap();
+        let current =
+            RoleGraph::from_expanded(&expand_manifest(&current_manifest).unwrap(), None).unwrap();
+        let plan = |manifest: pgroles_core::manifest::PolicyManifest| {
+            let expanded = expand_manifest(&manifest).unwrap();
+            let desired = RoleGraph::from_expanded(&expanded, None).unwrap();
+            plan_changes(
+                &current,
+                &desired,
+                &manifest,
+                &expanded,
+                ReconciliationMode::Additive,
+            )
+        };
+        let changes = plan(spec.to_policy_manifest());
+        assert_eq!(changes, plan(spec.policy_content().to_policy_manifest()));
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], Change::Revoke { privileges, .. }
+            if privileges == &std::collections::BTreeSet::from([pgroles_core::manifest::Privilege::Select])));
+        assert_eq!(
+            spec.content_digest(),
+            spec.policy_content().content_digest()
+        );
     }
 
     #[test]
     fn spec_to_policy_manifest_roundtrip() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -3571,7 +3571,6 @@ mod tests {
     #[test]
     fn spec_to_policy_manifest_preserves_profile_inherit() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -3658,7 +3657,6 @@ mod tests {
         );
 
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -3720,7 +3718,6 @@ mod tests {
     #[test]
     fn a_global_default_privilege_claims_the_implicit_default_owner() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -4033,7 +4030,6 @@ mod tests {
     /// Helper to build a minimal spec with the given connection and no roles/grants.
     pub(super) fn spec_with_connection(connection: ConnectionSpec) -> PostgresPolicySpec {
         PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection,
             interval: "5m".into(),
             suspend: false,
@@ -4805,7 +4801,6 @@ params:
         ensure: pgroles_core::manifest::Ensure,
     ) -> PostgresPolicySpec {
         PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -5267,7 +5262,6 @@ retirements:
     #[test]
     fn referenced_secret_names_includes_connection_secret() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5301,7 +5295,6 @@ retirements:
     #[test]
     fn referenced_secret_names_includes_password_secrets() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5410,7 +5403,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_password_without_login() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5467,7 +5459,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_password_with_login_omitted() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5524,7 +5515,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_password_mode() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5585,7 +5575,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_length() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5644,7 +5633,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_secret_key() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5704,7 +5692,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_secret_name() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5763,7 +5750,6 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_reserved_generated_secret_key() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -5851,7 +5837,6 @@ retirements:
     #[test]
     fn effective_approval_infers_from_mode() {
         let base = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "test".into(),
@@ -5882,7 +5867,6 @@ retirements:
 
         // observe mode with no explicit approval → Manual
         let plan = PostgresPolicySpec {
-            additive_enforce_absences: false,
             mode: PolicyMode::Observe,
             ..base.clone()
         };
@@ -5890,7 +5874,6 @@ retirements:
 
         // explicit Manual overrides apply mode
         let explicit = PostgresPolicySpec {
-            additive_enforce_absences: false,
             approval: Some(ApprovalMode::Manual),
             ..base.clone()
         };
@@ -6003,7 +5986,6 @@ retirements:
     #[test]
     fn effective_approval_explicit_auto_overrides_plan_mode() {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "test".into(),

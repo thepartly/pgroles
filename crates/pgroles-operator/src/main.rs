@@ -575,7 +575,6 @@ mod tests {
 
     fn test_policy() -> PostgresPolicy {
         let spec = PostgresPolicySpec {
-            additive_enforce_absences: false,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "db-credentials".to_string(),

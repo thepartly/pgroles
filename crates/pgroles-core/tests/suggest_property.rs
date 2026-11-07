@@ -250,7 +250,6 @@ fn random_manifest(rng: &mut Rng) -> PolicyManifest {
         .collect();
 
     PolicyManifest {
-        additive_enforce_absences: false,
         role_pattern: None,
         default_owner: Some(owner),
         auth_providers: vec![],

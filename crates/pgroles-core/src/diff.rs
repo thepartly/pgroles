@@ -204,18 +204,11 @@ pub enum ReconciliationMode {
     #[default]
     Authoritative,
 
-    /// Only grant, never revoke — safe for incremental adoption.
+    /// Preserve undeclared access while enforcing explicit grant and default-privilege absences.
     ///
-    /// Additive mode filters out all destructive changes:
-    /// - `Revoke` / `RevokeDefaultPrivilege`
-    /// - `RemoveMember`
-    /// - `DropRole` and its retirement steps (`TerminateSessions`,
-    ///   `ReassignOwned`, `DropOwned`)
-    ///
-    /// Use this when onboarding pgroles into an existing environment where
-    /// you want to guarantee that no existing access is removed. The canonical
-    /// [`plan_changes`] pipeline can opt into explicit grant and default-
-    /// privilege absences through `PolicyManifest::additive_enforce_absences`.
+    /// Membership removals, ownership transfers, existing-role rewrites and role
+    /// retirement remain filtered. Use [`plan_changes`] to select explicit
+    /// revocations using the desired graph.
     Additive,
 
     /// Manage declared resources fully, but never drop undeclared roles.
@@ -250,7 +243,7 @@ impl std::fmt::Display for ReconciliationMode {
 ///   revokes and membership removals.
 ///
 /// This context-free filter remains strictly additive. Use [`plan_changes`]
-/// to honor the manifest's opt-in for explicit absence assertions.
+/// to select explicit absence assertions from the desired graph.
 pub fn filter_changes(changes: Vec<Change>, mode: ReconciliationMode) -> Vec<Change> {
     match mode {
         ReconciliationMode::Authoritative => changes,
@@ -286,28 +279,10 @@ pub fn adopt_schema_owner_transfers(
         .collect()
 }
 
-/// Whether additive reconciliation will ignore declarative absence assertions.
-///
-/// The desired graph retains absence assertions — `ensure: absent` grants and
-/// default privileges, and `exclusive: true` membership stanzas — even though
-/// [`filter_changes`] removes their revocations in additive mode. Callers use
-/// this predicate to make that safety-relevant no-op visible before presenting
-/// or applying a filtered plan.
+/// Whether additive reconciliation ignores exclusive membership removals.
+/// Explicit grant and default-privilege absences are enforced by [`plan_changes`].
 pub fn additive_ignores_absence_assertions(desired: &RoleGraph, mode: ReconciliationMode) -> bool {
-    additive_ignores_absence_assertions_with_options(desired, mode, false)
-}
-
-/// Whether any absence assertions remain unenforced with the selected policy option.
-pub fn additive_ignores_absence_assertions_with_options(
-    desired: &RoleGraph,
-    mode: ReconciliationMode,
-    enforce_absences: bool,
-) -> bool {
-    mode == ReconciliationMode::Additive
-        && ((!enforce_absences
-            && (!desired.grant_absences.is_empty()
-                || !desired.default_privilege_absences.is_empty()))
-            || !desired.exclusive_membership_roles.is_empty())
+    mode == ReconciliationMode::Additive && !desired.exclusive_membership_roles.is_empty()
 }
 
 /// Remove changes pgroles must not own for external and predefined roles.
@@ -529,7 +504,7 @@ pub fn plan_changes(
     let resolved = desired.resolve_routine_aliases(&current.routine_aliases);
     let desired = resolved.as_ref();
     let changes = apply_role_retirements(diff(current, desired), &manifest.retirements);
-    let changes = if mode == ReconciliationMode::Additive && manifest.additive_enforce_absences {
+    let changes = if mode == ReconciliationMode::Additive {
         filter_additive_changes_with_absences(changes, Some(desired))
     } else {
         filter_changes(changes, mode)
@@ -4354,7 +4329,7 @@ memberships:
     }
 
     #[test]
-    fn additive_mode_ignores_absence_while_adopt_and_authoritative_apply_it() {
+    fn context_free_filter_requires_desired_graph_to_select_explicit_absences() {
         let current = graph_with_public_grant("api", "f()", &[Privilege::Execute]);
         let mut desired = RoleGraph::default();
         desired.grant_absences.insert(
@@ -4392,7 +4367,7 @@ memberships:
             );
         }
 
-        assert!(additive_ignores_absence_assertions(
+        assert!(!additive_ignores_absence_assertions(
             &desired,
             ReconciliationMode::Additive
         ));

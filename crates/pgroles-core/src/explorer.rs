@@ -2610,7 +2610,7 @@ mod tests {
     }
 
     #[test]
-    fn additive_absence_opt_in_uses_the_same_plan_in_the_explorer() {
+    fn additive_absences_use_the_same_plan_in_the_explorer() {
         let mut input = request(ReconciliationMode::Additive);
         input.current.grants.push(SnapshotGrant {
             role: "PUBLIC".into(),
@@ -2621,10 +2621,6 @@ mod tests {
             grantors: BTreeMap::new(),
         });
         input.desired_yaml = "grants:\n  - role: PUBLIC\n    ensure: absent\n    privileges: [EXECUTE]\n    object: {type: function, schema: api, name: 'secret()'}\n".into();
-        assert!(analyze(input.clone()).unwrap().changes.is_empty());
-        input
-            .desired_yaml
-            .insert_str(0, "additive_enforce_absences: true\n");
         let response = analyze(input).unwrap();
         assert_eq!(response.changes.len(), 1);
         assert!(

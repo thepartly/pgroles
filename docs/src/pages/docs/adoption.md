@@ -60,7 +60,7 @@ If the output is `-- No changes needed`, there are no pending changes within add
 
 ### 4. Enable additive apply
 
-Switch to `mode: apply` with `reconciliation_mode: additive`. This applies all non-destructive changes — creating roles and declared schemas, adding grants and memberships, and setting default privileges when their owner context is already valid — but never revokes existing privileges, rewrites attributes/comments/config defaults on pre-existing roles, transfers schema ownership, removes memberships, or drops roles. If a schema's desired `owner` differs from the current owner, pgroles defers owner-bound follow-up steps such as `ALTER DEFAULT PRIVILEGES FOR ROLE <owner> ...` until a mode that allows the ownership transfer.
+Switch to `mode: apply` with `reconciliation_mode: additive`. This applies all non-destructive changes — creating roles and declared schemas, adding grants and memberships, and setting default privileges when their owner context is already valid — and enforces explicit `ensure: absent` grants and default privileges. It preserves undeclared privileges and never rewrites attributes/comments/config defaults on pre-existing roles, transfers schema ownership, removes memberships, or drops roles. Review explicit absences before applying. If a schema's desired `owner` differs from the current owner, pgroles defers owner-bound follow-up steps such as `ALTER DEFAULT PRIVILEGES FOR ROLE <owner> ...` until a mode that allows the ownership transfer.
 
 ```yaml
 spec:
