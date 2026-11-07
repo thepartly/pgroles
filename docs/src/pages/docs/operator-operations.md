@@ -99,13 +99,13 @@ spec:
   connection:
     secretRef:
       name: postgres-credentials
-  reconciliation_mode: additive  # only grant, never revoke
+  reconciliation_mode: additive  # preserve undeclared access; enforce explicit absences
 ```
 
 | Value | Behavior |
 | --- | --- |
 | `authoritative` (default) | Full convergence — anything not in the manifest is revoked or dropped |
-| `additive` | Only grant, never revoke — safe for incremental adoption, and it leaves pre-existing role attributes/comments unchanged |
+| `additive` | Preserve undeclared access and enforce explicit grant/default-privilege absences; leave pre-existing role attributes/comments unchanged |
 | `adopt` | Manage declared roles fully, but never drop undeclared roles |
 
 This is the same behavior as the CLI `--mode` flag. See the [CLI reconciliation modes](/docs/cli#reconciliation-modes) section for detailed semantics.

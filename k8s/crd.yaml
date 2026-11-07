@@ -821,7 +821,7 @@
                   },
                   "reconciliation_mode": {
                     "default": "authoritative",
-                    "description": "Convergence strategy: how aggressively to converge the database.\n\n- `authoritative` (default): revoke undeclared managed privileges and\n  drop undeclared roles within the configured inspection scope. External\n  roles are not altered or dropped; PUBLIC targets require explicit rules.\n- `additive`: only grant, never revoke — safe for incremental adoption;\n  `ensure: absent` assertions are ignored with a warning condition.\n- `adopt`: manage declared roles fully, but never drop undeclared roles.",
+                    "description": "Convergence strategy: how aggressively to converge the database.\n\n- `authoritative` (default): revoke undeclared managed privileges and\n  drop undeclared roles within the configured inspection scope. External\n  roles are not altered or dropped; PUBLIC targets require explicit rules.\n- `additive`: preserve undeclared access, but enforce explicit grant and\n  default-privilege absences. Exclusive membership removals are ignored\n  with a warning condition.\n- `adopt`: manage declared roles fully, but never drop undeclared roles.",
                     "enum": [
                       "authoritative",
                       "additive",

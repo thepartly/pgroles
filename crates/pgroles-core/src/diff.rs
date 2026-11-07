@@ -204,16 +204,11 @@ pub enum ReconciliationMode {
     #[default]
     Authoritative,
 
-    /// Only grant, never revoke — safe for incremental adoption.
+    /// Preserve undeclared access while enforcing explicit grant and default-privilege absences.
     ///
-    /// Additive mode filters out all destructive changes:
-    /// - `Revoke` / `RevokeDefaultPrivilege`
-    /// - `RemoveMember`
-    /// - `DropRole` and its retirement steps (`TerminateSessions`,
-    ///   `ReassignOwned`, `DropOwned`)
-    ///
-    /// Use this when onboarding pgroles into an existing environment where
-    /// you want to guarantee that no existing access is removed.
+    /// Membership removals, ownership transfers, existing-role rewrites and role
+    /// retirement remain filtered. Use [`plan_changes`] to select explicit
+    /// revocations using the desired graph.
     Additive,
 
     /// Manage declared resources fully, but never drop undeclared roles.
@@ -246,6 +241,9 @@ impl std::fmt::Display for ReconciliationMode {
 ///   role rewrites, role drops, and retirement cleanup steps.
 /// - **Adopt**: strips role drops and retirement cleanup steps, but keeps
 ///   revokes and membership removals.
+///
+/// This context-free filter remains strictly additive. Use [`plan_changes`]
+/// to select explicit absence assertions from the desired graph.
 pub fn filter_changes(changes: Vec<Change>, mode: ReconciliationMode) -> Vec<Change> {
     match mode {
         ReconciliationMode::Authoritative => changes,
@@ -281,18 +279,10 @@ pub fn adopt_schema_owner_transfers(
         .collect()
 }
 
-/// Whether additive reconciliation will ignore declarative absence assertions.
-///
-/// The desired graph retains absence assertions — `ensure: absent` grants and
-/// default privileges, and `exclusive: true` membership stanzas — even though
-/// [`filter_changes`] removes their revocations in additive mode. Callers use
-/// this predicate to make that safety-relevant no-op visible before presenting
-/// or applying a filtered plan.
+/// Whether additive reconciliation ignores exclusive membership removals.
+/// Explicit grant and default-privilege absences are enforced by [`plan_changes`].
 pub fn additive_ignores_absence_assertions(desired: &RoleGraph, mode: ReconciliationMode) -> bool {
-    mode == ReconciliationMode::Additive
-        && (!desired.grant_absences.is_empty()
-            || !desired.default_privilege_absences.is_empty()
-            || !desired.exclusive_membership_roles.is_empty())
+    mode == ReconciliationMode::Additive && !desired.exclusive_membership_roles.is_empty()
 }
 
 /// Remove changes pgroles must not own for external and predefined roles.
@@ -396,103 +386,109 @@ pub fn filter_preserved_grant_revokes(
     changes
         .into_iter()
         .flat_map(|change| {
-            let Change::Revoke {
-                role,
-                privileges,
-                object_type,
-                schema,
-                name,
-                grantor,
-            } = &change
-            else {
-                return vec![change];
-            };
-            if !preserved.contains(role.as_str()) {
-                return vec![change];
+            if matches!(&change, Change::Revoke { role, .. } if preserved.contains(role.as_str())) {
+                explicit_grant_revokes(change, desired)
+            } else {
+                vec![change]
             }
-            let key = crate::model::GrantKey {
+        })
+        .collect()
+}
+
+/// Select only explicitly denied ACL edges, never collateral convergence revokes.
+fn explicit_grant_revokes(change: Change, desired: &RoleGraph) -> Vec<Change> {
+    let Change::Revoke {
+        role,
+        privileges,
+        object_type,
+        schema,
+        name,
+        grantor,
+    } = &change
+    else {
+        return Vec::new();
+    };
+    let key = crate::model::GrantKey {
+        role: role.clone(),
+        object_type: *object_type,
+        schema: schema.clone(),
+        name: name.clone(),
+    };
+
+    let wildcard_key = crate::model::GrantKey {
+        name: Some("*".to_string()),
+        ..key.clone()
+    };
+    let wildcard_enforced = desired
+        .grant_absences
+        .get(&wildcard_key)
+        .map(|absent| {
+            privileges
+                .intersection(absent)
+                .copied()
+                .collect::<BTreeSet<Privilege>>()
+        })
+        .unwrap_or_default();
+
+    if name.as_deref() != Some("*") {
+        let mut enforced = wildcard_enforced;
+        if let Some(absent) = desired.grant_absences.get(&key) {
+            enforced.extend(privileges.intersection(absent).copied());
+        }
+        return (!enforced.is_empty())
+            .then(|| Change::Revoke {
                 role: role.clone(),
+                privileges: enforced,
                 object_type: *object_type,
                 schema: schema.clone(),
                 name: name.clone(),
-            };
+                grantor: grantor.clone(),
+            })
+            .into_iter()
+            .collect();
+    }
 
-            let wildcard_key = crate::model::GrantKey {
-                name: Some("*".to_string()),
-                ..key.clone()
-            };
-            let wildcard_enforced = desired
-                .grant_absences
-                .get(&wildcard_key)
-                .map(|absent| {
-                    privileges
-                        .intersection(absent)
-                        .copied()
-                        .collect::<BTreeSet<Privilege>>()
-                })
-                .unwrap_or_default();
-
-            if name.as_deref() != Some("*") {
-                let mut enforced = wildcard_enforced;
-                if let Some(absent) = desired.grant_absences.get(&key) {
-                    enforced.extend(privileges.intersection(absent).copied());
-                }
-                return (!enforced.is_empty())
-                    .then(|| Change::Revoke {
-                        role: role.clone(),
-                        privileges: enforced,
-                        object_type: *object_type,
-                        schema: schema.clone(),
-                        name: name.clone(),
-                        grantor: grantor.clone(),
-                    })
-                    .into_iter()
-                    .collect();
-            }
-
-            // Inspection can normalize privileges held on every object into
-            // one wildcard key, while an absence assertion still names one
-            // object. Keep a wildcard revoke only for wildcard assertions;
-            // split exact assertions back into exact revokes so preservation
-            // neither discards them nor broadens them to the whole schema.
-            let mut enforced = Vec::new();
-            if !wildcard_enforced.is_empty() {
-                enforced.push(Change::Revoke {
-                    role: role.clone(),
-                    privileges: wildcard_enforced.clone(),
-                    object_type: *object_type,
-                    schema: schema.clone(),
-                    name: name.clone(),
-                    grantor: grantor.clone(),
-                });
-            }
-            for (absence_key, absent) in &desired.grant_absences {
-                if absence_key.role != *role
-                    || absence_key.object_type != *object_type
-                    || absence_key.schema != *schema
-                    || absence_key.name.as_deref().is_none_or(|value| value == "*")
-                {
-                    continue;
-                }
-                let exact: BTreeSet<Privilege> = privileges
-                    .intersection(absent)
-                    .copied()
-                    .filter(|privilege| !wildcard_enforced.contains(privilege))
-                    .collect();
-                if !exact.is_empty() {
-                    enforced.push(Change::Revoke {
-                        role: role.clone(),
-                        privileges: exact,
-                        object_type: *object_type,
-                        schema: schema.clone(),
-                        name: absence_key.name.clone(),
-                        grantor: grantor.clone(),
-                    });
-                }
-            }
-            enforced
-        })
-        .collect()
+    // Inspection can normalize privileges held on every object into
+    // one wildcard key, while an absence assertion still names one
+    // object. Keep a wildcard revoke only for wildcard assertions;
+    // split exact assertions back into exact revokes so preservation
+    // neither discards them nor broadens them to the whole schema.
+    let mut enforced = Vec::new();
+    if !wildcard_enforced.is_empty() {
+        enforced.push(Change::Revoke {
+            role: role.clone(),
+            privileges: wildcard_enforced.clone(),
+            object_type: *object_type,
+            schema: schema.clone(),
+            name: name.clone(),
+            grantor: grantor.clone(),
+        });
+    }
+    for (absence_key, absent) in &desired.grant_absences {
+        if absence_key.role != *role
+            || absence_key.object_type != *object_type
+            || absence_key.schema != *schema
+            || absence_key.name.as_deref().is_none_or(|value| value == "*")
+        {
+            continue;
+        }
+        let exact: BTreeSet<Privilege> = privileges
+            .intersection(absent)
+            .copied()
+            .filter(|privilege| !wildcard_enforced.contains(privilege))
+            .collect();
+        if !exact.is_empty() {
+            enforced.push(Change::Revoke {
+                role: role.clone(),
+                privileges: exact,
+                object_type: *object_type,
+                schema: schema.clone(),
+                name: absence_key.name.clone(),
+                grantor: grantor.clone(),
+            });
+        }
+    }
+    enforced
 }
 
 /// Build the canonical structural plan shared by every execution and preview surface.
@@ -508,7 +504,11 @@ pub fn plan_changes(
     let resolved = desired.resolve_routine_aliases(&current.routine_aliases);
     let desired = resolved.as_ref();
     let changes = apply_role_retirements(diff(current, desired), &manifest.retirements);
-    let changes = filter_changes(changes, mode);
+    let changes = if mode == ReconciliationMode::Additive {
+        filter_additive_changes_with_absences(changes, Some(desired))
+    } else {
+        filter_changes(changes, mode)
+    };
     let changes = filter_external_role_changes(changes, &expanded.roles, &expanded.memberships);
     filter_preserved_grant_revokes(changes, &expanded.roles, desired)
 }
@@ -568,6 +568,13 @@ pub fn unenforceable_absence_warnings(current: &RoleGraph, desired: &RoleGraph) 
 }
 
 fn filter_additive_changes(changes: Vec<Change>) -> Vec<Change> {
+    filter_additive_changes_with_absences(changes, None)
+}
+
+fn filter_additive_changes_with_absences(
+    changes: Vec<Change>,
+    desired: Option<&RoleGraph>,
+) -> Vec<Change> {
     let skipped_owner_transfers: BTreeSet<(String, String)> = changes
         .iter()
         .filter_map(|change| match change {
@@ -603,23 +610,67 @@ fn filter_additive_changes(changes: Vec<Change>) -> Vec<Change> {
             }
             Some(change)
         })
-        .filter(|change| match change {
-            Change::EnsureSchemaOwnerPrivileges { name, owner, .. } => {
-                !skipped_owner_transfers.contains(&(name.clone(), owner.clone()))
+        .flat_map(|change| {
+            if let Some(desired) = desired {
+                match change {
+                    Change::Revoke { .. } => return explicit_grant_revokes(change, desired),
+                    Change::RevokeDefaultPrivilege {
+                        owner,
+                        scope,
+                        on_type,
+                        grantee,
+                        privileges,
+                    } => {
+                        let key = crate::model::DefaultPrivKey {
+                            owner: owner.clone(),
+                            scope: scope.clone(),
+                            on_type,
+                            grantee: grantee.clone(),
+                        };
+                        let explicit = desired
+                            .default_privilege_absences
+                            .get(&key)
+                            .map(|absent| {
+                                privileges
+                                    .intersection(absent)
+                                    .copied()
+                                    .collect::<BTreeSet<_>>()
+                            })
+                            .unwrap_or_default();
+                        return if explicit.is_empty() {
+                            vec![]
+                        } else {
+                            vec![Change::RevokeDefaultPrivilege {
+                                owner,
+                                scope,
+                                on_type,
+                                grantee,
+                                privileges: explicit,
+                            }]
+                        };
+                    }
+                    _ => {}
+                }
             }
-            Change::SetDefaultPrivilege {
-                scope: DefaultPrivilegeScope::Schema { schema },
-                owner,
-                ..
-            } => !skipped_owner_transfers.contains(&(schema.clone(), owner.clone())),
-            Change::AlterRole { name, attributes } => {
-                created_roles.contains(name)
-                    && attributes
-                        .iter()
-                        .all(|attr| matches!(attr, RoleAttribute::SetConfig(..)))
-            }
-            Change::SetComment { .. } => false,
-            _ => !is_destructive(change),
+            let keep = match &change {
+                Change::EnsureSchemaOwnerPrivileges { name, owner, .. } => {
+                    !skipped_owner_transfers.contains(&(name.clone(), owner.clone()))
+                }
+                Change::SetDefaultPrivilege {
+                    scope: DefaultPrivilegeScope::Schema { schema },
+                    owner,
+                    ..
+                } => !skipped_owner_transfers.contains(&(schema.clone(), owner.clone())),
+                Change::AlterRole { name, attributes } => {
+                    created_roles.contains(name)
+                        && attributes
+                            .iter()
+                            .all(|attr| matches!(attr, RoleAttribute::SetConfig(..)))
+                }
+                Change::SetComment { .. } => false,
+                _ => !is_destructive(&change),
+            };
+            if keep { vec![change] } else { vec![] }
         })
         .collect()
 }
@@ -4278,7 +4329,7 @@ memberships:
     }
 
     #[test]
-    fn additive_mode_ignores_absence_while_adopt_and_authoritative_apply_it() {
+    fn context_free_filter_requires_desired_graph_to_select_explicit_absences() {
         let current = graph_with_public_grant("api", "f()", &[Privilege::Execute]);
         let mut desired = RoleGraph::default();
         desired.grant_absences.insert(
@@ -4316,7 +4367,7 @@ memberships:
             );
         }
 
-        assert!(additive_ignores_absence_assertions(
+        assert!(!additive_ignores_absence_assertions(
             &desired,
             ReconciliationMode::Additive
         ));

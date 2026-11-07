@@ -134,9 +134,9 @@ default_privileges:
         on_type: function
 ```
 
-`additive` reconciliation never revokes, so it ignores default-privilege
-absence assertions and emits a warning. Use `adopt` or `authoritative` to
-enforce them.
+`additive` reconciliation enforces explicit default-privilege absences without revoking undeclared defaults. It matches the exact owner, global or schema scope, object type, grantee and listed privileges. See [additive reconciliation](/docs/cli#additive).
+
+Once the revoke converges, the absence rule can be removed without additive mode restoring that default grant. Keep it to correct future reintroductions. Removing a default-privilege rule does not change grants on existing objects.
 
 The global rule is what removes PostgreSQL's built-in default. The
 schema-scoped rule cannot do that on its own, because schema defaults add to

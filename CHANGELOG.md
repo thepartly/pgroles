@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Additive reconciliation now enforces explicit `ensure: absent` grants and default privileges while preserving undeclared access. The CLI, bundles, explorer, operator and candidates share the same planner. Membership removals, role retirement, existing-role rewrites and ownership transfers remain filtered.
+- The `AbsenceAssertionsIgnored` condition reason changes from `AdditiveModeNeverRevokes` to `AdditiveExclusiveMembershipsIgnored`. It now reports only ignored `exclusive: true` membership removals. Update alerts that select the old reason.
+
+### Upgrade notes
+
+- Before upgrading, review additive policies carrying `AbsenceAssertionsIgnored` with reason `AdditiveModeNeverRevokes`. Explicit `ensure: absent` grants and default privileges that were previously ignored will now be revoked when the executor has the required PostgreSQL authority. Preview their plans before applying. No opt-in setting is required. Exclusive membership removals remain ignored.
+- After an explicit revoke converges, its absence rule can be removed without additive mode granting the privilege back. Keep the rule when future reintroductions should also be revoked.
+
 ## [0.15.0] - 2026-10-19
 
 ### Highlights

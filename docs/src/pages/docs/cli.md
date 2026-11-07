@@ -428,15 +428,34 @@ pgroles apply --database-url postgres://localhost/mydb --mode authoritative
 
 ### additive
 
-Only grant, never revoke. New roles, grants, memberships, and default privileges are created, but nothing is removed. This is the safest mode for incremental adoption — start managing roles without risking disruption to existing access.
+Preserve undeclared access while applying declared additions and explicit `ensure: absent` grants and default privileges. New roles and memberships can be added, but existing roles and memberships are not removed.
 
 ```shell
 pgroles apply --database-url postgres://localhost/mydb --mode additive
 ```
 
-Additive mode filters out: `ALTER ROLE`, `COMMENT ON ROLE`, `REVOKE`, `REVOKE DEFAULT PRIVILEGE`, `REMOVE MEMBER`, `ALTER SCHEMA ... OWNER TO ...`, `DROP ROLE`, `DROP OWNED`, `REASSIGN OWNED`, and `TERMINATE SESSIONS`.
+Additive mode filters out: `ALTER ROLE`, `COMMENT ON ROLE`, undeclared-access `REVOKE` and `REVOKE DEFAULT PRIVILEGE`, `REMOVE MEMBER`, `ALTER SCHEMA ... OWNER TO ...`, `DROP ROLE`, `DROP OWNED`, `REASSIGN OWNED`, and `TERMINATE SESSIONS`.
 
-Because additive mode never revokes, it also ignores every `ensure: absent` rule. The rest of the plan still applies, and the run does not fail. Use `adopt` or `authoritative` when you need those assertions enforced.
+An explicit `ensure: absent` rule revokes only the listed privileges while preserving undeclared access:
+
+```yaml
+roles:
+  - name: app_reader
+    external: true
+grants:
+  - role: app_reader
+    ensure: absent
+    privileges: [CREATE]
+    object: {type: schema, name: public}
+```
+
+Run the same `--mode additive` diff and apply commands. The plan retains only the privileges explicitly listed as absent, even when inspection combines several privileges or normalizes objects into a wildcard. All other additive safeguards remain: undeclared grants and default privileges are preserved, and memberships, existing role attributes, schema ownership and retirement are not reduced. `exclusive: true` membership removals remain ignored and still produce a warning.
+
+This supports policies with separate responsibilities. A platform policy can withdraw a declared bootstrap grant without taking ownership of application privileges added by another policy. PostgreSQL still checks the executor's normal authority. An absence rule removes an ACL edge, not access inherited through other roles or ownership.
+
+The same behavior applies to bundles, the explorer, operator policies and candidates. For the operator, select `reconciliation_mode: additive`.
+
+After a revoke has converged, its `ensure: absent` rule can be removed. Additive mode will not grant that privilege back merely because the rule is gone. Keep the rule if the policy should also revoke a future reintroduction by another actor.
 
 If additive mode skips a schema ownership transfer, pgroles also defers owner-bound follow-up steps such as schema-owner privilege repair and `ALTER DEFAULT PRIVILEGES FOR ROLE ...` for that owner context.
 

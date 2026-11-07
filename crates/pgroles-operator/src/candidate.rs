@@ -891,9 +891,7 @@ async fn plan_against_target(
     if pgroles_core::diff::additive_ignores_absence_assertions(desired, reconciliation_mode) {
         tracing::warn!(
             candidate = %candidate.name_any(),
-            "additive reconciliation ignores every absence assertion \
-             (`ensure: absent` and `exclusive: true` memberships); \
-             use adopt or authoritative mode to enforce absence"
+            "Exclusive membership removals are ignored in additive mode; use adopt or authoritative mode to enforce them."
         );
     }
     let mut changes = crate::reconciler::policy_changes(

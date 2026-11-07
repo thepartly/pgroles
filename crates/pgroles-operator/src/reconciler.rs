@@ -1603,9 +1603,7 @@ async fn apply_under_lock(
         tracing::warn!(
             name,
             namespace,
-            "additive reconciliation ignores every absence assertion \
-             (`ensure: absent` and `exclusive: true` memberships); \
-             use adopt or authoritative mode to enforce absence"
+            "Exclusive membership removals are ignored in additive mode; use adopt or authoritative mode to enforce them."
         );
     }
     let diff_started = std::time::Instant::now();
@@ -3651,19 +3649,12 @@ fn apply_mode_deprecation_condition(resource: &PostgresPolicy, status: &mut Post
 /// written for the policy, and clear the condition as soon as the combination
 /// no longer applies.
 fn apply_additive_absence_condition(resource: &PostgresPolicy, status: &mut PostgresPolicyStatus) {
-    let declares_absence = resource
-        .spec
-        .grants
-        .iter()
-        .any(|grant| grant.ensure == pgroles_core::manifest::Ensure::Absent)
-        || resource.spec.default_privileges.iter().any(|defaults| {
-            defaults
-                .grant
-                .iter()
-                .any(|grant| grant.ensure == pgroles_core::manifest::Ensure::Absent)
-        });
     if resource.spec.reconciliation_mode == crate::crd::CrdReconciliationMode::Additive
-        && declares_absence
+        && resource
+            .spec
+            .memberships
+            .iter()
+            .any(|membership| membership.exclusive)
     {
         status.set_condition(crate::crd::absence_assertions_ignored_condition());
     } else {
@@ -4306,16 +4297,41 @@ mod tests {
         let mut status = PostgresPolicyStatus::default();
 
         apply_additive_absence_condition(&policy, &mut status);
-        let condition = status
-            .conditions
-            .iter()
-            .find(|condition| {
-                condition.condition_type == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED
-            })
-            .expect("additive absence assertions should be visible on status");
+        assert!(
+            status
+                .conditions
+                .iter()
+                .all(|condition| condition.condition_type
+                    != crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+        );
+
+        policy
+            .spec
+            .memberships
+            .push(pgroles_core::manifest::Membership {
+                role: "app".into(),
+                members: vec![],
+                exclusive: true,
+            });
+        apply_additive_absence_condition(&policy, &mut status);
+        assert!(
+            status
+                .conditions
+                .iter()
+                .any(|condition| condition.condition_type
+                    == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+        );
+
         assert_eq!(
-            condition.reason.as_deref(),
-            Some("AdditiveModeNeverRevokes")
+            status
+                .conditions
+                .iter()
+                .find(|condition| condition.condition_type
+                    == crate::crd::CONDITION_ABSENCE_ASSERTIONS_IGNORED)
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("AdditiveExclusiveMembershipsIgnored")
         );
 
         policy.spec.reconciliation_mode = crate::crd::CrdReconciliationMode::Adopt;

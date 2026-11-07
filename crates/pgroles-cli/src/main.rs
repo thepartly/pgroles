@@ -101,7 +101,7 @@ enum Commands {
         /// Reconciliation mode: how aggressively to converge the database.
         ///
         /// - authoritative: full convergence — anything not in the manifest is revoked/dropped (default).
-        /// - additive: only grant, never revoke — safe for incremental adoption.
+        /// - additive: preserve undeclared access and enforce explicit privilege absences.
         /// - adopt: manage declared roles fully, but never drop undeclared roles.
         #[arg(long, default_value = "authoritative")]
         mode: CliReconciliationMode,
@@ -157,7 +157,7 @@ enum Commands {
         /// Reconciliation mode: how aggressively to converge the database.
         ///
         /// - authoritative: full convergence — anything not in the manifest is revoked/dropped (default).
-        /// - additive: only grant, never revoke — safe for incremental adoption.
+        /// - additive: preserve undeclared access and enforce explicit privilege absences.
         /// - adopt: manage declared roles fully, but never drop undeclared roles.
         #[arg(long, default_value = "authoritative")]
         mode: CliReconciliationMode,
@@ -2697,9 +2697,7 @@ fn warn_additive_absence_assertions(
 ) {
     if additive_ignores_absence_assertions(desired, mode) {
         eprintln!(
-            "Warning: additive reconciliation ignores every absence assertion \
-             (`ensure: absent` and `exclusive: true` memberships); \
-             use adopt or authoritative mode to enforce absence"
+            "Warning: additive reconciliation ignores exclusive membership removals; use adopt or authoritative mode to enforce them"
         );
     }
 }

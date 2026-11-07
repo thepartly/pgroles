@@ -17,7 +17,7 @@ Declarative PostgreSQL access control. Define roles, schema ownership, grants, a
 
 For simple setups, use a single manifest. For larger teams, the CLI also supports bundle composition: shared profiles plus multiple scoped policy fragments merged into one desired plan with conflict checks before any database diff or apply.
 
-The default authoritative mode revokes undeclared access and drops eligible roles within the managed inspection scope. PUBLIC privileges require explicit rules; pgroles does not manage every role and object in the database. For incremental adoption, use `--mode additive` to only grant and never revoke, or `--mode adopt` to manage declared roles fully without dropping undeclared ones. In additive mode, pgroles also leaves attributes, comments, and config defaults unchanged on pre-existing roles.
+The default authoritative mode revokes undeclared access and drops eligible roles within the managed inspection scope. PUBLIC privileges require explicit rules; pgroles does not manage every role and object in the database. For incremental adoption, use `--mode additive` to preserve undeclared access and enforce explicit privilege absences, or `--mode adopt` to manage declared roles fully without dropping undeclared ones. In additive mode, pgroles also leaves attributes, comments, and config defaults unchanged on pre-existing roles. Explicit `ensure: absent` grants and default privileges are enforced without revoking undeclared access.
 
 ## How it works
 
@@ -148,7 +148,7 @@ docker run --rm ghcr.io/thepartly/pgroles --help
 ## Features
 
 - **Convergent** — the manifest is the desired state. Missing roles get created, extra roles get dropped, drifted grants get fixed.
-- **Reconciliation modes** — `--mode authoritative` (default) for full convergence, `--mode additive` to only grant and never revoke, `--mode adopt` to manage declared roles without dropping undeclared ones. Additive mode is the safest way to start using pgroles on an existing database.
+- **Reconciliation modes** — `--mode authoritative` (default) for full convergence, `--mode additive` to preserve undeclared access and enforce explicit privilege absences, `--mode adopt` to manage declared roles without dropping undeclared ones. Review explicit absence assertions before applying an additive plan to an existing database.
 - **Profiles** — define privilege templates once, apply them across schemas. Each `schema x profile` pair becomes a role, and profiles can set generated-role `login` and `inherit` attributes.
 - **Bundle composition** — compose shared profiles plus multiple scoped policy fragments in the CLI, with duplicate/conflict detection and managed-scope enforcement before diff or apply. Use `pgroles render-bundle --bundle bundle.yaml --output pgroles.yaml` to compose a bundle into a single flat manifest suitable for committing as a `PostgresPolicy` source in GitOps.
 - **Schema management** — declared schemas can be created and have ownership converged, while undeclared referenced schemas must already exist.

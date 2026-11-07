@@ -91,11 +91,13 @@ access using
 The CLI `--mode` and operator `spec.reconciliation_mode` select which computed
 changes remain in the plan:
 
-- `additive`: creates and additions only. It filters revokes, membership
-  removals, existing schema-owner transfers, existing-role rewrites, and role
-  retirement. It also omits role comments. Configured password updates are a
-  deliberate exception. Because it never revokes, it ignores every
-  `ensure: absent` rule with a warning instead of failing the run.
+- `additive`: preserves undeclared access while enforcing explicit `ensure: absent`
+  grants and default privileges. Membership removals, existing schema-owner
+  transfers, existing-role rewrites and retirement stay filtered, as do role
+  comments. Configured password updates are a deliberate exception. Exclusive
+  membership removals remain ignored with a warning. Review explicit revocations
+  before applying. After convergence an absence rule can be removed; retain it
+  if future reintroductions should also be revoked.
 - `adopt`: authoritative convergence except role drops and their retirement
   steps. Revokes and membership removals still occur.
 - `authoritative`: retains every change computed within pgroles' managed

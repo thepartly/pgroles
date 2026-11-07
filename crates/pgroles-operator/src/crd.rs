@@ -71,8 +71,9 @@ pub struct PostgresPolicySpec {
     /// - `authoritative` (default): revoke undeclared managed privileges and
     ///   drop undeclared roles within the configured inspection scope. External
     ///   roles are not altered or dropped; PUBLIC targets require explicit rules.
-    /// - `additive`: only grant, never revoke — safe for incremental adoption;
-    ///   `ensure: absent` assertions are ignored with a warning condition.
+    /// - `additive`: preserve undeclared access, but enforce explicit grant and
+    ///   default-privilege absences. Exclusive membership removals are ignored
+    ///   with a warning condition.
     /// - `adopt`: manage declared roles fully, but never drop undeclared roles.
     #[serde(default)]
     pub reconciliation_mode: CrdReconciliationMode,
@@ -202,7 +203,7 @@ pub enum CrdReconciliationMode {
     /// Full convergence — the manifest is the entire truth.
     #[default]
     Authoritative,
-    /// Only grant, never revoke — safe for incremental adoption.
+    /// Preserve undeclared access and enforce explicit grant and default-privilege absences.
     Additive,
     /// Manage declared roles fully, but never drop undeclared roles.
     Adopt,
@@ -2789,8 +2790,7 @@ pub const CONDITION_APPROVAL_UNSET: &str = "ApprovalUnset";
 /// Condition type for `spec.mode: plan`, the deprecated spelling of `observe`.
 pub const CONDITION_MODE_VALUE_DEPRECATED: &str = "ModeValueDeprecated";
 
-/// Condition type reporting that additive reconciliation cannot enforce
-/// declarative absence assertions present in the policy.
+/// Condition type reporting ignored exclusive membership removals in additive mode.
 pub const CONDITION_ABSENCE_ASSERTIONS_IGNORED: &str = "AbsenceAssertionsIgnored";
 
 /// Condition type reporting that a plan carries an approval annotation which
@@ -2802,10 +2802,9 @@ pub fn absence_assertions_ignored_condition() -> PolicyCondition {
     PolicyCondition {
         condition_type: CONDITION_ABSENCE_ASSERTIONS_IGNORED.to_string(),
         status: "True".to_string(),
-        reason: Some("AdditiveModeNeverRevokes".to_string()),
+        reason: Some("AdditiveExclusiveMembershipsIgnored".to_string()),
         message: Some(
-            "spec.reconciliation_mode is `additive`, so every `ensure: absent` assertion is \
-             ignored. Use `adopt` or `authoritative` to enforce absence."
+            "Exclusive membership removals are ignored in additive mode; use adopt or authoritative mode to enforce them."
                 .to_string(),
         ),
         last_transition_time: Some(now_rfc3339()),
@@ -3460,6 +3459,46 @@ mod tests {
         assert!(
             yaml.contains("\"object\"") || yaml.contains(" object:"),
             "schema should declare grant object targets using object"
+        );
+    }
+
+    #[test]
+    fn additive_candidate_projection_preserves_explicit_absences() {
+        use pgroles_core::{
+            diff::{Change, ReconciliationMode, plan_changes},
+            manifest::{expand_manifest, parse_manifest},
+            model::RoleGraph,
+        };
+        let spec: PostgresPolicySpec = serde_json::from_value(serde_json::json!({
+            "connection": {"secretRef": {"name": "db"}},
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "reader", "external": true}],
+            "grants": [{"role": "reader", "ensure": "absent", "privileges": ["SELECT"],
+                "object": {"type": "table", "schema": "app", "name": "records"}}]
+        }))
+        .unwrap();
+        let current_manifest = parse_manifest("roles: [{name: reader}]\ngrants:\n  - role: reader\n    privileges: [SELECT, INSERT]\n    object: {type: table, schema: app, name: records}").unwrap();
+        let current =
+            RoleGraph::from_expanded(&expand_manifest(&current_manifest).unwrap(), None).unwrap();
+        let plan = |manifest: pgroles_core::manifest::PolicyManifest| {
+            let expanded = expand_manifest(&manifest).unwrap();
+            let desired = RoleGraph::from_expanded(&expanded, None).unwrap();
+            plan_changes(
+                &current,
+                &desired,
+                &manifest,
+                &expanded,
+                ReconciliationMode::Additive,
+            )
+        };
+        let changes = plan(spec.to_policy_manifest());
+        assert_eq!(changes, plan(spec.policy_content().to_policy_manifest()));
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], Change::Revoke { privileges, .. }
+            if privileges == &std::collections::BTreeSet::from([pgroles_core::manifest::Privilege::Select])));
+        assert_eq!(
+            spec.content_digest(),
+            spec.policy_content().content_digest()
         );
     }
 
