@@ -26,11 +26,18 @@
 //! hide a violation of (2). The undo predicate in (1) is written from the
 //! change list, independently of `OwnershipClaims`.
 //!
-//! Mutation check: disabling any single rule in `conflicts` makes this test
-//! fail, except "adds members to a role the other manages". That rule is
-//! conservative rather than protective: between additive policies nothing
-//! removes members, and for adopt or authoritative ones the revoke-reach rule
-//! already covers the same pairs.
+//! A second test runs the pairs on two databases of one server against
+//! `conflicts_on(.., SharedTarget::Server)`, where only roles and memberships
+//! are shared. A third runs hand-written pairs for cases the generator reaches
+//! rarely, and checks that a pair the rules report really fails together.
+//!
+//! Mutation check: disabling any single rule in `conflicts_on`, or dropping
+//! one kind of scope from a policy's reach, makes one of these tests fail.
+//! Dropping the database from privilege reach is caught only by the fixed
+//! pairs.
+//!
+//! With `PGROLES_CLAIMS_PROPERTY_PRECISION` set, the first test also runs the
+//! pairs the rules reject and counts how many really fail together.
 //!
 //! Seeds are fixed (0..N, default 40) so CI is reproducible; override with
 //! `PGROLES_CLAIMS_PROPERTY_SEEDS`. Every failure prints the seed and both
@@ -921,4 +928,108 @@ fn policies_on_two_databases_without_server_conflicts_never_undo_each_other() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Hand-written pairs for cases the generator reaches rarely. Each states
+/// whether the rules must report a conflict; a reported pair must also really
+/// fail when run together, so every rule exercised here is shown necessary.
+#[test]
+#[ignore]
+fn fixed_pairs_behave_as_the_rules_say() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let pool = runtime
+        .block_on(PgPool::connect(&database_url()))
+        .expect("failed to connect to live test database");
+    let database: String = runtime
+        .block_on(sqlx::query_scalar("SELECT current_database()").fetch_one(&pool))
+        .expect("current_database");
+
+    let connect = |role: &str| {
+        json!({"role": role, "privileges": ["CONNECT"],
+               "object": {"type": "database", "name": database}})
+    };
+    let select_all = |role: &str, schema: &str| {
+        json!({"role": role, "privileges": ["SELECT"],
+               "object": {"type": "table", "schema": schema, "name": "*"}})
+    };
+    let policy = |mode: &str, roles: Value, grants: Value| {
+        json!({
+            "connection": {"secretRef": {"name": "db"}},
+            "reconciliation_mode": mode,
+            "roles": roles,
+            "grants": grants,
+        })
+    };
+
+    let mut failures = Vec::new();
+    for (index, (name, build, expect_conflict)) in [
+        (
+            "database privileges are in reach once a policy declares a database grant",
+            Box::new(|u: &Universe| {
+                let (r0, r1) = (&u.roles[0], &u.roles[1]);
+                (
+                    policy(
+                        "authoritative",
+                        json!([{"name": r0, "external": true}, {"name": r1, "external": true}]),
+                        json!([connect(r1)]),
+                    ),
+                    policy(
+                        "additive",
+                        json!([{"name": r0, "external": true}]),
+                        json!([connect(r0)]),
+                    ),
+                )
+            }) as Box<dyn Fn(&Universe) -> (Value, Value)>,
+            true,
+        ),
+        (
+            "the documented shared-role setup: create in one, reference in another",
+            Box::new(|u: &Universe| {
+                let r0 = &u.roles[0];
+                (
+                    policy(
+                        "authoritative",
+                        json!([{"name": r0}]),
+                        json!([select_all(r0, &u.schemas[0])]),
+                    ),
+                    policy(
+                        "authoritative",
+                        json!([{"name": r0, "external": true}]),
+                        json!([select_all(r0, &u.schemas[1])]),
+                    ),
+                )
+            }),
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let universe = Universe::with_prefix("clf", index as u64, database.clone());
+        let (left, right) = build(&universe);
+        let (a, b) = (
+            prepare(&left).expect("fixed policy is valid"),
+            prepare(&right).expect("fixed policy is valid"),
+        );
+        let reasons = a.claims.conflicts(&b.claims);
+        if reasons.is_empty() == expect_conflict {
+            failures.push(format!(
+                "{name}: expected conflict {expect_conflict}, got {reasons:?}"
+            ));
+            continue;
+        }
+        let outcome = runtime.block_on(with_universe(
+            &pool,
+            &universe,
+            run_pair(&pool, &pool, index as u64, &a, &b),
+        ));
+        match (expect_conflict, outcome) {
+            (true, Ok(())) => failures.push(format!(
+                "{name}: reported as conflicting ({reasons:?}) but ran together safely"
+            )),
+            (false, Err(error)) => failures.push(format!("{name}: accepted but {error}")),
+            _ => {}
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
