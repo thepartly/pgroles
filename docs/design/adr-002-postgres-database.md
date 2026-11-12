@@ -474,12 +474,12 @@ Attached policies (`AttachmentPrecedence.tla`):
 - **Holds everywhere**, including the prototype as written: composed claims
   are pairwise disjoint, and composition does not depend on listing order.
 - **Retention prevents takeover by a younger policy** only when it covers every
-  rejection path. The prototype misses three: its `profiles` pre-check
-  rejects a policy before retention applies (`AP_ProfilesBypass`); its status
-  is keyed by namespace and name, so a re-created policy inherits its
-  predecessor's retained content until generations collide (`AP_NameReuse`);
-  and it patches the composed policy before recording retained content, so a
-  failed status write loses it (`AP_StatusLoss`). Decision 3 now closes all
+  rejection path. The prototype missed three: its `profiles` pre-check
+  rejected a policy before retention applied (`AP_ProfilesBypass`); its status
+  was keyed by namespace and name, so a re-created policy inherited its
+  predecessor's retained content until generations collided (`AP_NameReuse`);
+  and it patched the composed policy before recording retained content, so a
+  failed status write lost it (`AP_StatusLoss`). Decision 3 now closes all
   three, the fixed variants hold, and the prototype implements the fixes,
   each with a unit test of `plan_database` or `compose_attached`.
 - **Ordering by age** has the consequences decision 3 states: an older policy
