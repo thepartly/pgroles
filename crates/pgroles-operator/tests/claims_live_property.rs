@@ -26,6 +26,12 @@
 //! hide a violation of (2). The undo predicate in (1) is written from the
 //! change list, independently of `OwnershipClaims`.
 //!
+//! Mutation check: disabling any single rule in `conflicts` makes this test
+//! fail, except "adds members to a role the other manages". That rule is
+//! conservative rather than protective: between additive policies nothing
+//! removes members, and for adopt or authoritative ones the revoke-reach rule
+//! already covers the same pairs.
+//!
 //! Seeds are fixed (0..N, default 40) so CI is reproducible; override with
 //! `PGROLES_CLAIMS_PROPERTY_SEEDS`. Every failure prints the seed and both
 //! policies. Requires `DATABASE_URL` and a superuser connection; run with
