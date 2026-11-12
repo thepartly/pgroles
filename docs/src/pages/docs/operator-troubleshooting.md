@@ -65,7 +65,7 @@ release or namespace names.
 | `ExecutorAuthority` | The authority preflight found a statement the executor cannot run, before any SQL executed. [Resolve the authority gap](#executor-authority-blocks-execution). |
 | `MissingDatabaseObject` | An external object referenced by the policy is absent. [Check database objects](#missing-database-objects). |
 | `UnsatisfiableWildcardGrant` | A wildcard matched objects the executor cannot grant on. [Check wildcard grants](#wildcard-grants). |
-| `ConflictingPolicy` | Two policies claim overlapping state on the same database. [Resolve the conflict](#policy-conflicts). |
+| `ConflictingPolicy` | Another policy on the same database or server can undo this one's work. [Resolve the conflict](#policy-conflicts). |
 | `UnsafeRoleDrops` | A role drop is blocked by owned objects or other dependencies. [Plan a safe retirement](#unsafe-role-drops). |
 | `OwnerTransferBlocked` | An adopt-mode apply would transfer schema ownership the policy does not allow. [Decide the owner](#schema-ownership-transfer-refused). |
 | `Planned`, `Drifted=True`, plan `Pending` | A preview or manual approval gate is working. [Inspect the plan](#a-plan-does-not-execute). |
@@ -237,40 +237,65 @@ those objects under a different ownership boundary. See
 
 ## Policy conflicts
 
-`ConflictingPolicy` means another `PostgresPolicy` targeting the same database
-has overlapping ownership claims. The condition message names the other
-namespace/policy and summarizes the overlap. When the other policy reaches the
-database through a different Secret or namespace, the message adds `via
-<namespace>/<secret>/<key>`; the two count as one database because the server
-reported the same identity to both.
+`ConflictingPolicy` means another `PostgresPolicy` can undo this policy's work,
+or this one can undo the other's. Both stop applying until the conflict is
+resolved. The condition message names the other namespace/policy and each rule
+that applied. When the other policy connects through a different Secret or
+namespace, the message adds `via <namespace>/<secret>/<key>`; when it manages a
+different database on the same server, it adds `on another database of the
+same server`.
 
-Two policies conflict when one can undo the other's work:
+Roles and memberships belong to the whole server, so these rules apply to
+policies on any database of one server:
 
-- both manage the same role (neither declares it `external: true`), or one
-  retires a role the other manages;
+- both manage the same role (neither declares it `external: true`). A policy
+  that sets global default privileges for an owner manages that owner for this
+  purpose;
+- one is `adopt` or `authoritative` and removes undeclared members from a role
+  the other adds members to. Those modes remove undeclared members of the roles
+  they create, and of any role they list with `exclusive: true`, including
+  predefined `pg_*` roles;
+- both declare the same membership with different `inherit` or `admin`
+  options;
+- one is `authoritative` and retires a role the other references in any way:
+  as a declared or external role, grantee, member, or schema or
+  default-privilege owner. Retirement drops the role and can drop or reassign
+  what it owns; `DROP OWNED` also revokes its privileges on other databases.
+
+These apply only to policies on the same database:
+
 - both declare the same schema under `schemas`;
 - one grants a privilege the other declares `ensure: absent`. Function names
   are compared without their argument lists, because `f` and `f(integer)` can
   name the same function;
-- one adds members to a role the other manages;
-- one is `authoritative` and retires a role the other references in any way:
-  as a declared or external role, grantee, member, or schema or
-  default-privilege owner. Retirement drops the role and can drop or reassign
-  what it owns;
-- both declare the same membership with different `inherit` or `admin`
-  options;
 - one is `adopt` or `authoritative`, declares a role (external or not), and the
-  other grants to that role or adds members to it. Those modes revoke
-  undeclared privileges of every role they declare, and undeclared members of
-  any role they list with `exclusive: true` (including predefined `pg_*`
-  roles), so they would revoke the other policy's work;
+  other grants that role a privilege where the first one inspects it: in a
+  schema the first names in a grant, default privilege or `schemas` entry; on
+  the database, if the first declares a database grant; or in the global
+  default privileges of an owner the first sets them for. Those modes revoke
+  undeclared privileges of declared roles there;
 - both write `PUBLIC` privileges on the same database.
 
-Policies that only grant to the same role do not conflict. To let several
-policies grant to one shared role, create it in one policy, declare it with
-`external: true` in the others so its grants are inspected and converge, and
-run the policies that do not create it in `additive` mode. Changing reconcile
-timing does not solve a conflict.
+Policies that only grant to the same role do not conflict, as long as each
+grants where the other does not inspect. To let several policies grant to one
+shared role, create it in one policy and declare it with `external: true` in
+the others, so its grants are inspected and converge. Each policy can run in
+any mode if no two of them name the same schema; where they do, run the ones
+that do not create the role in `additive` mode.
+
+An `adopt` or `authoritative` policy removes undeclared members of the roles it
+creates, whoever added them. If another policy's executor is a member of such a
+role, for example to grant on the objects it owns, declare that membership in
+the policy that creates the role.
+
+Policies in `observe` mode and suspended policies cannot execute, so they do
+not block other policies. They still report a conflict themselves, and run
+the check again before they next apply.
+
+A policy that can no longer connect keeps the target it last recorded. If its
+Secret now points elsewhere, or its database is gone, it can keep blocking a
+peer; suspend or delete it to release the peer. Changing reconcile timing does
+not solve a conflict.
 
 ## Unsafe role drops
 

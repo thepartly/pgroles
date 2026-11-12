@@ -1164,7 +1164,8 @@ pub struct PostgresPolicyStatus {
 
     /// The database this policy's connection reached, as the server reports
     /// it. Other policies compare against this to detect ownership conflicts
-    /// on one database reached through different Secrets or namespaces.
+    /// on one database, or on one server, reached through different Secrets
+    /// or namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_database_target: Option<ResolvedDatabaseTarget>,
 
@@ -2069,8 +2070,8 @@ pub struct ResolvedDatabaseTarget {
     /// Opaque digest of the server alone: the same identity without
     /// `current_database()`. Roles and memberships live in catalogs that every
     /// database of a server shares, so policies on different databases of one
-    /// server are compared on those. Absent from targets recorded before 0.16,
-    /// which are then compared per database only.
+    /// server are compared on those. A target without one is compared per
+    /// database only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_key: Option<String>,
 }

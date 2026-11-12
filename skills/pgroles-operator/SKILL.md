@@ -60,20 +60,28 @@ before enabling execution.
 
 ## Policy Scope And Conflicts
 
-Prefer one policy per database. Multiple policies may share a database only when
-their ownership claims are disjoint.
+Prefer one policy per database. Multiple policies may share a database, or the
+databases of one server, only when neither can undo the other's work.
 
-Claims conservatively include declared and profile-expanded roles, grant and
-default-privilege grantees, both sides of memberships, and declared or referenced
-schemas. Sharing a referenced schema conflicts even if policies intend to manage
-different objects inside it.
+A policy claims the roles it creates, the schemas it declares and each grant it
+asserts; a role it only grants to is a reference. `adopt` and `authoritative`
+revoke undeclared privileges of declared roles (external included) in the
+schemas the policy names, on the database if it declares a database grant, and
+in global default privileges of owners it names, and remove undeclared members
+of roles it creates or lists `exclusive`. `additive` revokes only what it names.
+Read the `ConflictingPolicy` message: it names the peer and each rule. The
+full rule list is in the operator troubleshooting guide.
 
-Conflict detection compares policies with the same operator database identity.
-That identity comes from namespace-qualified connection references or structured
-connection inputs, not from resolving every connection to a PostgreSQL endpoint.
-Use the same canonical connection reference for policies intended to share a
-database. Different Secrets can point to the same database without being
-recognized as the same identity.
+For a shared role, create it in one policy and declare it `external: true` in
+the others. That is safe in any mode while no two policies name the same
+schema; otherwise run the non-creating policies `additive`.
+
+Peers are matched by the server's own report (`status.resolved_database_target`),
+not by Secret, across every namespace the operator watches. Policies on other
+databases of the same server are compared on role, membership and retirement
+rules only. A peer is compared only after it has connected once, so two new
+policies can each apply once before both report the conflict. Separate
+namespace-scoped operator installs do not see each other.
 
 For Azure Database for PostgreSQL Flexible Server on AKS, use structured
 `connection.params` with `auth.type: azure_workload_identity`. Set the operator
@@ -95,8 +103,10 @@ fails, separate role bootstrap from membership adoption and object-grant
 reconciliation. Token authentication success alone does not certify this SQL
 lifecycle. See the Azure connection guide for the observed constraint.
 
-Observe-only policies retain claims. A suspended policy returns before checking
-peers, but an active peer can still detect overlap with its claims.
+Observe-only and suspended policies do not block peers, since they cannot
+execute. An observe policy still reports its own conflict, and either kind runs
+the check again before it next applies. A policy that can no longer connect
+keeps its last target and can keep blocking a peer; suspend or delete it.
 
 ## Rollout Workflow
 
