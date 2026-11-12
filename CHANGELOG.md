@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Policy conflict detection separates the roles a policy manages from the roles it only grants to. Granting to a role, naming a schema in a grant, or adding a role as a member no longer claims it. Two policies conflict where one can undo the other's work, and the `ConflictingPolicy` message says which rule applied. `status.owned_roles` now lists only the roles a policy manages.
+
 ### Fixed
 
-- The operator now detects ownership conflicts between policies that reach the same database through different Secrets or from different namespaces. Policies are compared across every namespace the operator watches. Each policy records the database its connection reached, as reported by the server, in `status.resolved_database_target`, and policies compare those records. Previously only policies sharing a namespace and Secret were compared, so overlapping policies elsewhere could revoke each other's grants on every reconcile. **Upgrade note:** such policies now report `ConflictingPolicy` instead of reconciling; make their ownership claims disjoint or merge them. Apply the updated CRDs: until then the API server prunes the new status field and detection falls back to comparing connections, as before.
+- The operator now detects ownership conflicts between policies that reach the same database through different Secrets or from different namespaces. Policies are compared across every namespace the operator watches. Each policy records the database its connection reached, as reported by the server, in `status.resolved_database_target`, and policies compare those records. Previously only policies sharing a namespace and Secret were compared, so overlapping policies elsewhere could revoke each other's grants on every reconcile. **Upgrade note:** such policies now report `ConflictingPolicy` when they can undo each other's work: both manage the same role or declare the same schema, one grants what the other declares `ensure: absent`, one adds members to a role the other manages, or an `adopt` or `authoritative` policy declares a role the other grants to. Policies that only grant to the same role do not conflict. If several policies declare one role, keep the full declaration in the policy that creates it and set `external: true` in the others. Apply the updated CRDs: until then the API server prunes the new status field and detection falls back to comparing connections, as before.
 - The bundle examples in the bundle composition guide and manifest reference failed composition: a shared `default_owner` made the bindings-only fragment claim schema ownership. The examples now set `owner` explicitly in the owning fragment, the reference explains the rule, and a test composes every bundle in the docs.
 
 ## [0.15.0] - 2026-10-19

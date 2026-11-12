@@ -1248,7 +1248,7 @@ async fn reconcile_apply_inner(
     update_status(ctx, resource, |status| {
         status.managed_database_identity = Some(identity.as_str().to_string());
         status.resolved_database_target = resolved_target.clone();
-        status.owned_roles = ownership.roles.iter().cloned().collect();
+        status.owned_roles = ownership.lifecycle_roles.iter().cloned().collect();
         status.owned_schemas = ownership.schemas.iter().cloned().collect();
     })
     .await?;
@@ -3819,7 +3819,7 @@ fn detect_policy_conflict_in_list(
         None
     } else {
         Some(format!(
-            "policy ownership overlaps with {} on database target {}",
+            "policy conflicts with {} on database target {}",
             conflicts.join(", "),
             identity.as_str()
         ))
@@ -6389,6 +6389,105 @@ mod tests {
         .expect("the same database through another Secret and namespace still conflicts");
         assert!(conflict.contains("payments/team-policy via payments/team-db-secret"));
         assert!(conflict.contains("roles: analytics"));
+    }
+
+    /// A policy in `namespace` reaching the shared test database through its
+    /// own Secret, with the given content.
+    fn team_policy(namespace: &str, secret: &str, content: serde_json::Value) -> PostgresPolicy {
+        let mut spec = content;
+        spec["connection"] = serde_json::json!({"secretRef": {"name": secret}});
+        let mut policy = test_policy_with_spec(
+            "team",
+            serde_json::from_value(spec).expect("test spec deserializes"),
+        );
+        policy.metadata.namespace = Some(namespace.to_string());
+        let identity = DatabaseIdentity::from_connection(namespace, &policy.spec.connection);
+        policy.status = Some(PostgresPolicyStatus {
+            resolved_database_target: Some(server_target(&identity, "10.0.0.5")),
+            ..Default::default()
+        });
+        policy
+    }
+
+    fn table_grant(privilege: &str, schema: &str, ensure: &str) -> serde_json::Value {
+        serde_json::json!({
+            "role": "app_runtime",
+            "privileges": [privilege],
+            "object": {"type": "table", "schema": schema, "name": "*"},
+            "ensure": ensure,
+        })
+    }
+
+    #[test]
+    fn additive_team_policies_sharing_a_grantee_across_secrets_do_not_conflict() {
+        let platform = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime"}],
+                "grants": [table_grant("SELECT", "platform", "present")],
+            }),
+        );
+        let identity = DatabaseIdentity::from_connection("platform", &platform.spec.connection);
+        let ours = server_target(&identity, "10.0.0.5");
+        let ownership = platform.spec.ownership_claims().unwrap();
+        let billing = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime", "external": true}],
+                "grants": [table_grant("SELECT", "billing", "present")],
+            }),
+        );
+
+        let conflict = detect_policy_conflict_in_list(
+            &platform,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![billing],
+        );
+        assert_eq!(conflict, None);
+    }
+
+    #[test]
+    fn a_team_policy_declaring_absent_what_another_grants_conflicts_across_secrets() {
+        let platform = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime"}],
+                "grants": [table_grant("SELECT", "billing", "absent")],
+            }),
+        );
+        let identity = DatabaseIdentity::from_connection("platform", &platform.spec.connection);
+        let ours = server_target(&identity, "10.0.0.5");
+        let ownership = platform.spec.ownership_claims().unwrap();
+        let billing = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "grants": [table_grant("SELECT", "billing", "present")],
+            }),
+        );
+
+        let conflict = detect_policy_conflict_in_list(
+            &platform,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![billing],
+        )
+        .expect("a present-versus-absent pair must conflict");
+        assert!(
+            conflict.contains("billing/team via billing/billing-executor"),
+            "{conflict}"
+        );
+        assert!(conflict.contains("contradicting assertions"), "{conflict}");
     }
 
     #[test]

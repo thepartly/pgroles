@@ -2132,57 +2132,138 @@ pub fn targets_same_database(
     }
 }
 
-/// Conservative ownership claims for a policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What a policy claims on its database, and what it can revoke there.
+///
+/// Two policies are unsafe together only where one can undo the other's work,
+/// so a policy claims the things it alone may decide — the lifecycle of the
+/// roles it creates, the schemas it declares, and each grant it asserts
+/// present or absent — and merely *references* a role it grants to. Whether a
+/// reference collides with another policy depends on that policy's revoke
+/// reach: an `adopt` or `authoritative` policy inspects and revokes undeclared
+/// privileges of every role it declares (external ones included), while an
+/// `additive` policy revokes nothing it does not name.
+#[derive(Debug, Clone, Default)]
 pub struct OwnershipClaims {
-    /// PostgreSQL roles claimed by this policy.
-    pub roles: BTreeSet<String>,
-    /// PostgreSQL schemas claimed by this policy.
+    /// Roles whose lifecycle this policy manages: expanded roles not marked
+    /// `external`, retired roles, and the resolved owner of every global
+    /// default privilege (no schema scopes those, so the owner is the claim).
+    pub lifecycle_roles: BTreeSet<String>,
+    /// Schemas declared under `spec.schemas`. A schema named only as a grant
+    /// target is not claimed; the revoke reach below covers it.
     pub schemas: BTreeSet<String>,
+    /// Roles this policy asserts privileges for or members of: grantees,
+    /// default-privilege grantees and the granted role of each membership.
+    pub asserted_roles: BTreeSet<String>,
+    /// Roles this policy adds members to.
+    pub membership_roles: BTreeSet<String>,
+    /// Roles whose undeclared privileges and members this policy revokes:
+    /// every declared role (external included) and every retired role. Empty
+    /// for an `additive` policy.
+    pub revoke_reach: BTreeSet<String>,
     /// Databases whose PUBLIC privileges this policy asserts.
     ///
-    /// A database-level rule names no schema, and PUBLIC cannot be claimed as
-    /// a role, so such a rule would otherwise claim nothing at all. PUBLIC is
-    /// one shared surface per database, so two policies writing it conflict
-    /// even when their roles and schemas are disjoint. Database grants to a
-    /// named role are already covered by the role claim, and are deliberately
-    /// not claimed here — two teams granting CONNECT to their own roles on a
-    /// shared database do not conflict.
+    /// PUBLIC cannot be claimed as a role, and it is one shared surface per
+    /// database, so two policies writing it conflict even when nothing else
+    /// overlaps.
     pub public_databases: BTreeSet<String>,
+    /// Expanded grants and default privileges (owners resolved), kept for the
+    /// present-versus-absent check between two policies.
+    grants: Vec<pgroles_core::manifest::Grant>,
+    default_privileges: Vec<DefaultPrivilege>,
 }
 
 impl OwnershipClaims {
-    pub fn overlaps(&self, other: &Self) -> bool {
-        !self.roles.is_disjoint(&other.roles)
-            || !self.schemas.is_disjoint(&other.schemas)
-            || !self.public_databases.is_disjoint(&other.public_databases)
-    }
+    /// Every reason the two policies cannot safely share a database.
+    pub fn conflicts(&self, other: &Self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let join = |set: BTreeSet<&String>| set.into_iter().cloned().collect::<Vec<_>>().join(", ");
 
-    pub fn overlap_summary(&self, other: &Self) -> String {
-        let overlapping_roles: Vec<_> = self.roles.intersection(&other.roles).cloned().collect();
-        let overlapping_schemas: Vec<_> =
-            self.schemas.intersection(&other.schemas).cloned().collect();
-        let overlapping_databases: Vec<_> = self
+        let shared_lifecycle: BTreeSet<_> = self
+            .lifecycle_roles
+            .intersection(&other.lifecycle_roles)
+            .collect();
+        if !shared_lifecycle.is_empty() {
+            reasons.push(format!("both manage roles: {}", join(shared_lifecycle)));
+        }
+        let shared_schemas: BTreeSet<_> = self.schemas.intersection(&other.schemas).collect();
+        if !shared_schemas.is_empty() {
+            reasons.push(format!("both declare schemas: {}", join(shared_schemas)));
+        }
+        let shared_public: BTreeSet<_> = self
             .public_databases
             .intersection(&other.public_databases)
-            .cloned()
             .collect();
-
-        let mut parts = Vec::new();
-        if !overlapping_roles.is_empty() {
-            parts.push(format!("roles: {}", overlapping_roles.join(", ")));
-        }
-        if !overlapping_schemas.is_empty() {
-            parts.push(format!("schemas: {}", overlapping_schemas.join(", ")));
-        }
-        if !overlapping_databases.is_empty() {
-            parts.push(format!(
-                "PUBLIC on databases: {}",
-                overlapping_databases.join(", ")
+        if !shared_public.is_empty() {
+            reasons.push(format!(
+                "both write PUBLIC on databases: {}",
+                join(shared_public)
             ));
         }
 
-        parts.join("; ")
+        let grants: Vec<_> = self.grants.iter().chain(&other.grants).cloned().collect();
+        let defaults: Vec<_> = self
+            .default_privileges
+            .iter()
+            .chain(&other.default_privileges)
+            .cloned()
+            .collect();
+        if let Err(error) =
+            pgroles_core::manifest::validate_ensure_conflicts(None, &grants, &defaults)
+        {
+            reasons.push(format!("contradicting assertions: {error}"));
+        }
+
+        let revoked_here: BTreeSet<_> = self
+            .revoke_reach
+            .intersection(&other.asserted_roles)
+            .collect();
+        if !revoked_here.is_empty() {
+            reasons.push(format!(
+                "this policy can revoke what the other asserts for roles: {}",
+                join(revoked_here)
+            ));
+        }
+        let revoked_there: BTreeSet<_> = other
+            .revoke_reach
+            .intersection(&self.asserted_roles)
+            .collect();
+        if !revoked_there.is_empty() {
+            reasons.push(format!(
+                "the other policy can revoke what this one asserts for roles: {}",
+                join(revoked_there)
+            ));
+        }
+
+        let members_there: BTreeSet<_> = self
+            .lifecycle_roles
+            .intersection(&other.membership_roles)
+            .collect();
+        if !members_there.is_empty() {
+            reasons.push(format!(
+                "the other policy adds members to roles this one manages: {}",
+                join(members_there)
+            ));
+        }
+        let members_here: BTreeSet<_> = other
+            .lifecycle_roles
+            .intersection(&self.membership_roles)
+            .collect();
+        if !members_here.is_empty() {
+            reasons.push(format!(
+                "this policy adds members to roles the other manages: {}",
+                join(members_here)
+            ));
+        }
+
+        reasons
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        !self.conflicts(other).is_empty()
+    }
+
+    pub fn overlap_summary(&self, other: &Self) -> String {
+        self.conflicts(other).join("; ")
     }
 }
 
@@ -2649,84 +2730,86 @@ impl PostgresPolicySpec {
         )
     }
 
-    /// Derive a conservative ownership claim set from the policy spec.
+    /// Derive what this policy claims, references and can revoke.
     ///
-    /// This intentionally claims all declared/expanded roles and all referenced
-    /// schemas so overlapping policies are rejected safely.
+    /// See [`OwnershipClaims`] for why a grantee is a reference rather than a
+    /// claim.
     pub fn ownership_claims(
         &self,
     ) -> Result<OwnershipClaims, pgroles_core::manifest::ManifestError> {
         let manifest = self.to_policy_manifest();
         let expanded = pgroles_core::manifest::expand_manifest(&manifest)?;
+        let not_public = |role: &String| role != "PUBLIC";
 
-        let mut roles: BTreeSet<String> = expanded.roles.into_iter().map(|r| r.name).collect();
-        let mut schemas: BTreeSet<String> = self.schemas.iter().map(|s| s.name.clone()).collect();
-        // A database-level PUBLIC rule names no schema and no claimable role.
-        let public_databases: BTreeSet<String> = manifest
+        let retired = manifest.retirements.iter().map(|r| r.role.clone());
+        let mut lifecycle_roles: BTreeSet<String> = expanded
+            .roles
+            .iter()
+            .filter(|role| !role.external)
+            .map(|role| role.name.clone())
+            .chain(retired.clone())
+            .collect();
+        // Global-scope default privileges name no schema, so the owner they
+        // act for is the claim. `expand_manifest` already resolved it.
+        for dp in &expanded.default_privileges {
+            if let Ok(scope) = dp.resolved_scope()
+                && scope.schema().is_none()
+                && let Some(owner) = &dp.owner
+            {
+                lifecycle_roles.insert(owner.clone());
+            }
+        }
+
+        let schemas: BTreeSet<String> = self.schemas.iter().map(|s| s.name.clone()).collect();
+
+        let public_databases: BTreeSet<String> = expanded
             .grants
             .iter()
             .filter(|g| g.object.object_type == ObjectType::Database && g.role == "PUBLIC")
             .filter_map(|g| g.object.name.clone())
             .collect();
 
-        roles.extend(manifest.retirements.into_iter().map(|r| r.role));
-        // PUBLIC is a pseudo-role, not a role this policy may claim.
-        roles.extend(
-            manifest
-                .grants
-                .iter()
-                .map(|g| g.role.clone())
-                .filter(|role| role != "PUBLIC"),
-        );
-        roles.extend(
-            manifest
-                .default_privileges
-                .iter()
-                .flat_map(|dp| dp.grant.iter().filter_map(|grant| grant.role.clone()))
-                .filter(|role| role != "PUBLIC"),
-        );
-        roles.extend(manifest.memberships.iter().map(|m| m.role.clone()));
-        roles.extend(
-            manifest
-                .memberships
-                .iter()
-                .flat_map(|m| m.members.iter().map(|member| member.name.clone())),
-        );
+        let membership_roles: BTreeSet<String> = expanded
+            .memberships
+            .iter()
+            .map(|m| m.role.clone())
+            .collect();
+        let asserted_roles: BTreeSet<String> = expanded
+            .grants
+            .iter()
+            .map(|g| g.role.clone())
+            .chain(
+                expanded
+                    .default_privileges
+                    .iter()
+                    .flat_map(|dp| dp.grant.iter().filter_map(|grant| grant.role.clone())),
+            )
+            .filter(not_public)
+            .chain(membership_roles.iter().cloned())
+            .collect();
 
-        schemas.extend(
-            manifest
-                .grants
+        // Inspection covers every declared role, external or not, plus retired
+        // roles; adopt and authoritative revoke what they find undeclared
+        // there. Additive revokes only what it names.
+        let revoke_reach: BTreeSet<String> = match self.reconciliation_mode {
+            CrdReconciliationMode::Additive => BTreeSet::new(),
+            CrdReconciliationMode::Authoritative | CrdReconciliationMode::Adopt => expanded
+                .roles
                 .iter()
-                .filter_map(|g| match g.object.object_type {
-                    ObjectType::Database => None,
-                    ObjectType::Schema => g.object.name.clone(),
-                    _ => g.object.schema.clone(),
-                }),
-        );
-        // Global-scope entries have no schema; their claim is the owner role.
-        for dp in &manifest.default_privileges {
-            match dp.resolved_scope() {
-                Ok(scope) => match scope.schema() {
-                    Some(schema) => {
-                        schemas.insert(schema.to_string());
-                    }
-                    // An entry that omits `owner` still resolves to one, so it
-                    // has to claim the same role the reconcile will act as.
-                    None => {
-                        if let Some(owner) = dp.owner.as_ref().or(manifest.default_owner.as_ref()) {
-                            roles.insert(owner.clone());
-                        }
-                    }
-                },
-                // expand_manifest above already rejected invalid scopes.
-                Err(_) => continue,
-            }
-        }
+                .map(|role| role.name.clone())
+                .chain(retired)
+                .collect(),
+        };
 
         Ok(OwnershipClaims {
-            roles,
+            lifecycle_roles,
             schemas,
+            asserted_roles,
+            membership_roles,
+            revoke_reach,
             public_databases,
+            grants: expanded.grants,
+            default_privileges: expanded.default_privileges,
         })
     }
 }
@@ -3760,9 +3843,9 @@ mod tests {
         };
 
         let claims = spec.ownership_claims().unwrap();
-        assert!(claims.roles.contains("inventory-editor"));
-        assert!(claims.roles.contains("app-service"));
-        assert!(claims.roles.contains("legacy-app"));
+        assert!(claims.lifecycle_roles.contains("inventory-editor"));
+        assert!(claims.lifecycle_roles.contains("app-service"));
+        assert!(claims.lifecycle_roles.contains("legacy-app"));
         assert!(claims.schemas.contains("inventory"));
     }
 
@@ -3810,20 +3893,20 @@ mod tests {
 
         let claims = spec.ownership_claims().unwrap();
         assert!(
-            claims.roles.contains("app_owner"),
+            claims.lifecycle_roles.contains("app_owner"),
             "expected the resolved default owner to be claimed, got {:?}",
-            claims.roles
+            claims.lifecycle_roles
         );
     }
 
     #[test]
     fn ownership_overlap_summary_reports_roles_and_schemas() {
         let mut left = OwnershipClaims::default();
-        left.roles.insert("analytics".to_string());
+        left.lifecycle_roles.insert("analytics".to_string());
         left.schemas.insert("reporting".to_string());
 
         let mut right = OwnershipClaims::default();
-        right.roles.insert("analytics".to_string());
+        right.lifecycle_roles.insert("analytics".to_string());
         right.schemas.insert("reporting".to_string());
         right.schemas.insert("other".to_string());
 
@@ -4890,11 +4973,11 @@ params:
     #[test]
     fn ownership_claims_no_overlap() {
         let mut left = OwnershipClaims::default();
-        left.roles.insert("analytics".to_string());
+        left.lifecycle_roles.insert("analytics".to_string());
         left.schemas.insert("reporting".to_string());
 
         let mut right = OwnershipClaims::default();
-        right.roles.insert("billing".to_string());
+        right.lifecycle_roles.insert("billing".to_string());
         right.schemas.insert("payments".to_string());
 
         assert!(!left.overlaps(&right));
@@ -4955,7 +5038,7 @@ params:
             .ownership_claims()
             .unwrap();
 
-        assert!(present.roles.is_disjoint(&absent.roles));
+        assert!(present.lifecycle_roles.is_disjoint(&absent.lifecycle_roles));
         assert!(present.schemas.is_disjoint(&absent.schemas));
         assert!(
             present.overlaps(&absent),
@@ -4979,17 +5062,181 @@ params:
     #[test]
     fn ownership_claims_partial_role_overlap() {
         let mut left = OwnershipClaims::default();
-        left.roles.insert("analytics".to_string());
-        left.roles.insert("reporting-viewer".to_string());
+        left.lifecycle_roles.insert("analytics".to_string());
+        left.lifecycle_roles.insert("reporting-viewer".to_string());
 
         let mut right = OwnershipClaims::default();
-        right.roles.insert("analytics".to_string());
-        right.roles.insert("other-role".to_string());
+        right.lifecycle_roles.insert("analytics".to_string());
+        right.lifecycle_roles.insert("other-role".to_string());
 
         assert!(left.overlaps(&right));
         let summary = left.overlap_summary(&right);
         assert!(summary.contains("roles: analytics"));
         assert!(!summary.contains("schemas"));
+    }
+
+    /// A policy spec from JSON content plus a connection, for claim tests.
+    fn claims_of(content: serde_json::Value) -> OwnershipClaims {
+        let mut spec = content;
+        spec["connection"] = serde_json::json!({"secretRef": {"name": "db"}});
+        serde_json::from_value::<PostgresPolicySpec>(spec)
+            .expect("test spec deserializes")
+            .ownership_claims()
+            .expect("test spec expands")
+    }
+
+    fn grant(
+        role: &str,
+        privilege: &str,
+        schema: &str,
+        name: &str,
+        ensure: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "role": role,
+            "privileges": [privilege],
+            "object": {"type": "table", "schema": schema, "name": name},
+            "ensure": ensure,
+        })
+    }
+
+    #[test]
+    fn additive_policies_sharing_a_grantee_do_not_conflict() {
+        // The creator manages app_runtime; the other only references it.
+        let creator = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "app_runtime"}],
+            "grants": [grant("app_runtime", "SELECT", "platform", "*", "present")],
+        }));
+        let referrer = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "app_runtime", "external": true}],
+            "grants": [grant("app_runtime", "SELECT", "billing", "*", "present")],
+        }));
+        assert_eq!(creator.conflicts(&referrer), Vec::<String>::new());
+    }
+
+    #[test]
+    fn two_policies_creating_one_role_conflict() {
+        let left = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "app_runtime"}],
+        }));
+        let right = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "app_runtime"}],
+        }));
+        let summary = left.overlap_summary(&right);
+        assert!(
+            summary.contains("both manage roles: app_runtime"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn granting_what_another_declares_absent_conflicts() {
+        let present = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "grants": [grant("app_runtime", "SELECT", "billing", "invoices", "present")],
+        }));
+        let absent = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "grants": [grant("app_runtime", "SELECT", "billing", "invoices", "absent")],
+        }));
+        assert!(
+            present
+                .overlap_summary(&absent)
+                .contains("contradicting assertions")
+        );
+
+        // A wildcard on one side and a named table on the other contradict too.
+        let wildcard = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "grants": [grant("app_runtime", "SELECT", "billing", "*", "present")],
+        }));
+        assert!(wildcard.overlaps(&absent));
+    }
+
+    #[test]
+    fn a_policy_that_can_revoke_conflicts_with_grants_to_its_declared_roles() {
+        let authoritative = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "roles": [{"name": "app_runtime", "external": true}],
+            "grants": [grant("app_runtime", "SELECT", "platform", "*", "present")],
+        }));
+        let additive = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "grants": [grant("app_runtime", "SELECT", "billing", "*", "present")],
+        }));
+        let summary = authoritative.overlap_summary(&additive);
+        assert!(
+            summary
+                .contains("this policy can revoke what the other asserts for roles: app_runtime"),
+            "{summary}"
+        );
+        assert!(
+            additive
+                .overlap_summary(&authoritative)
+                .contains("the other policy can revoke what this one asserts")
+        );
+    }
+
+    #[test]
+    fn adopt_reaches_as_far_as_authoritative() {
+        let adopt = claims_of(serde_json::json!({
+            "reconciliation_mode": "adopt",
+            "roles": [{"name": "app_runtime", "external": true}],
+        }));
+        let additive = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "grants": [grant("app_runtime", "SELECT", "billing", "*", "present")],
+        }));
+        assert!(adopt.overlaps(&additive));
+    }
+
+    #[test]
+    fn authoritative_policies_granting_on_one_schema_to_their_own_roles_do_not_conflict() {
+        let left = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "roles": [{"name": "billing_api"}],
+            "grants": [grant("billing_api", "SELECT", "shared", "*", "present")],
+        }));
+        let right = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "roles": [{"name": "shipping_api"}],
+            "grants": [grant("shipping_api", "SELECT", "shared", "*", "present")],
+        }));
+        assert_eq!(left.conflicts(&right), Vec::<String>::new());
+    }
+
+    #[test]
+    fn adding_the_same_person_to_different_team_roles_does_not_conflict() {
+        let left = claims_of(serde_json::json!({
+            "roles": [{"name": "team_payments"}],
+            "memberships": [{"role": "team_payments", "members": [{"name": "alice"}]}],
+        }));
+        let right = claims_of(serde_json::json!({
+            "roles": [{"name": "team_fulfillment"}],
+            "memberships": [{"role": "team_fulfillment", "members": [{"name": "alice"}]}],
+        }));
+        assert_eq!(left.conflicts(&right), Vec::<String>::new());
+    }
+
+    #[test]
+    fn adding_members_to_a_role_another_policy_manages_conflicts() {
+        let owner = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "team_payments"}],
+        }));
+        let joiner = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "memberships": [{"role": "team_payments", "members": [{"name": "billing_api"}]}],
+        }));
+        assert!(
+            joiner
+                .overlap_summary(&owner)
+                .contains("this policy adds members to roles the other manages: team_payments")
+        );
     }
 
     #[test]

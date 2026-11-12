@@ -244,9 +244,23 @@ database through a different Secret or namespace, the message adds `via
 <namespace>/<secret>/<key>`; the two count as one database because the server
 reported the same identity to both.
 
-Keep one policy per database and credential boundary where possible. Otherwise
-make their roles, schemas, grants, memberships, and other ownership claims
-disjoint. Changing reconcile timing does not solve an ownership conflict.
+Two policies conflict when one can undo the other's work:
+
+- both manage the same role (neither declares it `external: true`), or one
+  retires a role the other manages;
+- both declare the same schema under `schemas`;
+- one grants a privilege the other declares `ensure: absent`;
+- one adds members to a role the other manages;
+- one is `adopt` or `authoritative`, declares a role (external or not), and the
+  other grants to that role. Those modes revoke undeclared privileges of every
+  role they declare, so they would revoke the other policy's grants;
+- both write `PUBLIC` privileges on the same database.
+
+Policies that only grant to the same role do not conflict. To let several
+policies grant to one shared role, create it in one policy, declare it with
+`external: true` in the others so its grants are inspected and converge, and
+run the policies that do not create it in `additive` mode. Changing reconcile
+timing does not solve a conflict.
 
 ## Unsafe role drops
 

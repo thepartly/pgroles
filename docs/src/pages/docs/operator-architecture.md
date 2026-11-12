@@ -98,9 +98,9 @@ The diff/apply behavior is shared with the CLI. The operator is not a separate i
 
 ### Ownership and conflict detection
 
-Multiple policies may target the same database only if their ownership claims are disjoint.
+Multiple policies may target the same database when neither can undo the other's work.
 
-The controller derives ownership claims from declared roles and schema/profile expansions, then rejects overlapping policies by setting conflict status instead of letting policies revoke each other's grants.
+A policy claims the lifecycle of the roles it creates, the schemas it declares, and each grant it asserts present or absent. A role it only grants to is a reference. Its revoke reach depends on its mode: `adopt` and `authoritative` revoke undeclared privileges and members of every role they declare, external ones included; `additive` revokes only what it names. Two policies conflict when their claims overlap, when one asserts present what the other asserts absent, or when one's revoke reach covers a role the other asserts something for. The controller reports that as a conflict instead of letting the policies revoke each other's grants. See [policy conflicts](/docs/operator-troubleshooting#policy-conflicts) for the full list.
 
 "The same database" is decided by the server, not by how a policy names it. After connecting, each policy reads `system_identifier`, `inet_server_addr()`, `inet_server_port()` and `current_database()` and records a digest of them in `status.resolved_database_target`. Policies compare against each other's recorded targets, so two policies reaching one database through different Secrets, or from different namespaces, are checked against each other. The lineage and the address are combined because each alone misleads: a snapshot restore shares its source's `system_identifier`, and unrelated servers in separate networks can share a private address.
 
