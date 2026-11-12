@@ -1333,7 +1333,7 @@
                     "type": "array"
                   },
                   "resolved_database_target": {
-                    "description": "The database this policy's connection reached, as the server reports\nit. Other policies compare against this to detect ownership conflicts\non one database reached through different Secrets or namespaces.",
+                    "description": "The database this policy's connection reached, as the server reports\nit. Other policies compare against this to detect ownership conflicts\non one database, or on one server, reached through different Secrets\nor namespaces.",
                     "nullable": true,
                     "properties": {
                       "connection_identity": {
@@ -1342,6 +1342,11 @@
                       },
                       "key": {
                         "description": "Opaque digest of the server-reported identity: `system_identifier`,\n`inet_server_addr()`, `inet_server_port()` and `current_database()`.",
+                        "type": "string"
+                      },
+                      "server_key": {
+                        "description": "Opaque digest of the server alone: the same identity without\n`current_database()`. Roles and memberships live in catalogs that every\ndatabase of a server shares, so policies on different databases of one\nserver are compared on those. A target without one is compared per\ndatabase only.",
+                        "nullable": true,
                         "type": "string"
                       }
                     },
