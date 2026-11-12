@@ -2156,16 +2156,22 @@ pub struct OwnershipClaims {
     pub asserted_roles: BTreeSet<String>,
     /// Roles this policy adds members to.
     pub membership_roles: BTreeSet<String>,
-    /// Roles this policy adds as members of other roles.
-    pub membership_members: BTreeSet<String>,
+    /// Every role this policy names in any way: declared (external
+    /// included), retired, granted to, owning a schema or default privileges,
+    /// added as a member, or receiving reassigned objects.
+    pub referenced_roles: BTreeSet<String>,
+    /// Each membership edge this policy declares, with its resolved
+    /// `(inherit, admin)` options.
+    pub membership_options: BTreeMap<(String, String), (bool, bool)>,
     /// Roles whose undeclared privileges and members this policy revokes:
     /// every declared role (external included), every retired role, and the
     /// granted role of every `exclusive` membership stanza, which may be a
     /// predefined `pg_*` role the policy does not declare. Empty for an
     /// `additive` policy.
     pub revoke_reach: BTreeSet<String>,
-    /// Roles this policy drops: its retirements, in `authoritative` mode only
-    /// (`adopt` and `additive` filter role drops).
+    /// Roles this policy retires: dropped, and their objects reassigned or
+    /// dropped. `authoritative` mode only (`adopt` and `additive` filter
+    /// retirement steps).
     pub drop_reach: BTreeSet<String>,
     /// Databases whose PUBLIC privileges this policy asserts.
     ///
@@ -2243,22 +2249,50 @@ impl OwnershipClaims {
 
         let dropped_here: BTreeSet<_> = self
             .drop_reach
-            .intersection(&other.membership_members)
+            .intersection(&other.referenced_roles)
             .collect();
         if !dropped_here.is_empty() {
             reasons.push(format!(
-                "this policy retires roles the other adds as members: {}",
+                "this policy retires roles the other references: {}",
                 join(dropped_here)
             ));
         }
         let dropped_there: BTreeSet<_> = other
             .drop_reach
-            .intersection(&self.membership_members)
+            .intersection(&self.referenced_roles)
             .collect();
         if !dropped_there.is_empty() {
             reasons.push(format!(
-                "the other policy retires roles this one adds as members: {}",
+                "the other policy retires roles this one references: {}",
                 join(dropped_there)
+            ));
+        }
+
+        // The same edge with different options makes each plan reverse the
+        // other's option change.
+        let differing_options: Vec<String> = self
+            .membership_options
+            .iter()
+            .filter(|(edge, options)| {
+                other
+                    .membership_options
+                    .get(*edge)
+                    .is_some_and(|theirs| theirs != *options)
+            })
+            .map(|((role, member), _)| format!("{member} in {role}"))
+            .collect();
+        if !differing_options.is_empty() {
+            reasons.push(format!(
+                "both declare memberships with different inherit or admin options: {}",
+                differing_options.join(", ")
+            ));
+        }
+
+        let routines = routine_contradictions(&self.grants, &other.grants);
+        if !routines.is_empty() {
+            reasons.push(format!(
+                "one grants and the other declares absent the same routine privilege: {}",
+                routines.join(", ")
             ));
         }
 
@@ -2293,6 +2327,63 @@ impl OwnershipClaims {
     pub fn overlap_summary(&self, other: &Self) -> String {
         self.conflicts(other).join("; ")
     }
+}
+
+/// Function grants asserted present by one policy and absent by the other,
+/// compared without their argument lists.
+///
+/// A routine named `f` and one named `f(integer)` can be the same function:
+/// planning resolves the bare name against the live catalog, which no check
+/// here can see. Comparing by base name is conservative: two different
+/// overloads of `f` with opposite assertions are reported too.
+fn routine_contradictions(
+    ours: &[pgroles_core::manifest::Grant],
+    theirs: &[pgroles_core::manifest::Grant],
+) -> Vec<String> {
+    use pgroles_core::manifest::Ensure;
+    type RoutineKey = (String, String, String, pgroles_core::manifest::Privilege);
+    /// Per key: whether any grant asserts it present, and whether any absent.
+    fn keyed(grants: &[pgroles_core::manifest::Grant]) -> BTreeMap<RoutineKey, (bool, bool)> {
+        let mut out: BTreeMap<RoutineKey, (bool, bool)> = BTreeMap::new();
+        for grant in grants {
+            if grant.object.object_type != ObjectType::Function {
+                continue;
+            }
+            let (Some(schema), Some(name)) = (&grant.object.schema, &grant.object.name) else {
+                continue;
+            };
+            let base = name.split('(').next().unwrap_or(name).trim();
+            if base == "*" {
+                // Wildcards are compared by the manifest check.
+                continue;
+            }
+            for privilege in &grant.privileges {
+                let seen = out
+                    .entry((
+                        grant.role.clone(),
+                        schema.clone(),
+                        base.to_string(),
+                        *privilege,
+                    ))
+                    .or_default();
+                match grant.ensure {
+                    Ensure::Present => seen.0 = true,
+                    Ensure::Absent => seen.1 = true,
+                }
+            }
+        }
+        out
+    }
+    let ours = keyed(ours);
+    let theirs = keyed(theirs);
+    ours.iter()
+        .filter_map(|(key, (our_present, our_absent))| {
+            let (their_present, their_absent) = theirs.get(key)?;
+            let opposed = (*our_present && *their_absent) || (*our_absent && *their_present);
+            let (role, schema, base, privilege) = key;
+            opposed.then(|| format!("{privilege} on {schema}.{base} for {role}"))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2802,10 +2893,17 @@ impl PostgresPolicySpec {
             .iter()
             .map(|m| m.role.clone())
             .collect();
-        let membership_members: BTreeSet<String> = expanded
+        let membership_options: BTreeMap<(String, String), (bool, bool)> = expanded
             .memberships
             .iter()
-            .flat_map(|m| m.members.iter().map(|member| member.name.clone()))
+            .flat_map(|m| {
+                m.members.iter().map(|member| {
+                    (
+                        (m.role.clone(), member.name.clone()),
+                        (member.inherit(), member.admin()),
+                    )
+                })
+            })
             .collect();
         let asserted_roles: BTreeSet<String> = expanded
             .grants
@@ -2819,6 +2917,28 @@ impl PostgresPolicySpec {
             )
             .filter(not_public)
             .chain(membership_roles.iter().cloned())
+            .collect();
+        let referenced_roles: BTreeSet<String> = expanded
+            .roles
+            .iter()
+            .map(|role| role.name.clone())
+            .chain(retired.clone())
+            .chain(
+                manifest
+                    .retirements
+                    .iter()
+                    .filter_map(|r| r.reassign_owned_to.clone()),
+            )
+            .chain(asserted_roles.iter().cloned())
+            .chain(expanded.schemas.iter().filter_map(|s| s.owner.clone()))
+            .chain(
+                expanded
+                    .default_privileges
+                    .iter()
+                    .filter_map(|dp| dp.owner.clone()),
+            )
+            .chain(membership_options.keys().map(|(_, member)| member.clone()))
+            .filter(not_public)
             .collect();
 
         // Inspection covers every declared role, external or not, plus retired
@@ -2853,7 +2973,8 @@ impl PostgresPolicySpec {
             schemas,
             asserted_roles,
             membership_roles,
-            membership_members,
+            referenced_roles,
+            membership_options,
             revoke_reach,
             drop_reach,
             public_databases,
@@ -5321,7 +5442,7 @@ params:
         assert!(
             retiring
                 .overlap_summary(&member)
-                .contains("this policy retires roles the other adds as members: alice")
+                .contains("this policy retires roles the other references: alice")
         );
 
         // Adopt never drops roles, so the same pair is safe there.
@@ -5330,6 +5451,70 @@ params:
             "retirements": [{"role": "alice"}],
         }));
         assert!(!adopt.overlap_summary(&member).contains("retires"));
+    }
+
+    #[test]
+    fn retiring_a_role_another_policy_uses_as_a_schema_owner_conflicts() {
+        let retiring = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "retirements": [{"role": "alice", "drop_owned": true}],
+        }));
+        let owner_reference = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "alice", "external": true}],
+            "schemas": [{"name": "shared", "owner": "alice"}],
+        }));
+        assert!(
+            owner_reference
+                .overlap_summary(&retiring)
+                .contains("the other policy retires roles this one references: alice")
+        );
+    }
+
+    #[test]
+    fn one_membership_with_different_options_conflicts() {
+        let inheriting = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "memberships": [{"role": "pg_monitor", "members": [{"name": "alice", "inherit": true}]}],
+        }));
+        let not_inheriting = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "memberships": [{"role": "pg_monitor", "members": [{"name": "alice", "inherit": false}]}],
+        }));
+        assert!(
+            inheriting
+                .overlap_summary(&not_inheriting)
+                .contains("different inherit or admin options: alice in pg_monitor")
+        );
+
+        // The same edge with the same options is not a conflict.
+        let same = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "memberships": [{"role": "pg_monitor", "members": [{"name": "alice"}]}],
+        }));
+        assert!(!inheriting.overlap_summary(&same).contains("options"));
+    }
+
+    #[test]
+    fn a_routine_and_its_signature_are_compared_as_one() {
+        let routine = |name: &str, ensure: &str| {
+            claims_of(serde_json::json!({
+                "reconciliation_mode": "additive",
+                "grants": [{
+                    "role": "PUBLIC",
+                    "privileges": ["EXECUTE"],
+                    "object": {"type": "function", "schema": "shared", "name": name},
+                    "ensure": ensure,
+                }],
+            }))
+        };
+        let bare = routine("f", "present");
+        let signed = routine("f(integer)", "absent");
+        assert!(
+            bare.overlap_summary(&signed)
+                .contains("same routine privilege: EXECUTE on shared.f for PUBLIC")
+        );
+        assert!(!bare.overlaps(&routine("g(integer)", "absent")));
     }
 
     #[test]

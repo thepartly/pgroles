@@ -249,9 +249,16 @@ Two policies conflict when one can undo the other's work:
 - both manage the same role (neither declares it `external: true`), or one
   retires a role the other manages;
 - both declare the same schema under `schemas`;
-- one grants a privilege the other declares `ensure: absent`;
+- one grants a privilege the other declares `ensure: absent`. Function names
+  are compared without their argument lists, because `f` and `f(integer)` can
+  name the same function;
 - one adds members to a role the other manages;
-- one is `authoritative` and retires a role the other adds as a member;
+- one is `authoritative` and retires a role the other references in any way:
+  as a declared or external role, grantee, member, or schema or
+  default-privilege owner. Retirement drops the role and can drop or reassign
+  what it owns;
+- both declare the same membership with different `inherit` or `admin`
+  options;
 - one is `adopt` or `authoritative`, declares a role (external or not), and the
   other grants to that role or adds members to it. Those modes revoke
   undeclared privileges of every role they declare, and undeclared members of
