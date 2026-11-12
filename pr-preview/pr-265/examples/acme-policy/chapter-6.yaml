@@ -1,0 +1,48 @@
+default_owner: app_owner
+
+roles:
+  - name: alice
+    login: true
+  - name: bob
+    login: true
+  - name: reporting_app
+    login: true
+  - name: deploy
+    login: true
+  - name: orders_reader
+  - name: app_owner
+
+schemas:
+  - name: app
+    owner: app_owner
+
+grants:
+  - role: orders_reader
+    privileges: [USAGE]
+    object: { type: schema, name: app }
+  - role: orders_reader
+    privileges: [SELECT]
+    object: { type: table, schema: app, name: "*" }
+
+default_privileges:
+  - owner: app_owner
+    scope: { type: schema, schema: app }
+    grant:
+      - role: orders_reader
+        privileges: [SELECT]
+        on_type: table
+
+memberships:
+  - role: orders_reader
+    members:
+      - name: bob
+      - name: reporting_app
+  - role: app_owner
+    members:
+      - name: deploy
+
+retirements:
+  - role: priya
+    reassign_owned_to: app_owner
+    drop_owned: true
+    terminate_sessions: true
