@@ -52,7 +52,8 @@ For workflows, see [operator guidance](/docs/operator), [approval](/docs/operato
 | ` spec.connection.secretRef ` | **object; optional.** Reference to a Kubernetes Secret containing a connection URL. Mutually exclusive with &#96;params&#96;. **Constraints:** ` {"nullable":true,"required":["name"]} `. |
 | ` spec.connection.secretRef.name ` | **string; required.** Name of the Secret. **Constraints:** ` {"maxLength":253,"minLength":1} `. |
 | ` spec.delegations ` | **array; optional.** What each namespace may manage on this database. A policy from a namespace no delegation names is rejected. **Default:** ` [] `. |
-| ` spec.delegations[] ` | **object; item or branch.** Authority the database owner grants to a set of namespaces. **Constraints:** ` {"required":["namespaces"]} `. |
+| ` spec.delegations[] ` | **object; item or branch.** Authority the database owner grants to a set of namespaces. **Constraints:** ` {"required":["name","namespaces"]} `. |
+| ` spec.delegations[].name ` | **string; required.** Unique among this database's delegations. Attached policies' status names the delegations that admitted them. **Constraints:** ` {"maxLength":63,"minLength":1} `. |
 | ` spec.delegations[].namespaces ` | **array; required.** Namespaces this delegation applies to; &#96;&#42;&#96; matches every namespace. |
 | ` spec.delegations[].namespaces[] ` | **string; item or branch.** Constraints on this array item, map value, or conditional schema. |
 | ` spec.delegations[].roles ` | **array; optional.** Roles those namespaces may define or retire. A trailing &#96;&#42;&#96; matches by prefix. **Default:** ` [] `. |
@@ -98,12 +99,15 @@ For workflows, see [operator guidance](/docs/operator), [approval](/docs/operato
 | ` status.attached ` | **array; optional.** Every policy attached to this database, in precedence order. **Default:** ` [] `. |
 | ` status.attached[] ` | **object; item or branch.** The outcome for one attached policy. **Constraints:** ` {"required":["accepted","name","namespace"]} `. |
 | ` status.attached[].accepted ` | **boolean; required.** Whether the policy's current generation is composed. |
+| ` status.attached[].delegations ` | **array; optional.** The delegations whose scope admitted the composed content. |
+| ` status.attached[].delegations[] ` | **string; item or branch.** Constraints on this array item, map value, or conditional schema. |
 | ` status.attached[].message ` | **string; optional.** Details of the rejection. **Constraints:** ` {"nullable":true} `. |
 | ` status.attached[].name ` | **string; required.** Name of the attached &#96;PostgresPolicy&#96;. |
 | ` status.attached[].namespace ` | **string; required.** Namespace of the attached &#96;PostgresPolicy&#96;. |
 | ` status.attached[].reason ` | **string; optional.** Why the current generation was rejected. **Constraints:** ` {"nullable":true} `. |
 | ` status.attached[].servingContent ` | **string; optional.** The content of &#96;servingGeneration&#96;, kept so a rejected edit can fall back to it. **Constraints:** ` {"nullable":true} `. |
 | ` status.attached[].servingGeneration ` | **integer; optional.** The generation whose content is composed: the current one when accepted, an earlier one while a newer edit is rejected. **Constraints:** ` {"format":"int64","nullable":true} `. |
+| ` status.attached[].uid ` | **string; optional.** UID of the attached &#96;PostgresPolicy&#96;. Retained content belongs to this object: a policy deleted and re-created under the same name starts afresh. **Constraints:** ` {"nullable":true} `. |
 | ` status.composedPolicy ` | **string; optional.** The operator-owned &#96;PostgresPolicy&#96; carrying the composition. **Constraints:** ` {"nullable":true} `. |
 | ` status.conditions ` | **array; optional.** Standard Kubernetes conditions; &#96;Ready&#96; mirrors the composed policy. **Default:** ` [] `. |
 | ` status.conditions[] ` | **object; item or branch.** A condition on the &#96;PostgresPolicy&#96; resource. **Constraints:** ` {"required":["status","type"]} `. |

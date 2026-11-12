@@ -269,6 +269,12 @@
           "items": {
             "description": "Authority the database owner grants to a set of namespaces.",
             "properties": {
+              "name": {
+                "description": "Unique among this database's delegations. Attached policies' status\nnames the delegations that admitted them.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              },
               "namespaces": {
                 "description": "Namespaces this delegation applies to; `*` matches every namespace.",
                 "items": {
@@ -316,6 +322,7 @@
               }
             },
             "required": [
+              "name",
               "namespaces"
             ],
             "type": "object"
@@ -561,6 +568,13 @@
                 "description": "Whether the policy's current generation is composed.",
                 "type": "boolean"
               },
+              "delegations": {
+                "description": "The delegations whose scope admitted the composed content.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "message": {
                 "description": "Details of the rejection.",
                 "nullable": true,
@@ -589,6 +603,11 @@
                 "format": "int64",
                 "nullable": true,
                 "type": "integer"
+              },
+              "uid": {
+                "description": "UID of the attached `PostgresPolicy`. Retained content belongs to this\nobject: a policy deleted and re-created under the same name starts\nafresh.",
+                "nullable": true,
+                "type": "string"
               }
             },
             "required": [

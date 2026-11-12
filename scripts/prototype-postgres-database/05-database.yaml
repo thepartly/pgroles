@@ -10,11 +10,14 @@ spec:
   reconciliationMode: authoritative
   executorRole: pgroles_executor
   delegations:
-    - namespaces: [platform]
+    - name: platform
+      namespaces: [platform]
       roles: ["team_*", "alice_*", "bob_*"]
-    - namespaces: [billing]
+    - name: billing
+      namespaces: [billing]
       roles: ["billing_*"]
       schemas: [{name: billing, facets: [owner, bindings]}]
-    - namespaces: [shipping]
+    - name: shipping
+      namespaces: [shipping]
       roles: ["shipping_*"]
       schemas: [{name: shipping, facets: [owner, bindings]}]

@@ -19,7 +19,7 @@ use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use pgroles_core::attachment::{
-    AttachedPolicy, DelegatedSchema, Delegation, RejectionReason, Verdict, compose_attached,
+    AttachedPolicy, DelegatedSchema, Delegation, Verdict, compose_attached,
 };
 use pgroles_core::composition::{PolicyFragment, SharedPolicy};
 use pgroles_core::manifest::SchemaBindingFacet;
@@ -105,6 +105,10 @@ fn default_interval() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DelegationSpec {
+    /// Unique among this database's delegations. Attached policies' status
+    /// names the delegations that admitted them.
+    #[schemars(length(min = 1, max = 63))]
+    pub name: String,
     /// Namespaces this delegation applies to; `*` matches every namespace.
     pub namespaces: Vec<String>,
     /// Roles those namespaces may define or retire. A trailing `*` matches by
@@ -155,6 +159,14 @@ pub struct AttachedPolicyStatus {
     pub namespace: String,
     /// Name of the attached `PostgresPolicy`.
     pub name: String,
+    /// UID of the attached `PostgresPolicy`. Retained content belongs to this
+    /// object: a policy deleted and re-created under the same name starts
+    /// afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// The delegations whose scope admitted the composed content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegations: Vec<String>,
     /// Whether the policy's current generation is composed.
     pub accepted: bool,
     /// Why the current generation was rejected.
@@ -181,6 +193,8 @@ pub enum DatabaseError {
     Serde(#[from] serde_json::Error),
     #[error("resource has no namespace")]
     NoNamespace,
+    #[error("invalid PostgresDatabase: {0}")]
+    InvalidSpec(String),
 }
 
 /// Whether `policy` attaches to the database `namespace/name`.
@@ -193,6 +207,185 @@ pub fn attaches_to(policy: &PostgresPolicy, namespace: &str, name: &str) -> bool
         && reference.namespace.as_deref().unwrap_or(&policy_namespace) == namespace
 }
 
+/// Everything one reconcile decides, before anything is written.
+#[derive(Debug)]
+pub struct DatabasePlan {
+    /// Verdict per attached policy, keyed `namespace/name`.
+    pub verdicts: BTreeMap<String, Verdict>,
+    /// The database's record of every attached policy, in precedence order,
+    /// including the content each one is served from.
+    pub attached: Vec<AttachedPolicyStatus>,
+    /// The composed manifest, when any policy is accepted.
+    pub composed: Option<pgroles_core::manifest::PolicyManifest>,
+}
+
+/// Decide verdicts, retained content and the composed manifest for the
+/// policies attached to `database`. Pure, so the decision can be tested
+/// without an API server.
+pub fn plan_database(
+    database: &PostgresDatabase,
+    attached: &[PostgresPolicy],
+) -> Result<DatabasePlan, DatabaseError> {
+    let mut names = std::collections::BTreeSet::new();
+    for delegation in &database.spec.delegations {
+        if !names.insert(delegation.name.as_str()) {
+            return Err(DatabaseError::InvalidSpec(format!(
+                "delegation name {} is used more than once",
+                delegation.name
+            )));
+        }
+    }
+
+    let shared = shared_policy(&database.spec)?;
+    let delegations: Vec<Delegation> = database
+        .spec
+        .delegations
+        .iter()
+        .map(|delegation| Delegation {
+            name: delegation.name.clone(),
+            namespaces: delegation.namespaces.clone(),
+            roles: delegation.roles.clone(),
+            schemas: delegation
+                .schemas
+                .iter()
+                .map(|schema| DelegatedSchema {
+                    name: schema.name.clone(),
+                    facets: schema.facets.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let previous: BTreeMap<String, AttachedPolicyStatus> = database
+        .status
+        .iter()
+        .flat_map(|status| status.attached.iter())
+        .map(|entry| (format!("{}/{}", entry.namespace, entry.name), entry.clone()))
+        .collect();
+    // The record kept for this object, never one left by a deleted policy
+    // that had the same name.
+    let kept = |policy: &PostgresPolicy, key: &str| {
+        previous
+            .get(key)
+            .filter(|entry| entry.uid.is_some() && entry.uid == policy.metadata.uid)
+    };
+
+    let mut current_content: BTreeMap<String, (Option<i64>, String)> = BTreeMap::new();
+    let mut uids: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut candidates = Vec::new();
+    for policy in attached {
+        let key = policy_key(policy);
+        let fragment = fragment_of(&policy.spec);
+        current_content.insert(
+            key.clone(),
+            (
+                policy.metadata.generation,
+                serde_json::to_string(&fragment)?,
+            ),
+        );
+        uids.insert(key.clone(), policy.metadata.uid.clone());
+        // Execution settings and profiles belong to the database owner. Such
+        // content is refused rather than silently dropped, and refused like
+        // any other rejected edit, so the last accepted content still holds
+        // the policy's claims.
+        let invalid = (!policy.spec.profiles.is_empty()).then(|| {
+            "profiles are defined on the PostgresDatabase, not on an attached policy".to_string()
+        });
+        let last_accepted = kept(policy, &key)
+            .filter(|entry| entry.serving_generation != policy.metadata.generation)
+            .and_then(|entry| entry.serving_content.as_deref())
+            .map(serde_json::from_str::<PolicyFragment>)
+            .transpose()?;
+        candidates.push(AttachedPolicy {
+            last_accepted,
+            invalid,
+            namespace: policy.namespace().unwrap_or_default(),
+            name: policy.name_any(),
+            created_at: serde_json::to_value(&policy.metadata.creation_timestamp)?
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            fragment,
+        });
+    }
+
+    let outcome = compose_attached(&shared, &delegations, &candidates);
+    let mut attached_status = Vec::with_capacity(outcome.verdicts.len());
+    let mut verdicts = BTreeMap::new();
+    for (key, verdict) in outcome.verdicts {
+        let Some((policy_namespace, policy_name)) = key.split_once('/') else {
+            continue;
+        };
+        let base = AttachedPolicyStatus {
+            namespace: policy_namespace.to_string(),
+            name: policy_name.to_string(),
+            uid: uids.get(&key).cloned().flatten(),
+            delegations: outcome.delegated_by.get(&key).cloned().unwrap_or_default(),
+            accepted: false,
+            reason: None,
+            message: None,
+            serving_generation: None,
+            serving_content: None,
+        };
+        let entry = match &verdict {
+            Verdict::Accepted => {
+                let (generation, content) = current_content.get(&key).cloned().unzip();
+                AttachedPolicyStatus {
+                    accepted: true,
+                    serving_generation: generation.flatten(),
+                    serving_content: content,
+                    ..base
+                }
+            }
+            Verdict::Retained { reason, message } => {
+                // Retention only ever uses this object's own record.
+                let previous = previous
+                    .get(&key)
+                    .filter(|entry| entry.uid.is_some() && Some(&entry.uid) == uids.get(&key));
+                AttachedPolicyStatus {
+                    reason: Some(reason.as_str().to_string()),
+                    message: Some(message.clone()),
+                    serving_generation: previous.and_then(|entry| entry.serving_generation),
+                    serving_content: previous.and_then(|entry| entry.serving_content.clone()),
+                    ..base
+                }
+            }
+            Verdict::Rejected { reason, message } => AttachedPolicyStatus {
+                reason: Some(reason.as_str().to_string()),
+                message: Some(message.clone()),
+                delegations: Vec::new(),
+                ..base
+            },
+        };
+        attached_status.push(entry);
+        verdicts.insert(key, verdict);
+    }
+
+    let composed = match outcome.composed {
+        Some(composed) => {
+            let mut manifest = composed.manifest.clone();
+            if let Some(executor) = &database.spec.executor_role {
+                declare_executor_memberships(&mut manifest, &composed.expanded, executor)?;
+            }
+            Some(manifest)
+        }
+        None => None,
+    };
+    Ok(DatabasePlan {
+        verdicts,
+        attached: attached_status,
+        composed,
+    })
+}
+
+fn policy_key(policy: &PostgresPolicy) -> String {
+    format!(
+        "{}/{}",
+        policy.namespace().unwrap_or_default(),
+        policy.name_any()
+    )
+}
+
 pub async fn reconcile_database(
     database: Arc<PostgresDatabase>,
     ctx: Arc<OperatorContext>,
@@ -200,6 +393,7 @@ pub async fn reconcile_database(
     let namespace = database.namespace().ok_or(DatabaseError::NoNamespace)?;
     let name = database.name_any();
     let client = ctx.kube_client.clone();
+    let databases: Api<PostgresDatabase> = Api::namespaced(client.clone(), &namespace);
 
     let all_policies: Api<PostgresPolicy> = match &ctx.watch_namespace {
         Some(watched) => Api::namespaced(client.clone(), watched),
@@ -214,104 +408,43 @@ pub async fn reconcile_database(
         })
         .collect();
 
-    let shared = shared_policy(&database.spec)?;
-    let delegations: Vec<Delegation> = database
-        .spec
-        .delegations
-        .iter()
-        .map(|delegation| Delegation {
-            namespaces: delegation.namespaces.clone(),
-            roles: delegation.roles.clone(),
-            schemas: delegation
-                .schemas
-                .iter()
-                .map(|schema| DelegatedSchema {
-                    name: schema.name.clone(),
-                    facets: schema.facets.clone(),
-                })
-                .collect(),
-        })
-        .collect();
-
-    // Execution settings belong to the database owner. Content that only the
-    // owner may set is refused up front rather than silently dropped.
-    let previous: BTreeMap<String, AttachedPolicyStatus> = database
-        .status
-        .iter()
-        .flat_map(|status| status.attached.iter())
-        .map(|entry| (format!("{}/{}", entry.namespace, entry.name), entry.clone()))
-        .collect();
-    let mut current_content: BTreeMap<String, (Option<i64>, String)> = BTreeMap::new();
-    let mut verdicts: BTreeMap<String, Verdict> = BTreeMap::new();
-    let mut candidates = Vec::new();
-    for policy in &attached {
-        let key = format!(
-            "{}/{}",
-            policy.namespace().unwrap_or_default(),
-            policy.name_any()
-        );
-        if !policy.spec.profiles.is_empty() {
-            verdicts.insert(
-                key,
-                Verdict::Rejected {
-                    reason: RejectionReason::Invalid,
-                    message: "profiles are defined on the PostgresDatabase, not on an attached \
-                              policy"
-                        .to_string(),
-                },
+    let plan = match plan_database(&database, &attached) {
+        Ok(plan) => plan,
+        Err(DatabaseError::InvalidSpec(message)) => {
+            // Leave the composed policy as it is: an owner's typo must not
+            // withdraw what every team already has.
+            let mut status = database.status.clone().unwrap_or_default();
+            status.conditions = with_ready(
+                &status.conditions,
+                condition("Ready", false, "InvalidSpec", &message),
             );
-            continue;
+            write_database_status(&databases, &database, &status).await?;
+            return Ok(Action::requeue(Duration::from_secs(60)));
         }
-        let fragment = fragment_of(&policy.spec);
-        current_content.insert(
-            key.clone(),
-            (
-                policy.metadata.generation,
-                serde_json::to_string(&fragment)?,
-            ),
-        );
-        let last_accepted = previous
-            .get(&key)
-            .filter(|entry| entry.serving_generation != policy.metadata.generation)
-            .and_then(|entry| entry.serving_content.as_deref())
-            .map(serde_json::from_str::<PolicyFragment>)
-            .transpose()?;
-        candidates.push(AttachedPolicy {
-            last_accepted,
-            namespace: policy.namespace().unwrap_or_default(),
-            name: policy.name_any(),
-            created_at: serde_json::to_value(&policy.metadata.creation_timestamp)?
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            fragment,
-        });
-    }
-
-    let outcome = compose_attached(&shared, &delegations, &candidates);
-    let mut order: Vec<String> = outcome
-        .verdicts
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect();
-    for (key, verdict) in outcome.verdicts {
-        verdicts.insert(key, verdict);
-    }
-    // Pre-rejected policies have no precedence position; list them last.
-    for key in verdicts.keys() {
-        if !order.contains(key) {
-            order.push(key.clone());
-        }
-    }
+        Err(error) => return Err(error),
+    };
 
     let composed_name = format!("{name}-composed");
+    let accepted = plan
+        .attached
+        .iter()
+        .filter(|entry| entry.serving_generation.is_some())
+        .count() as i64;
+    let mut status = database.status.clone().unwrap_or_default();
+    status.rejected_policies = plan.attached.len() as i64 - accepted;
+    status.accepted_policies = accepted;
+    status.attached = plan.attached.clone();
+    status.composed_policy = plan.composed.as_ref().map(|_| composed_name.clone());
+
+    // Record what each policy is served from before composing it. If the
+    // composed policy were patched first and this write then failed, the next
+    // rejected edit would find no last accepted content, and a younger policy
+    // could take the roles the edit was supposed to keep.
+    write_database_status(&databases, &database, &status).await?;
+
     let policies_in_db_ns: Api<PostgresPolicy> = Api::namespaced(client.clone(), &namespace);
-    if let Some(composed) = &outcome.composed {
-        let mut manifest = composed.manifest.clone();
-        if let Some(executor) = &database.spec.executor_role {
-            declare_executor_memberships(&mut manifest, &composed.expanded, executor)?;
-        }
-        let body = composed_policy_body(&database, &composed_name, &manifest)?;
+    if let Some(manifest) = &plan.composed {
+        let body = composed_policy_body(&database, &composed_name, manifest)?;
         policies_in_db_ns
             .patch(
                 &composed_name,
@@ -328,135 +461,95 @@ pub async fn reconcile_database(
     // Each attached policy learns its own verdict, and — once accepted — how
     // the shared plan it is part of is doing.
     for policy in &attached {
-        let key = format!(
-            "{}/{}",
-            policy.namespace().unwrap_or_default(),
-            policy.name_any()
-        );
-        let Some(verdict) = verdicts.get(&key) else {
+        let Some(verdict) = plan.verdicts.get(&policy_key(policy)) else {
             continue;
         };
-        let mut status = policy.status.clone().unwrap_or_default();
-        status.set_condition(accepted_condition(verdict, &namespace, &name));
+        let mut policy_status = policy.status.clone().unwrap_or_default();
+        policy_status.set_condition(accepted_condition(verdict, &namespace, &name));
         match (verdict, &composed_ready) {
             (Verdict::Accepted, Some(ready)) => {
                 // This reconcile composed the policy's current content and the
                 // composed policy has reconciled that composition, so the
                 // outcome describes this generation of the attached policy.
                 if ready.status == "True" {
-                    status.observed_generation = policy.metadata.generation;
+                    policy_status.observed_generation = policy.metadata.generation;
                 }
-                status.set_condition(ready.clone())
+                policy_status.set_condition(ready.clone())
             }
-            (Verdict::Accepted, None) => status.set_condition(condition(
-                "Ready",
-                false,
-                "Composing",
-                "waiting for the composed policy to reconcile",
-            )),
+            (Verdict::Accepted | Verdict::Retained { .. }, None) => {
+                policy_status.set_condition(condition(
+                    "Ready",
+                    false,
+                    "Composing",
+                    "waiting for the composed policy to reconcile",
+                ))
+            }
             // The previous content still converges; report how it is doing
             // without claiming the current generation.
-            (Verdict::Retained { .. }, Some(ready)) => status.set_condition(ready.clone()),
-            (Verdict::Retained { .. }, None) => status.set_condition(condition(
+            (Verdict::Retained { .. }, Some(ready)) => policy_status.set_condition(ready.clone()),
+            (Verdict::Rejected { reason, message }, _) => {
+                policy_status.set_condition(condition("Ready", false, reason.as_str(), message))
+            }
+        }
+        patch_policy_status(&client, policy, &policy_status).await?;
+    }
+
+    status.conditions = with_ready(
+        &status.conditions,
+        match &composed_ready {
+            Some(ready) => ready.clone(),
+            None if accepted == 0 => condition(
+                "Ready",
+                false,
+                "NoAcceptedPolicies",
+                "no attached policy is accepted",
+            ),
+            None => condition(
                 "Ready",
                 false,
                 "Composing",
                 "waiting for the composed policy to reconcile",
-            )),
-            (Verdict::Rejected { reason, message }, _) => {
-                status.set_condition(condition("Ready", false, reason.as_str(), message))
-            }
-        }
-        patch_policy_status(&client, policy, &status).await?;
-    }
+            ),
+        },
+    );
+    write_database_status(&databases, &database, &status).await?;
 
-    let attached_status: Vec<AttachedPolicyStatus> = order
-        .iter()
-        .filter_map(|key| {
-            let verdict = verdicts.get(key)?;
-            let (policy_namespace, policy_name) = key.split_once('/')?;
-            let entry = |accepted, reason: Option<&RejectionReason>, message: Option<&String>| {
-                AttachedPolicyStatus {
-                    namespace: policy_namespace.to_string(),
-                    name: policy_name.to_string(),
-                    accepted,
-                    reason: reason.map(|reason| reason.as_str().to_string()),
-                    message: message.cloned(),
-                    serving_generation: None,
-                    serving_content: None,
-                }
-            };
-            Some(match verdict {
-                Verdict::Accepted => {
-                    let (generation, content) = current_content.get(key).cloned()?;
-                    AttachedPolicyStatus {
-                        serving_generation: generation,
-                        serving_content: Some(content),
-                        ..entry(true, None, None)
-                    }
-                }
-                Verdict::Retained { reason, message } => {
-                    let kept = previous.get(key)?;
-                    AttachedPolicyStatus {
-                        serving_generation: kept.serving_generation,
-                        serving_content: kept.serving_content.clone(),
-                        ..entry(false, Some(reason), Some(message))
-                    }
-                }
-                Verdict::Rejected { reason, message } => entry(false, Some(reason), Some(message)),
-            })
-        })
-        .collect();
-    let accepted = attached_status
-        .iter()
-        .filter(|a| a.serving_generation.is_some())
-        .count() as i64;
-    let mut status = database.status.clone().unwrap_or_default();
-    status.rejected_policies = attached_status.len() as i64 - accepted;
-    status.accepted_policies = accepted;
-    status.attached = attached_status;
-    status.composed_policy = outcome.composed.as_ref().map(|_| composed_name.clone());
+    // The composed policy's readiness is mirrored on a timer rather than by
+    // watching its status, which every reconcile of it rewrites.
+    Ok(Action::requeue(Duration::from_secs(15)))
+}
+
+fn with_ready(conditions: &[PolicyCondition], ready: PolicyCondition) -> Vec<PolicyCondition> {
     let mut wrapper = PostgresPolicyStatus {
-        conditions: status.conditions.clone(),
+        conditions: conditions.to_vec(),
         ..Default::default()
     };
-    wrapper.set_condition(match &composed_ready {
-        Some(ready) => ready.clone(),
-        None if accepted == 0 => condition(
-            "Ready",
-            false,
-            "NoAcceptedPolicies",
-            "no attached policy is accepted",
-        ),
-        None => condition(
-            "Ready",
-            false,
-            "Composing",
-            "waiting for the composed policy to reconcile",
-        ),
-    });
-    status.conditions = wrapper.conditions;
+    wrapper.set_condition(ready);
+    wrapper.conditions
+}
 
-    let databases: Api<PostgresDatabase> = Api::namespaced(client, &namespace);
+async fn write_database_status(
+    databases: &Api<PostgresDatabase>,
+    database: &PostgresDatabase,
+    status: &PostgresDatabaseStatus,
+) -> Result<(), DatabaseError> {
     if database
         .status
         .as_ref()
         .map(serde_json::to_value)
         .transpose()?
-        != Some(serde_json::to_value(&status)?)
+        == Some(serde_json::to_value(status)?)
     {
-        databases
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(json!({ "status": status })),
-            )
-            .await?;
+        return Ok(());
     }
-
-    // The composed policy's readiness is mirrored on a timer rather than by
-    // watching its status, which every reconcile of it rewrites.
-    Ok(Action::requeue(Duration::from_secs(15)))
+    databases
+        .patch_status(
+            &database.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({ "status": status })),
+        )
+        .await?;
+    Ok(())
 }
 
 pub fn database_error_policy(
@@ -644,4 +737,226 @@ async fn patch_policy_status(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database(status: Option<PostgresDatabaseStatus>) -> PostgresDatabase {
+        let mut database: PostgresDatabase = serde_json::from_value(json!({
+            "apiVersion": "pgroles.io/v1alpha1",
+            "kind": "PostgresDatabase",
+            "metadata": {"name": "appdb", "namespace": "platform", "uid": "db-uid"},
+            "spec": {
+                "connection": {"secretRef": {"name": "appdb-owner"}},
+                "delegations": [
+                    {"name": "platform", "namespaces": ["platform"], "roles": ["team_*"]},
+                    {
+                        "name": "billing",
+                        "namespaces": ["billing"],
+                        "roles": ["billing_*"],
+                        "schemas": [{"name": "billing", "facets": ["owner", "bindings"]}],
+                    },
+                ],
+            },
+        }))
+        .expect("test database deserializes");
+        database.status = status;
+        database
+    }
+
+    fn policy(
+        namespace: &str,
+        name: &str,
+        uid: &str,
+        generation: i64,
+        created: &str,
+        spec: serde_json::Value,
+    ) -> PostgresPolicy {
+        let mut spec = spec;
+        spec["databaseRef"] = json!({"name": "appdb", "namespace": "platform"});
+        serde_json::from_value(json!({
+            "apiVersion": "pgroles.io/v1alpha1",
+            "kind": "PostgresPolicy",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "uid": uid,
+                "generation": generation,
+                "creationTimestamp": created,
+            },
+            "spec": spec,
+        }))
+        .expect("test policy deserializes")
+    }
+
+    fn billing_roles() -> serde_json::Value {
+        json!({"roles": [{"name": "billing_api", "login": true}]})
+    }
+
+    fn squatter() -> PostgresPolicy {
+        policy(
+            "billing",
+            "squatter",
+            "squatter-uid",
+            1,
+            "2026-01-03T00:00:00Z",
+            json!({"roles": [{"name": "billing_api", "superuser": true}]}),
+        )
+    }
+
+    /// Plan once with billing at generation 1, and return the database as it
+    /// would be after the status write.
+    fn after_first_plan() -> PostgresDatabase {
+        let billing = policy(
+            "billing",
+            "app",
+            "billing-uid",
+            1,
+            "2026-01-02T00:00:00Z",
+            billing_roles(),
+        );
+        let plan = plan_database(&database(None), &[billing]).unwrap();
+        assert!(plan.attached[0].accepted);
+        database(Some(PostgresDatabaseStatus {
+            attached: plan.attached,
+            ..Default::default()
+        }))
+    }
+
+    fn verdict_of<'a>(plan: &'a DatabasePlan, key: &str) -> &'a Verdict {
+        plan.verdicts
+            .get(key)
+            .unwrap_or_else(|| panic!("no verdict for {key}"))
+    }
+
+    #[test]
+    fn an_edit_setting_profiles_keeps_the_last_accepted_content() {
+        let database = after_first_plan();
+        let mut edited = billing_roles();
+        edited["profiles"] = json!({"reader": {"grants": []}});
+        let billing = policy(
+            "billing",
+            "app",
+            "billing-uid",
+            2,
+            "2026-01-02T00:00:00Z",
+            edited,
+        );
+        let plan = plan_database(&database, &[billing, squatter()]).unwrap();
+        assert!(matches!(
+            verdict_of(&plan, "billing/app"),
+            Verdict::Retained { .. }
+        ));
+        assert!(matches!(
+            verdict_of(&plan, "billing/squatter"),
+            Verdict::Rejected { .. }
+        ));
+        let manifest = plan.composed.unwrap();
+        assert!(
+            manifest
+                .roles
+                .iter()
+                .all(|role| role.name != "billing_api" || role.superuser != Some(true))
+        );
+        let entry = &plan.attached[0];
+        assert_eq!(entry.serving_generation, Some(1));
+        assert_eq!(entry.delegations, vec!["billing".to_string()]);
+    }
+
+    #[test]
+    fn a_recreated_policy_does_not_inherit_its_predecessors_content() {
+        let database = after_first_plan();
+        // Deleted and re-created under the same name with a broken edit: the
+        // retained content belonged to the old object, so nothing holds
+        // billing_api and the squatter, next in line, takes it.
+        let mut broken = billing_roles();
+        broken["memberships"] =
+            json!([{"role": "team_payments", "members": [{"name": "billing_api"}]}]);
+        let recreated = policy(
+            "billing",
+            "app",
+            "new-uid",
+            2,
+            "2026-01-04T00:00:00Z",
+            broken,
+        );
+        let plan = plan_database(&database, &[recreated, squatter()]).unwrap();
+        assert!(matches!(
+            verdict_of(&plan, "billing/app"),
+            Verdict::Rejected { .. }
+        ));
+        assert_eq!(verdict_of(&plan, "billing/squatter"), &Verdict::Accepted);
+
+        // The same broken edit on the original object keeps its content.
+        let mut broken = billing_roles();
+        broken["memberships"] =
+            json!([{"role": "team_payments", "members": [{"name": "billing_api"}]}]);
+        let edited = policy(
+            "billing",
+            "app",
+            "billing-uid",
+            2,
+            "2026-01-02T00:00:00Z",
+            broken,
+        );
+        let plan = plan_database(&database, &[edited, squatter()]).unwrap();
+        assert!(matches!(
+            verdict_of(&plan, "billing/app"),
+            Verdict::Retained { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_delegation_names_are_refused_before_anything_is_composed() {
+        let mut database = database(None);
+        database.spec.delegations[1].name = "platform".into();
+        let billing = policy(
+            "billing",
+            "app",
+            "billing-uid",
+            1,
+            "2026-01-02T00:00:00Z",
+            billing_roles(),
+        );
+        assert!(matches!(
+            plan_database(&database, &[billing]),
+            Err(DatabaseError::InvalidSpec(_))
+        ));
+    }
+
+    #[test]
+    fn roles_attached_policies_only_reference_are_composed_as_external() {
+        let reader = |namespace: &str, uid: &str, created: &str| {
+            policy(
+                namespace,
+                "reader",
+                uid,
+                1,
+                created,
+                json!({
+                    "roles": [{"name": "app_runtime", "external": true}],
+                    "grants": [{
+                        "role": "app_runtime",
+                        "privileges": ["USAGE"],
+                        "object": {"type": "schema", "name": "billing"},
+                    }],
+                }),
+            )
+        };
+        let plan = plan_database(
+            &database(None),
+            &[reader("billing", "b-uid", "2026-01-02T00:00:00Z")],
+        )
+        .unwrap();
+        assert_eq!(verdict_of(&plan, "billing/reader"), &Verdict::Accepted);
+        let manifest = plan.composed.unwrap();
+        assert!(
+            manifest
+                .roles
+                .iter()
+                .any(|role| role.name == "app_runtime" && role.external)
+        );
+    }
 }
