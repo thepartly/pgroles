@@ -81,7 +81,13 @@
                     "type": "string"
                   },
                   "connection": {
-                    "description": "Database connection configuration.",
+                    "default": {
+                      "params": null,
+                      "requirePhysicalIdentity": null,
+                      "secretKey": null,
+                      "secretRef": null
+                    },
+                    "description": "Database connection configuration. Leave unset when `databaseRef`\nattaches the policy to a `PostgresDatabase`, which owns the connection.",
                     "properties": {
                       "params": {
                         "description": "Structured connection parameters. Each field is either a plain string\nor a reference to a Secret key. Mutually exclusive with `secretRef`.",
@@ -328,6 +334,29 @@
                         "type": "object"
                       }
                     },
+                    "type": "object"
+                  },
+                  "databaseRef": {
+                    "description": "Attach this policy to a `PostgresDatabase` instead of connecting\ndirectly. The database owner's delegations decide what the policy may\nmanage, and the operator composes every attached policy into one plan\nper database.",
+                    "nullable": true,
+                    "properties": {
+                      "name": {
+                        "description": "Name of the `PostgresDatabase`.",
+                        "maxLength": 253,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "namespace": {
+                        "description": "Namespace of the `PostgresDatabase`. Defaults to the policy's own.",
+                        "maxLength": 63,
+                        "minLength": 1,
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
                     "type": "object"
                   },
                   "default_owner": {
@@ -1090,9 +1119,6 @@
                     "type": "boolean"
                   }
                 },
-                "required": [
-                  "connection"
-                ],
                 "type": "object"
               },
               "status": {
@@ -1333,7 +1359,7 @@
                     "type": "array"
                   },
                   "resolved_database_target": {
-                    "description": "The database this policy's connection reached, as the server reports\nit. Other policies compare against this to detect ownership conflicts\non one database reached through different Secrets or namespaces.",
+                    "description": "The database this policy's connection reached, as the server reports\nit. Other policies compare against this to detect ownership conflicts\non one database, or on one server, reached through different Secrets\nor namespaces.",
                     "nullable": true,
                     "properties": {
                       "connection_identity": {
@@ -1342,6 +1368,11 @@
                       },
                       "key": {
                         "description": "Opaque digest of the server-reported identity: `system_identifier`,\n`inet_server_addr()`, `inet_server_port()` and `current_database()`.",
+                        "type": "string"
+                      },
+                      "server_key": {
+                        "description": "Opaque digest of the server alone: the same identity without\n`current_database()`. Roles and memberships live in catalogs that every\ndatabase of a server shares, so policies on different databases of one\nserver are compared on those. A target without one is compared per\ndatabase only.",
+                        "nullable": true,
                         "type": "string"
                       }
                     },

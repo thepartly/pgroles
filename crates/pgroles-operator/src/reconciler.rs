@@ -1254,7 +1254,7 @@ async fn reconcile_apply_inner(
     update_status(ctx, resource, |status| {
         status.managed_database_identity = Some(identity.as_str().to_string());
         status.resolved_database_target = resolved_target.clone();
-        status.owned_roles = ownership.roles.iter().cloned().collect();
+        status.owned_roles = ownership.lifecycle_roles.iter().cloned().collect();
         status.owned_schemas = ownership.schemas.iter().cloned().collect();
     })
     .await?;
@@ -3776,19 +3776,34 @@ fn detect_policy_conflict_in_list(
             continue;
         }
 
+        // A peer that never executes SQL, or is suspended, cannot undo
+        // anything. It runs this check itself before it next applies.
+        if other.spec.suspend || other.spec.mode.never_executes() {
+            continue;
+        }
+
         let other_identity = DatabaseIdentity::from_connection(&other_ns, &other.spec.connection);
         let other_resolved = other
             .status
             .as_ref()
             .and_then(|status| status.resolved_database_target.as_ref());
-        if !crate::crd::targets_same_database(
+        let shared = if crate::crd::targets_same_database(
             identity,
             resolved_target,
             &other_identity,
             other_resolved,
         ) {
+            crate::crd::SharedTarget::Database
+        } else if crate::crd::targets_same_server(
+            identity,
+            resolved_target,
+            &other_identity,
+            other_resolved,
+        ) {
+            crate::crd::SharedTarget::Server
+        } else {
             continue;
-        }
+        };
 
         if let Err(error) = other.spec.validate_password_specs(&other_name) {
             tracing::warn!(
@@ -3812,15 +3827,22 @@ fn detect_policy_conflict_in_list(
                 continue;
             }
         };
-        if ownership.overlaps(&other_ownership) {
-            let overlap = ownership.overlap_summary(&other_ownership);
+        let reasons = ownership.conflicts_on(&other_ownership, shared);
+        if !reasons.is_empty() {
+            let overlap = reasons.join("; ");
             if &other_identity == identity {
                 conflicts.push(format!("{other_ns}/{other_name} ({overlap})"));
-            } else {
+            } else if shared == crate::crd::SharedTarget::Database {
                 // Reached through a different Secret or namespace; name it, or
                 // the reader cannot see why the two count as one database.
                 conflicts.push(format!(
                     "{other_ns}/{other_name} via {} ({overlap})",
+                    other_identity.as_str()
+                ));
+            } else {
+                conflicts.push(format!(
+                    "{other_ns}/{other_name} via {}, on another database of the same server \
+                     ({overlap})",
                     other_identity.as_str()
                 ));
             }
@@ -3831,7 +3853,7 @@ fn detect_policy_conflict_in_list(
         None
     } else {
         Some(format!(
-            "policy ownership overlaps with {} on database target {}",
+            "policy conflicts with {} on database target {}",
             conflicts.join(", "),
             identity.as_str()
         ))
@@ -6363,11 +6385,19 @@ mod tests {
         identity: &DatabaseIdentity,
         address: &str,
     ) -> crate::crd::ResolvedDatabaseTarget {
+        server_target_on(identity, address, "app")
+    }
+
+    fn server_target_on(
+        identity: &DatabaseIdentity,
+        address: &str,
+        database: &str,
+    ) -> crate::crd::ResolvedDatabaseTarget {
         crate::crd::ResolvedDatabaseTarget::from_server(
             identity,
             Some("7400000000000000001"),
             &pgroles_inspect::ServerEndpoint {
-                database: "app".to_string(),
+                database: database.to_string(),
                 address: Some(address.to_string()),
                 port: Some(5432),
             },
@@ -6405,6 +6435,235 @@ mod tests {
         .expect("the same database through another Secret and namespace still conflicts");
         assert!(conflict.contains("payments/team-policy via payments/team-db-secret"));
         assert!(conflict.contains("roles: analytics"));
+    }
+
+    /// A policy in `namespace` reaching the shared test database through its
+    /// own Secret, with the given content.
+    fn team_policy(namespace: &str, secret: &str, content: serde_json::Value) -> PostgresPolicy {
+        team_policy_on(namespace, secret, "app", content)
+    }
+
+    /// As [`team_policy`], on `database` of the shared test server.
+    fn team_policy_on(
+        namespace: &str,
+        secret: &str,
+        database: &str,
+        content: serde_json::Value,
+    ) -> PostgresPolicy {
+        let mut spec = content;
+        spec["connection"] = serde_json::json!({"secretRef": {"name": secret}});
+        let mut policy = test_policy_with_spec(
+            "team",
+            serde_json::from_value(spec).expect("test spec deserializes"),
+        );
+        policy.metadata.namespace = Some(namespace.to_string());
+        let identity = DatabaseIdentity::from_connection(namespace, &policy.spec.connection);
+        policy.status = Some(PostgresPolicyStatus {
+            resolved_database_target: Some(server_target_on(&identity, "10.0.0.5", database)),
+            ..Default::default()
+        });
+        policy
+    }
+
+    /// Run conflict detection for `policy` against `peers`, as its reconcile
+    /// would after recording its own target.
+    fn conflicts_for(policy: &PostgresPolicy, peers: Vec<PostgresPolicy>) -> Option<String> {
+        let namespace = policy.namespace().expect("test policies are namespaced");
+        let identity = DatabaseIdentity::from_connection(&namespace, &policy.spec.connection);
+        let ours = policy
+            .status
+            .as_ref()
+            .and_then(|status| status.resolved_database_target.clone());
+        let ownership = policy.spec.ownership_claims().unwrap();
+        detect_policy_conflict_in_list(policy, &identity, ours.as_ref(), &ownership, peers)
+    }
+
+    #[test]
+    fn the_documented_shared_role_setup_does_not_conflict() {
+        // The creator runs in the default (authoritative) mode; the other
+        // team declares the role external and grants on its own schema.
+        let platform = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({
+                "roles": [{"name": "app_runtime"}],
+                "grants": [table_grant("SELECT", "platform", "present")],
+            }),
+        );
+        let billing = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime", "external": true}],
+                "grants": [table_grant("SELECT", "billing", "present")],
+            }),
+        );
+        assert_eq!(conflicts_for(&platform, vec![billing.clone()]), None);
+        assert_eq!(conflicts_for(&billing, vec![platform]), None);
+    }
+
+    #[test]
+    fn policies_on_two_databases_of_one_server_conflict_on_roles() {
+        let platform = team_policy_on(
+            "platform",
+            "platform-executor",
+            "app",
+            serde_json::json!({
+                "roles": [{"name": "team_readers"}],
+            }),
+        );
+        let billing = team_policy_on(
+            "billing",
+            "billing-executor",
+            "billing",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "memberships": [{"role": "team_readers", "members": [{"name": "billing_api"}]}],
+            }),
+        );
+        let conflict = conflicts_for(&billing, vec![platform])
+            .expect("memberships are server-wide, so the other database's policy removes them");
+        assert!(
+            conflict.contains("on another database of the same server"),
+            "{conflict}"
+        );
+        assert!(
+            conflict.contains("can remove members this one adds to roles: team_readers"),
+            "{conflict}"
+        );
+    }
+
+    #[test]
+    fn policies_on_two_databases_of_one_server_ignore_each_others_grants() {
+        let platform = team_policy_on(
+            "platform",
+            "platform-executor",
+            "app",
+            serde_json::json!({
+                "roles": [{"name": "app_runtime", "external": true}],
+                "schemas": [{"name": "shared", "profiles": []}],
+                "grants": [table_grant("SELECT", "shared", "present")],
+            }),
+        );
+        let billing = team_policy_on(
+            "billing",
+            "billing-executor",
+            "billing",
+            serde_json::json!({
+                "roles": [{"name": "app_runtime", "external": true}],
+                "schemas": [{"name": "shared", "profiles": []}],
+                "grants": [table_grant("SELECT", "shared", "absent")],
+            }),
+        );
+        assert_eq!(conflicts_for(&platform, vec![billing]), None);
+    }
+
+    #[test]
+    fn peers_that_cannot_execute_do_not_block() {
+        let apply = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({"roles": [{"name": "app_runtime"}]}),
+        );
+        let mut observer = team_policy(
+            "audit",
+            "audit-reader",
+            serde_json::json!({"roles": [{"name": "app_runtime"}]}),
+        );
+        observer.spec.mode = crate::crd::PolicyMode::Observe;
+        assert_eq!(conflicts_for(&apply, vec![observer.clone()]), None);
+        // The observer still learns it would conflict if it applied.
+        assert!(conflicts_for(&observer, vec![apply.clone()]).is_some());
+
+        let mut suspended = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({"roles": [{"name": "app_runtime"}]}),
+        );
+        suspended.spec.suspend = true;
+        assert_eq!(conflicts_for(&apply, vec![suspended]), None);
+    }
+
+    fn table_grant(privilege: &str, schema: &str, ensure: &str) -> serde_json::Value {
+        serde_json::json!({
+            "role": "app_runtime",
+            "privileges": [privilege],
+            "object": {"type": "table", "schema": schema, "name": "*"},
+            "ensure": ensure,
+        })
+    }
+
+    #[test]
+    fn additive_team_policies_sharing_a_grantee_across_secrets_do_not_conflict() {
+        let platform = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime"}],
+                "grants": [table_grant("SELECT", "platform", "present")],
+            }),
+        );
+        let identity = DatabaseIdentity::from_connection("platform", &platform.spec.connection);
+        let ours = server_target(&identity, "10.0.0.5");
+        let ownership = platform.spec.ownership_claims().unwrap();
+        let billing = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime", "external": true}],
+                "grants": [table_grant("SELECT", "billing", "present")],
+            }),
+        );
+
+        let conflict = detect_policy_conflict_in_list(
+            &platform,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![billing],
+        );
+        assert_eq!(conflict, None);
+    }
+
+    #[test]
+    fn a_team_policy_declaring_absent_what_another_grants_conflicts_across_secrets() {
+        let platform = team_policy(
+            "platform",
+            "platform-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "roles": [{"name": "app_runtime"}],
+                "grants": [table_grant("SELECT", "billing", "absent")],
+            }),
+        );
+        let identity = DatabaseIdentity::from_connection("platform", &platform.spec.connection);
+        let ours = server_target(&identity, "10.0.0.5");
+        let ownership = platform.spec.ownership_claims().unwrap();
+        let billing = team_policy(
+            "billing",
+            "billing-executor",
+            serde_json::json!({
+                "reconciliation_mode": "additive",
+                "grants": [table_grant("SELECT", "billing", "present")],
+            }),
+        );
+
+        let conflict = detect_policy_conflict_in_list(
+            &platform,
+            &identity,
+            Some(&ours),
+            &ownership,
+            vec![billing],
+        )
+        .expect("a present-versus-absent pair must conflict");
+        assert!(
+            conflict.contains("billing/team via billing/billing-executor"),
+            "{conflict}"
+        );
+        assert!(conflict.contains("contradicting assertions"), "{conflict}");
     }
 
     #[test]

@@ -1622,7 +1622,11 @@ fn describe_object_target(target: &ObjectTarget) -> String {
 /// named selector with opposite ensure for the same privilege are also
 /// rejected: grants apply before revokes, so such a pair re-grants or
 /// re-revokes itself every reconcile and never converges.
-fn validate_ensure_conflicts(
+///
+/// Public so that two policies on one database can be checked against each
+/// other with the same rules: pass both policies' expanded grants and default
+/// privileges (whose owners are already resolved) and no `default_owner`.
+pub fn validate_ensure_conflicts(
     default_owner: Option<&str>,
     grants: &[Grant],
     default_privileges: &[DefaultPrivilege],
