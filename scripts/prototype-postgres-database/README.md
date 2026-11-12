@@ -15,4 +15,10 @@ KUBECONFIG=/opt/k8s/state/kubeconfig cargo run --bin pgroles-operator &
 ```
 
 `generate.py` derives the team policies from `examples/microservices`.
+
+CI runs the same behaviour as a Rust cluster scenario,
+`crates/pgroles-operator/tests/cluster_e2e/postgres_database.rs`. It also runs
+against this harness: start `kube-controller-manager` with the `namespace` and
+`garbagecollector` controllers, create a `postgres-credentials` Secret in
+`default`, and set `PGROLES_E2E_DATABASE_URL`.
 `last-run.txt` is the output of the run the ADR cites.

@@ -33,6 +33,7 @@ check_drift "k8s/postgrespolicyplan-crd.yaml" "$tmpdir/postgrespolicyplans.pgrol
 check_drift "k8s/postgrespolicycandidate-crd.yaml" "$tmpdir/postgrespolicycandidates.pgroles.io.yaml"
 check_drift "k8s/ephemeralaccesspolicy-crd.yaml" "$tmpdir/ephemeralaccesspolicies.pgroles.io.yaml"
 check_drift "k8s/ephemeralaccessrequest-crd.yaml" "$tmpdir/ephemeralaccessrequests.pgroles.io.yaml"
+check_drift "k8s/postgresdatabase-crd.yaml" "$tmpdir/postgresdatabases.pgroles.io.yaml"
 
 if [ "$failed" -ne 0 ]; then
   exit 1

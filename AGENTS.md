@@ -42,6 +42,7 @@ cp charts/pgroles-operator/crds/postgrespolicyplans.pgroles.io.yaml k8s/postgres
 cp charts/pgroles-operator/crds/postgrespolicycandidates.pgroles.io.yaml k8s/postgrespolicycandidate-crd.yaml
 cp charts/pgroles-operator/crds/ephemeralaccesspolicies.pgroles.io.yaml k8s/ephemeralaccesspolicy-crd.yaml
 cp charts/pgroles-operator/crds/ephemeralaccessrequests.pgroles.io.yaml k8s/ephemeralaccessrequest-crd.yaml
+cp charts/pgroles-operator/crds/postgresdatabases.pgroles.io.yaml k8s/postgresdatabase-crd.yaml
 
 # Generated browser contracts: manifest metadata, the recorded review artifact
 # JSON Schema, and the WASM authoring TypeScript types. CI fails when any drifts.
