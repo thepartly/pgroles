@@ -164,10 +164,12 @@ We will:
    Rationale: scope that a policy declares about itself is not a boundary
    (#262). Scope granted by the owner is, and the rules close the escalation
    paths #262 found. The rules live in `pgroles-core` so bundles can use them.
-   Independent policies (#265) use the same claims, plus one rule a single
+   Independent policies (#265) use the same claims, plus rules a single
    composed plan does not need: each independent policy has its own revoke
-   reach, so a policy that can revoke also collides with any policy asserting
-   something for a role it declares.
+   reach, so a policy that can revoke collides with any policy asserting
+   something where it inspects; and because roles and memberships are
+   server-wide, policies on different databases of one server are compared on
+   those.
 
 3. **Resolve conflicts by precedence, and keep serving a policy's last
    accepted content when a newer edit is rejected.** Policies are admitted
@@ -177,12 +179,28 @@ We will:
    generation composed (`Retained`), the way a Deployment keeps its old
    ReplicaSet when a rollout fails.
 
+   Retention holds on every rejection path, including checks that run before
+   composition. Retained content is keyed by the policy's UID, so a policy
+   deleted and re-created under the same name starts afresh, and it is
+   recorded before the composed policy is patched, so a failed write cannot
+   lose it.
+
+   Precedence is by age, not by who claimed first. An older policy that newly
+   claims a role a younger one serves takes it, and the younger one is
+   rejected whole, with nothing retained. Deleting an older policy can let a
+   policy it blocked outrank one accepted after it. Policies created in the
+   same second of `creationTimestamp` are ordered by namespace and name.
+   Delegations limit all three to policies delegated the same names.
+
    Rationale: blocking both policies fails D2. Precedence alone is not enough:
    in the prototype, a rejected squatter that redefined `billing_api` with
    `superuser: true` became the oldest claimant as soon as billing pushed an
    out-of-scope edit, and the composed plan contained
    `ALTER ROLE "billing_api" SUPERUSER`. Retaining the last accepted content
-   keeps the owner's claims in place while its edit is broken.
+   keeps the owner's claims in place while its edit is broken. Model checking
+   (see More information) found three paths where the prototype loses retained
+   content, which the second paragraph closes, and the consequences of
+   ordering by age, which the third states.
 
 4. **Compose every accepted policy into one operator-owned `PostgresPolicy`
    per database**, named `<database>-composed` and labelled
@@ -322,6 +340,10 @@ delegation.
 - A scripted scenario in `scripts/prototype-postgres-database/` that drives
   three teams and four bad policies against a real API server and PostgreSQL,
   and checks the outcome in both (results below).
+- TLA+ models in `docs/design/models/`: `AttachmentPrecedence.tla` checks
+  precedence, retention and composition; `PolicyConflictDetection.tla` checks
+  conflict detection between independent policies. The README there lists
+  each property and its result.
 - Before this ADR is accepted: port that scenario to the Rust cluster harness
   in `crates/pgroles-operator/tests/cluster_e2e/`, so CI runs it on every
   change, including the retention and readiness cases.
@@ -434,6 +456,42 @@ Findings that shaped this revision:
   non-superuser runs it, so the plan never converges. This predates this
   design.
 
+### Model checking
+
+TLC checked both models exhaustively at small bounds (two or three policies,
+two roles, bounded edits and re-creations; up to 5.7 million distinct states).
+
+Attached policies (`AttachmentPrecedence.tla`):
+
+- **Holds everywhere**, including the prototype as written: composed claims
+  are pairwise disjoint, and composition does not depend on listing order.
+- **Retention prevents takeover by a younger policy** only when it covers every
+  rejection path. The prototype misses three: its `profiles` pre-check
+  rejects a policy before retention applies (`AP_ProfilesBypass`); its status
+  is keyed by namespace and name, so a re-created policy inherits its
+  predecessor's retained content until generations collide (`AP_NameReuse`);
+  and it patches the composed policy before recording retained content, so a
+  failed status write loses it (`AP_StatusLoss`). Decision 3 now closes all
+  three; the fixed variants hold.
+- **Ordering by age** has the consequences decision 3 states: an older policy
+  can take a younger one's role by editing (`AP_StrictTakeover`,
+  `AP_ElderKnockout`), deleting an older policy can displace an unchanged
+  younger one (`AP_StableDeletion`), and same-second creation orders by name
+  (`AP_Ties`).
+
+Independent policies (`PolicyConflictDetection.tla`, the operator on `main`):
+
+- **Holds:** a conflicting pair that starts together never both applies; after
+  an upgrade at most one applies again, and only until its peer records a
+  target; pairs sharing a Secret never apply.
+- **Limits, now documented in the operator architecture guide:** editing
+  `spec.connection` reopens the window until the policy records again
+  (`PCD_ConnEditClobber`); a Secret re-pointed at another database leaves a
+  stale target that blocks peers while the policy cannot connect
+  (`PCD_RetargetPhantom`); and progress for a non-conflicting policy relies on
+  the lock being granted eventually, which the operator's jittered retries
+  provide but TLC does not assume (`PCD_Starvation`).
+
 ### Open questions
 
 1. **Approval.** Should teams approve the part of a composed plan their policy
@@ -447,7 +505,8 @@ Findings that shaped this revision:
    others grant to its roles (as Gateway API's `ReferenceGrant` does).
 5. **Delegation selectors.** Namespace names only, or label selectors?
 6. **Retained content.** The prototype keeps it in `PostgresDatabase` status,
-   which is bounded by object size.
+   which is bounded by object size, and must record it before patching the
+   composed policy (decision 3).
 7. **Candidates and ephemeral access.** How `PostgresPolicyCandidate` and
    `EphemeralAccessPolicy` refer to attached policies.
 8. **CLI bundles.** A bundle root is close to a `PostgresDatabase`; bundles
@@ -460,6 +519,9 @@ Findings that shaped this revision:
     privilege, on one object for one role.
 11. **Executor per delegation.** ADR-003: routing, steps, partial failure,
     approval of multi-step plans, and moving existing grants to a new grantor.
+12. **Sticky claims.** Should an accepted claim survive an older policy
+    claiming it later, and an older policy's deletion? Both need acceptance
+    state recorded per claim, which retention already keeps per policy.
 
 Questions 1, 3 and 4 are each large enough for their own record.
 
