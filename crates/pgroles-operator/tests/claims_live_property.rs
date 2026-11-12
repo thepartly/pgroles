@@ -167,12 +167,12 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
         let role = rng.pick(&u.roles).clone();
         let schema = rng.pick(&u.schemas).clone();
         let ensure = if rng.chance(25) { "absent" } else { "present" };
-        let grant = match rng.below(5) {
+        let grant = match rng.below(6) {
             0 => json!({"role": role, "privileges": ["USAGE"], "ensure": ensure,
                         "object": {"type": "schema", "name": schema}}),
             1 => json!({"role": role, "privileges": ["SELECT"], "ensure": ensure,
                         "object": {"type": "table", "schema": schema, "name": "*"}}),
-            2 => json!({"role": role, "privileges": ["EXECUTE"], "ensure": ensure,
+            2 | 5 => json!({"role": role, "privileges": ["EXECUTE"], "ensure": ensure,
                         "object": {"type": "function", "schema": u.schemas[0],
                                    "name": *rng.pick(&["f", "f(integer)"])}}),
             3 => json!({"role": role, "privileges": ["CONNECT"], "ensure": ensure,
@@ -182,6 +182,20 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
                         "object": {"type": "table", "schema": schema, "name": "t"}}),
         };
         grants.push(grant);
+    }
+
+    // Declaring a schema claims its owner facet; owners are drawn so two
+    // policies can disagree about the same schema.
+    let mut schemas = Vec::new();
+    for schema in &u.schemas {
+        if rng.chance(20) {
+            let owner = if rng.chance(50) {
+                &u.owner
+            } else {
+                rng.pick(&u.roles)
+            };
+            schemas.push(json!({"name": schema, "owner": owner}));
+        }
     }
 
     let mut default_privileges = Vec::new();
@@ -231,6 +245,12 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
                 .iter()
                 .map(|dp| dp["grant"][0]["role"].as_str().unwrap().to_string()),
         )
+        .chain(
+            schemas
+                .iter()
+                .map(|s| s["owner"].as_str().unwrap().to_string())
+                .filter(|owner| *owner != u.owner),
+        )
         .chain(memberships.iter().flat_map(|m| {
             [
                 m["role"].as_str().unwrap().to_string(),
@@ -245,7 +265,7 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
     }
 
     let mut retirements = Vec::new();
-    if mode == "authoritative" && rng.chance(15) {
+    if rng.chance(25) {
         let role = rng.pick(&u.roles);
         if !declared.contains(role) {
             retirements.push(json!({"role": role, "drop_owned": true}));
@@ -256,6 +276,7 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
         "connection": {"secretRef": {"name": "db"}},
         "reconciliation_mode": mode,
         "roles": roles,
+        "schemas": schemas,
         "grants": grants,
         "default_privileges": default_privileges,
         "memberships": memberships,
@@ -450,6 +471,11 @@ fn first_undo(changes: &[Change], other: &Policy) -> Option<String> {
                 .get(name)
                 .and_then(|schema| schema.owner.as_ref())
                 .is_some_and(|theirs| theirs != owner),
+            Change::AlterRole { name, .. } => other
+                .spec
+                .roles
+                .iter()
+                .any(|role| role.name == *name && !role.external),
             Change::DropRole { name } => mentioned.contains(name),
             Change::DropOwned { role } | Change::TerminateSessions { role } => {
                 mentioned.contains(role)
