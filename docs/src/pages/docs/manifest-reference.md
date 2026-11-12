@@ -377,6 +377,8 @@ memberships:
 | `inherit` | `true` | Member inherits the role's privileges; omit for PostgreSQL default behavior |
 | `admin` | `false` | Member can administer the role |
 
+A member may be listed more than once for the same role, in one stanza or in several stanzas for that role, as long as every entry resolves to the same `inherit` and `admin` values once defaults apply. Matching entries are merged into one membership. Entries that disagree fail validation with an error that names the role, the member and both sets of options. In [bundle mode](#bundle-mode), only one source document may declare a given membership, even when the options match.
+
 ### exclusive
 
 Each stanza also accepts one option beside `role` and `members`:

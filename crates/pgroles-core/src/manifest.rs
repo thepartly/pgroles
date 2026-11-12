@@ -35,6 +35,20 @@ pub enum ManifestError {
     #[error("duplicate retirement entry for role: \"{0}\"")]
     DuplicateRetirement(String),
 
+    // Options are carried as resolved bools rather than preformatted strings
+    // to keep the variant small (see the note on the conflict variants below).
+    #[error(
+        "membership \"{role}\" -> \"{member}\" is declared more than once with conflicting options (inherit: {first_inherit}, admin: {first_admin} vs inherit: {second_inherit}, admin: {second_admin}) — the plan would toggle the option on every run; declare the member once"
+    )]
+    ConflictingMembershipOptions {
+        role: String,
+        member: String,
+        first_inherit: bool,
+        first_admin: bool,
+        second_inherit: bool,
+        second_admin: bool,
+    },
+
     #[error("retirement entry for role \"{0}\" conflicts with a desired role of the same name")]
     RetirementRoleStillDesired(String),
 
@@ -1411,6 +1425,7 @@ pub fn expand_manifest(manifest: &PolicyManifest) -> Result<ExpandedManifest, Ma
         &memberships,
     )?;
     validate_database_grant_targets(&grants)?;
+    validate_membership_options(&memberships)?;
     validate_default_privilege_scopes(&default_privileges)?;
     validate_ensure_conflicts(
         manifest.default_owner.as_deref(),
@@ -1563,6 +1578,39 @@ fn validate_public_reservation(
 /// Requiring a name keeps desired state, inspection, SQL rendering, and
 /// operator ownership claims on one concrete identity; runtime inspection
 /// additionally verifies that this name is `current_database()`.
+/// A `(role, member)` edge may be declared more than once — within one stanza
+/// or across stanzas for the same role — only when every declaration resolves
+/// to the same `inherit`/`admin` options. Identical repeats collapse into one
+/// edge in the role graph; differing ones would both survive as distinct
+/// desired edges and the diff would flip the live option back and forth on
+/// every reconcile.
+fn validate_membership_options(memberships: &[Membership]) -> Result<(), ManifestError> {
+    let mut seen: BTreeMap<(&str, &str), (bool, bool)> = BTreeMap::new();
+    for membership in memberships {
+        for member in &membership.members {
+            let options = (member.inherit(), member.admin());
+            let key = (membership.role.as_str(), member.name.as_str());
+            match seen.get(&key) {
+                Some(&first) if first != options => {
+                    return Err(ManifestError::ConflictingMembershipOptions {
+                        role: membership.role.clone(),
+                        member: member.name.clone(),
+                        first_inherit: first.0,
+                        first_admin: first.1,
+                        second_inherit: options.0,
+                        second_admin: options.1,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(key, options);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_database_grant_targets(grants: &[Grant]) -> Result<(), ManifestError> {
     if grants.iter().any(|grant| {
         grant.object.object_type == ObjectType::Database && grant.object.name.is_none()
@@ -2394,6 +2442,107 @@ roles:
                 .to_string()
                 .contains("duplicate role name")
         );
+    }
+
+    #[test]
+    fn expand_rejects_conflicting_membership_options_within_stanza() {
+        let yaml = r#"
+roles:
+  - name: editors
+  - name: alice
+    login: true
+
+memberships:
+  - role: editors
+    members:
+      - name: alice
+      - name: alice
+        inherit: false
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let err = expand_manifest(&manifest).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ManifestError::ConflictingMembershipOptions {
+                    role,
+                    member,
+                    first_inherit: true,
+                    first_admin: false,
+                    second_inherit: false,
+                    second_admin: false,
+                } if role == "editors" && member == "alice"
+            ),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("\"editors\" -> \"alice\""), "{message}");
+        assert!(
+            message.contains("inherit: true, admin: false vs inherit: false, admin: false"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn expand_rejects_conflicting_membership_options_across_stanzas() {
+        let yaml = r#"
+roles:
+  - name: editors
+  - name: alice
+    login: true
+
+memberships:
+  - role: editors
+    members:
+      - name: alice
+  - role: editors
+    members:
+      - name: alice
+        admin: true
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let err = expand_manifest(&manifest).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ManifestError::ConflictingMembershipOptions {
+                    role,
+                    member,
+                    first_admin: false,
+                    second_admin: true,
+                    ..
+                } if role == "editors" && member == "alice"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn expand_accepts_identical_duplicate_memberships() {
+        // Explicit values equal to the defaults resolve to the same options
+        // as omitted ones, so these declarations agree and collapse to one
+        // edge in the role graph.
+        let yaml = r#"
+roles:
+  - name: editors
+  - name: alice
+    login: true
+
+memberships:
+  - role: editors
+    members:
+      - name: alice
+      - name: alice
+        inherit: true
+  - role: editors
+    members:
+      - name: alice
+        admin: false
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let expanded = expand_manifest(&manifest).expect("identical duplicates are accepted");
+        let graph = crate::model::RoleGraph::from_expanded(&expanded, None).unwrap();
+        assert_eq!(graph.memberships.len(), 1);
     }
 
     #[test]

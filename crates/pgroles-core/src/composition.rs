@@ -1108,6 +1108,9 @@ memberships:
             .expect("second fragment should parse"),
         };
 
+        // The two documents also disagree on `admin`; ownership rejects the
+        // shared edge before the options are compared, so the conflict is
+        // reported as an ownership clash naming both documents.
         let error = compose_bundle(&bundle, &[first, second])
             .expect_err("membership ownership should conflict");
         assert!(matches!(
@@ -1115,6 +1118,47 @@ memberships:
             CompositionError::DuplicateManagedMembership { role, member, .. }
                 if role == "editor" && member == "app"
         ));
+    }
+
+    #[test]
+    fn compose_bundle_rejects_conflicting_membership_options_within_document() {
+        let bundle = PolicyBundle {
+            shared: SharedPolicy::default(),
+            sources: vec![BundleSource {
+                file: "a.yaml".to_string(),
+            }],
+        };
+        let document = PolicyDocument {
+            source: "a.yaml".to_string(),
+            fragment: parse_policy_fragment(
+                r#"
+policy:
+  name: first
+memberships:
+  - role: editor
+    members:
+      - name: app
+  - role: editor
+    members:
+      - name: app
+        inherit: false
+"#,
+            )
+            .expect("fragment should parse"),
+        };
+
+        let error = compose_bundle(&bundle, &[document])
+            .expect_err("conflicting options in one document should fail");
+        assert!(
+            matches!(
+                &error,
+                CompositionError::InvalidDocument {
+                    document,
+                    error: ManifestError::ConflictingMembershipOptions { role, member, .. },
+                } if document == "first" && role == "editor" && member == "app"
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

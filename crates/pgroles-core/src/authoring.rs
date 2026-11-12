@@ -241,6 +241,9 @@ fn diagnostic_from_manifest_error(yaml: &str, error: ManifestError) -> PolicyDia
             Some("memberships"),
             None,
         ),
+        ManifestError::ConflictingMembershipOptions { .. } => {
+            ("conflicting_membership_options", Some("memberships"), None)
+        }
     };
     PolicyDiagnostic {
         code: code.to_string(),
@@ -252,9 +255,50 @@ fn diagnostic_from_manifest_error(yaml: &str, error: ManifestError) -> PolicyDia
 }
 
 fn precise_manifest_error_path(yaml: &str, error: &ManifestError) -> Option<String> {
-    let ManifestError::ExclusiveMembershipOnManagedRole { role } = error else {
-        return None;
-    };
+    match error {
+        ManifestError::ExclusiveMembershipOnManagedRole { role } => {
+            exclusive_stanza_path(yaml, role)
+        }
+        ManifestError::ConflictingMembershipOptions {
+            role,
+            member,
+            second_inherit,
+            second_admin,
+            ..
+        } => {
+            // Every entry before the conflicting one resolved to the first
+            // options, so the first entry carrying the second options is the
+            // one that was rejected.
+            let manifest = parse_manifest(yaml).ok()?;
+            manifest
+                .memberships
+                .iter()
+                .enumerate()
+                .flat_map(|(index, membership)| {
+                    membership
+                        .members
+                        .iter()
+                        .enumerate()
+                        .map(move |(member_index, spec)| (index, membership, member_index, spec))
+                })
+                .find(|(_, membership, _, spec)| {
+                    membership.role == *role
+                        && spec.name == *member
+                        && spec.inherit() == *second_inherit
+                        && spec.admin() == *second_admin
+                })
+                .map(|(index, _, member_index, _)| {
+                    manifest_path(
+                        yaml,
+                        &format!("memberships[{index}].members[{member_index}]"),
+                    )
+                })
+        }
+        _ => None,
+    }
+}
+
+fn exclusive_stanza_path(yaml: &str, role: &str) -> Option<String> {
     let manifest = parse_manifest(yaml).ok()?;
     let indexes = manifest
         .memberships
@@ -712,6 +756,11 @@ mod tests {
                 "roles:\n  - name: team\nmemberships:\n  - role: team\n    exclusive: true\n    members: []\n",
                 "exclusive_membership_on_managed_role",
                 "memberships[0].exclusive",
+            ),
+            (
+                "memberships:\n  - role: team\n    members:\n      - name: app\n      - name: app\n        inherit: true\n  - role: team\n    members:\n      - name: app\n        admin: true\n",
+                "conflicting_membership_options",
+                "memberships[1].members[0]",
             ),
         ];
 

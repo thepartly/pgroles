@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Conflicting duplicate memberships are now rejected.** A manifest that declares the same `role` → `member` membership more than once with different `inherit` or `admin` values fails validation with `conflicting_membership_options`, naming the role, the member and both sets of options. Before, the plan toggled the option on every reconcile. Duplicates whose options match after defaults are still accepted. Keep one entry per member.
+
+### Fixed
+
+- Validation rejects a membership edge declared twice with different options, in one stanza or across stanzas for the same role. These declarations made every reconcile emit `UpdateMemberOptions`.
+
 ## [0.15.0] - 2026-10-19
 
 ### Highlights
