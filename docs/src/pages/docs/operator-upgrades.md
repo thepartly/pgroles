@@ -48,7 +48,7 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 ## Moving from 0.15 to 0.16
 
 - The `PostgresPolicy` CRD adds `status.resolved_database_target`. Apply the version-matched CRDs before the controller; until then the API server prunes the field and conflict detection compares connections only, as in 0.15. Chart values are unchanged.
-- Conflict detection now compares policies that reach one database through different Secrets or namespaces, and policies on different databases of one server. Policies that were never compared may report `ConflictingPolicy` after the upgrade; both stop applying until the conflict is resolved, and no SQL runs for either. Check with `kubectl get postgrespolicies -A` and see [policy conflicts](/docs/operator-troubleshooting#policy-conflicts).
+- Conflict detection now compares policies that reach one database through different Secrets or namespaces, and policies on different databases of one server. Policies that were never compared may report `ConflictingPolicy` after the upgrade, and then both stop applying until the conflict is resolved. A policy only sees a peer once that peer has recorded its target, so the first to reconcile after the upgrade can apply once before the conflict is found. Where policies may overlap, set `approval: manual` or `mode: observe` on them for the upgrade, check with `kubectl get postgrespolicies -A`, and see [policy conflicts](/docs/operator-troubleshooting#policy-conflicts).
 - Policies that only grant to a shared role no longer conflict, and `status.owned_roles` lists only the roles a policy manages.
 
 ## Moving from 0.14 to 0.15
