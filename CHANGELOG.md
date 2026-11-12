@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A named grant that repeats a wildcard grant for the same role, object type and schema now converges in one apply. Inspection folds the named object's privileges into the wildcard, so every later plan re-granted them. The desired graph now drops the repeated privileges from the named grant, and keeps any privileges the wildcard does not declare.
+
 ## [0.15.0] - 2026-10-19
 
 ### Highlights

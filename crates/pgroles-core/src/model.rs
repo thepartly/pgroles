@@ -539,6 +539,7 @@ impl RoleGraph {
                 privileges.insert(*privilege);
             }
         }
+        graph.fold_named_grants_into_wildcards();
 
         // --- Default privileges ---
         for default_priv in &expanded.default_privileges {
@@ -600,6 +601,53 @@ impl RoleGraph {
         }
 
         Ok(graph)
+    }
+
+    /// Drop privileges a named grant repeats from a present wildcard on the
+    /// same `(grantee, object type, schema)`.
+    ///
+    /// Inspection folds per-object privileges held on every object in a
+    /// wildcard scope into the `name: "*"` key and strips them from the named
+    /// keys, so a desired graph that kept `t: SELECT` beside `*: SELECT`
+    /// would see that SELECT as missing on every plan and never converge.
+    /// Folding here gives both graphs the same shape. Privileges the wildcard
+    /// does not declare stay on the named key, as they do after inspection.
+    ///
+    /// Absences need no folding: a named absence under a present wildcard for
+    /// the same privilege is rejected by manifest validation, and absences
+    /// only ever produce revokes, which the diff merges per target.
+    fn fold_named_grants_into_wildcards(&mut self) {
+        let wildcards: BTreeMap<(Grantee, ObjectType, String), BTreeSet<Privilege>> = self
+            .grants
+            .iter()
+            .filter(|(key, _)| key.name.as_deref() == Some("*"))
+            .filter_map(|(key, state)| {
+                let schema = key.schema.clone()?;
+                Some((
+                    (key.role.clone(), key.object_type, schema),
+                    state.privileges.clone(),
+                ))
+            })
+            .collect();
+        if wildcards.is_empty() {
+            return;
+        }
+        self.grants.retain(|key, state| {
+            if key.name.as_deref() == Some("*") {
+                return true;
+            }
+            let Some(schema) = &key.schema else {
+                return true;
+            };
+            if let Some(covered) =
+                wildcards.get(&(key.role.clone(), key.object_type, schema.clone()))
+            {
+                state
+                    .privileges
+                    .retain(|privilege| !covered.contains(privilege));
+            }
+            !state.privileges.is_empty()
+        });
     }
 }
 
@@ -918,5 +966,136 @@ grants:
         assert!(grant_state.privileges.contains(&Privilege::Select));
         assert!(grant_state.privileges.contains(&Privilege::Insert));
         assert!(grant_state.privileges.contains(&Privilege::Update));
+    }
+
+    fn table_key(role: &str, schema: &str, name: &str) -> GrantKey {
+        GrantKey {
+            role: Grantee::parse(role),
+            object_type: ObjectType::Table,
+            schema: Some(schema.to_string()),
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn privileges(list: &[Privilege]) -> BTreeSet<Privilege> {
+        list.iter().copied().collect()
+    }
+
+    fn graph_from_yaml(yaml: &str) -> RoleGraph {
+        let manifest = parse_manifest(yaml).unwrap();
+        let expanded = expand_manifest(&manifest).unwrap();
+        RoleGraph::from_expanded(&expanded, None).unwrap()
+    }
+
+    #[test]
+    fn named_grant_repeating_a_wildcard_folds_into_it() {
+        let graph = graph_from_yaml(
+            r#"
+roles:
+  - name: r0
+  - name: r1
+grants:
+  - role: r0
+    privileges: [SELECT]
+    object: { type: table, schema: s0, name: "*" }
+  - role: r0
+    privileges: [SELECT]
+    object: { type: table, schema: s0, name: t }
+  - role: r0
+    privileges: [SELECT, INSERT]
+    object: { type: table, schema: s0, name: u }
+  - role: r0
+    privileges: [INSERT]
+    ensure: absent
+    object: { type: table, schema: s0, name: v }
+  - role: r0
+    privileges: [SELECT]
+    object: { type: table, schema: s1, name: t }
+  - role: r1
+    privileges: [SELECT]
+    object: { type: table, schema: s0, name: t }
+  - role: r0
+    privileges: [USAGE]
+    object: { type: sequence, schema: s0, name: t }
+"#,
+        );
+
+        let grants: BTreeMap<GrantKey, BTreeSet<Privilege>> = graph
+            .grants
+            .iter()
+            .map(|(key, state)| (key.clone(), state.privileges.clone()))
+            .collect();
+        let expected: BTreeMap<GrantKey, BTreeSet<Privilege>> = [
+            // The wildcard itself is untouched.
+            (table_key("r0", "s0", "*"), privileges(&[Privilege::Select])),
+            // An exact repeat disappears; extras beyond the wildcard stay.
+            (table_key("r0", "s0", "u"), privileges(&[Privilege::Insert])),
+            // Other schema, other grantee, other object type: not covered.
+            (table_key("r0", "s1", "t"), privileges(&[Privilege::Select])),
+            (table_key("r1", "s0", "t"), privileges(&[Privilege::Select])),
+            (
+                GrantKey {
+                    object_type: ObjectType::Sequence,
+                    ..table_key("r0", "s0", "t")
+                },
+                privileges(&[Privilege::Usage]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(grants, expected);
+
+        assert_eq!(
+            graph.grant_absences.get(&table_key("r0", "s0", "v")),
+            Some(&privileges(&[Privilege::Insert])),
+            "absences are not folded"
+        );
+    }
+
+    /// Inspection folds per-object rows held on every object in a wildcard
+    /// scope into the `*` key, so after one apply the live graph has no named
+    /// `t` entry. The desired graph must match that shape or every plan
+    /// re-grants SELECT on `t`.
+    #[test]
+    fn named_grant_repeating_a_wildcard_has_an_empty_plan_after_apply() {
+        let desired = graph_from_yaml(
+            r#"
+roles:
+  - name: r0
+grants:
+  - role: r0
+    privileges: [SELECT]
+    object: { type: table, schema: s0, name: "*" }
+  - role: r0
+    privileges: [SELECT]
+    object: { type: table, schema: s0, name: t }
+  - role: r0
+    privileges: [SELECT, INSERT]
+    object: { type: table, schema: s0, name: u }
+"#,
+        );
+
+        let mut current = RoleGraph {
+            roles: desired.roles.clone(),
+            ..RoleGraph::default()
+        };
+        current.grants.insert(
+            table_key("r0", "s0", "*"),
+            GrantState {
+                privileges: privileges(&[Privilege::Select]),
+            },
+        );
+        current.grants.insert(
+            table_key("r0", "s0", "u"),
+            GrantState {
+                privileges: privileges(&[Privilege::Insert]),
+            },
+        );
+
+        let changes = crate::diff::diff(&current, &desired);
+        assert!(
+            changes.is_empty(),
+            "expected an empty plan, got {changes:#?}"
+        );
     }
 }
