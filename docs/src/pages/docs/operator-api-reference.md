@@ -12,6 +12,7 @@ Use the [operator quick start](/docs/operator-quick-start) for a working deploym
 | [PostgresPolicyCandidate](/docs/reference/postgrespolicycandidate-v1alpha1) | Immutable proposed policy content evaluated before promotion. |
 | [EphemeralAccessPolicy](/docs/reference/ephemeralaccesspolicy-v1alpha1) | Requestable membership bundles and approval rules. |
 | [EphemeralAccessRequest](/docs/reference/ephemeralaccessrequest-v1alpha1) | Temporary access requests and their lifecycle. |
+| [PostgresDatabase](/docs/reference/postgresdatabase-v1alpha1) | Prototype for ADR-002: a shared database, its delegations, and the policies attached to it. Not released. |
 
 Schema validation is only the admission boundary. The controller also checks database state, executor authority, target identity, and lifecycle invariants. Follow [plan approval](/docs/operator-plan-approval), [candidate promotion](/docs/operator-candidates), and [ephemeral access](/docs/ephemeral-access) for those workflows.
 
