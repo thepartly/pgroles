@@ -11,9 +11,9 @@ if [ ! -f sa.key ]; then
   # A CA and a separate server certificate: rustls rejects a self-signed
   # certificate used as both.
   printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n' > san.cnf
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 7 -subj "/CN=local-ca" 2>/dev/null
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 30 -subj "/CN=local-ca" 2>/dev/null
   openssl req -newkey rsa:2048 -nodes -keyout apiserver.key -out apiserver.csr -subj "/CN=localhost" 2>/dev/null
-  openssl x509 -req -in apiserver.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out apiserver.crt -days 7 -extfile san.cnf 2>/dev/null
+  openssl x509 -req -in apiserver.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out apiserver.crt -days 30 -extfile san.cnf 2>/dev/null
   echo "admin-token,admin,admin,system:masters" > tokens.csv
 fi
 nohup /opt/k8s/etcd-v3.5.15-linux-amd64/etcd --data-dir $D/etcd \

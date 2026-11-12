@@ -84,11 +84,21 @@ check "out-of-scope membership not applied" f "$(PSQL "select pg_has_role('billi
 kubectl patch pgr -n billing billing --type=json -p '[{"op":"remove","path":"/spec/memberships"}]' >/dev/null
 wait_for "billing accepted again after the fix" "policy_live billing billing" live 90
 
-echo "== 7. (observation) Shipping deletes its policy"
+echo "== 7. Billing's edit sets profiles, which only the database owner may set"
+kubectl patch pgr -n billing billing --type=merge -p '{"spec":{"profiles":{"mine":{"grants":[]}}}}' >/dev/null
+wait_for "billing edit refused, previous generation retained" "kubectl get pgr -n billing billing -o jsonpath='{.status.conditions[?(@.type==\"Accepted\")].reason}/{.status.conditions[?(@.type==\"Accepted\")].message}' | grep -c '^Invalid/.*still applied'" 1 60
+check "squatter still rejected" Conflicted "$(verdict billing late-duplicate)"
+check "composed policy still declares billing_api" 1 "$(kubectl get pgr -n platform appdb-composed -o jsonpath='{.spec.roles[*].name}' | tr ' ' '\n' | grep -cx billing_api)"
+check "billing_api not superuser" f "$(PSQL "select rolsuper from pg_roles where rolname='billing_api'")"
+kubectl patch pgr -n billing billing --type=json -p '[{"op":"remove","path":"/spec/profiles"}]' >/dev/null
+wait_for "billing accepted again after the fix" "policy_live billing billing" live 90
+check "billing's record names its delegation" billing "$(kubectl get pgdb -n platform appdb -o jsonpath='{.status.attached[?(@.name=="billing")].delegations[0]}')"
+
+echo "== 8. Shipping deletes its policy; billing still grants to shipping_migrator"
 kubectl delete pgr -n shipping shipping >/dev/null
-sleep 45
-echo "  composed Ready: $(kubectl get pgr -n platform appdb-composed -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}: {.status.conditions[?(@.type=="Ready")].message}' | cut -c1-300)"
-echo "  shipping roles left in PostgreSQL: $(PSQL "select string_agg(rolname, ',') from pg_roles where rolname like 'shipping_%'")"
+wait_for "shipping_migrator composed as an external reference" "kubectl get pgr -n platform appdb-composed -o jsonpath='{.spec.roles[?(@.name==\"shipping_migrator\")].external}'" true 60
+wait_for "composed policy converges without shipping" "kubectl get pgr -n platform appdb-composed -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'" True 120
+check "shipping roles stay in PostgreSQL (leaving does not retire them)" t "$(PSQL "select exists(select 1 from pg_roles where rolname='shipping_migrator')")"
 
 echo
 echo "passed=$pass failed=$fail"

@@ -414,13 +414,15 @@ delegation.
 
 Branch:
 [`prototype/postgres-database`](https://github.com/thepartly/pgroles/tree/prototype/postgres-database),
-based on #263. It implements decisions 1 to 6 as first drafted, and is
-evidence for this record, not code to merge as is. It predates the claims
-wording in decision 2 and the reserved fields.
+now based on `main` with #263 and #265. It implements decisions 1 to 6,
+including decision 2's references and implicit external roles, decision 3's
+retention on every rejection path, and named delegations. It is evidence for
+this record, not code to merge as is: change provenance, `executedBy`,
+`DanglingReference` and the open questions are not implemented.
 
 It ran against a real `kube-apiserver` 1.31 and PostgreSQL 16, with a
 non-superuser `CREATEROLE` executor. The teams are `examples/microservices`
-(platform, billing, shipping), turned into attached policies. All 27 checks
+(platform, billing, shipping), turned into attached policies. All 32 checks
 pass:
 
 | Scenario | Result |
@@ -432,6 +434,8 @@ pass:
 | `CREATE` on the database to `PUBLIC` | `OutOfScope` |
 | Newer policy redefining `billing_api` as superuser | `Conflicted`; the database stays `Ready` |
 | Out-of-scope edit while that squatter waits | Edit rejected, previous generation kept, squatter still `Conflicted` |
+| Edit setting `profiles`, which only the owner may set, while the squatter waits | Edit refused as `Invalid`, previous generation kept, squatter still `Conflicted` |
+| Shipping deletes its policy while billing grants to `shipping_migrator` | `shipping_migrator` is composed as external; the plan converges |
 | Credentials | Only the owner's namespace holds a database Secret |
 
 Moving the example to delegations needed one change: database `CONNECT` for
@@ -440,17 +444,21 @@ the platform policy.
 
 Findings that shaped this revision:
 
-- **An attached policy that declares an external role is rejected as
+- **An attached policy that declared an external role was rejected as
   `Invalid`.** Bundle composition registers every expanded role as owned,
-  external ones included. Decision 2 makes external declarations references.
+  external ones included. Decision 2 makes external declarations references;
+  the prototype now strips them before admission and composes each role that
+  policies reference but none creates as external. CLI bundles keep the old
+  rule until open question 8 is decided.
 - **Two attached policies cannot grant on objects in one schema.** An explicit
   grant claims the schema's exclusive `bindings` facet. Open question 10.
 - **Grant ownership is per object, not per privilege.** Two policies granting
   different privileges on one object to one role collide. Open question 10.
 - **A team leaving.** Deleting shipping's policy left its roles in place, and
-  billing's grant to `shipping_migrator` never converged, because a role no
-  policy declares is not inspected. Decision 2's implicit external roles and
-  `DanglingReference` address the convergence half.
+  billing's grant to `shipping_migrator` never converged (`NonConvergentPlan`),
+  because a role no policy declares is not inspected. With decision 2's
+  implicit external roles it converges. `DanglingReference`, for a referenced
+  role that no longer exists in PostgreSQL, is not implemented yet.
 - **Owner self-grants.** A grant of `CREATE, USAGE` on a schema to the role
   that owns it is accepted by PostgreSQL but never appears in the ACL when a
   non-superuser runs it, so the plan never converges. This predates this
@@ -472,7 +480,8 @@ Attached policies (`AttachmentPrecedence.tla`):
   predecessor's retained content until generations collide (`AP_NameReuse`);
   and it patches the composed policy before recording retained content, so a
   failed status write loses it (`AP_StatusLoss`). Decision 3 now closes all
-  three; the fixed variants hold.
+  three, the fixed variants hold, and the prototype implements the fixes,
+  each with a unit test of `plan_database` or `compose_attached`.
 - **Ordering by age** has the consequences decision 3 states: an older policy
   can take a younger one's role by editing (`AP_StrictTakeover`,
   `AP_ElderKnockout`), deleting an older policy can displace an unchanged

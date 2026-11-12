@@ -40,8 +40,16 @@
   PASS  billing_api not superuser
   PASS  out-of-scope membership not applied
   ok    billing accepted again after the fix
-== 7. (observation) Shipping deletes its policy
-  composed Ready: NonConvergentPlan: plan appdb-composed-plan-20261105-111252-99b51d2771fa applied these exact changes recently, but the database still reports them as drift: the SQL executed without error yet changed nothing pgroles can observe. This usually means the executor lacks the authority to enforce a change
-  shipping roles left in PostgreSQL: shipping_migrator,shipping_api,shipping_reports
+== 7. Billing's edit sets profiles, which only the database owner may set
+  ok    billing edit refused, previous generation retained
+  PASS  squatter still rejected
+  PASS  composed policy still declares billing_api
+  PASS  billing_api not superuser
+  ok    billing accepted again after the fix
+  PASS  billing's record names its delegation
+== 8. Shipping deletes its policy; billing still grants to shipping_migrator
+  ok    shipping_migrator composed as an external reference
+  ok    composed policy converges without shipping
+  PASS  shipping roles stay in PostgreSQL (leaving does not retire them)
 
-passed=27 failed=0
+passed=32 failed=0
