@@ -54,6 +54,13 @@ fn database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for live DB tests")
 }
 
+/// Also run the pairs the rules reject, and count how many really fail
+/// together. Informational: a rejected pair that would have been safe is the
+/// cost of a conservative rule, not a violation.
+fn measure_precision() -> bool {
+    std::env::var_os("PGROLES_CLAIMS_PROPERTY_PRECISION").is_some()
+}
+
 fn seed_count() -> u64 {
     std::env::var("PGROLES_CLAIMS_PROPERTY_SEEDS")
         .ok()
@@ -96,21 +103,39 @@ struct Universe {
 
 impl Universe {
     fn new(seed: u64, database: String) -> Self {
-        let prefix = format!("clp{seed}_");
+        Self::with_prefix("clp", seed, database)
+    }
+
+    /// `base` keeps the two tests, which run concurrently, apart.
+    fn with_prefix(base: &str, seed: u64, database: String) -> Self {
+        let prefix = format!("{base}{seed}_");
         Self {
             roles: (0..4).map(|i| format!("{prefix}r{i}")).collect(),
             owner: format!("{prefix}owner"),
-            schemas: (0..2).map(|i| format!("{prefix}s{i}")).collect(),
+            schemas: (0..3).map(|i| format!("{prefix}s{i}")).collect(),
             prefix,
             database,
         }
     }
 
     fn setup_sql(&self) -> Vec<String> {
+        let mut sql = self.role_sql();
+        sql.extend(self.object_sql());
+        sql
+    }
+
+    /// Roles are server-wide: create them once per server.
+    fn role_sql(&self) -> Vec<String> {
         let mut sql = vec![format!("CREATE ROLE \"{}\" NOLOGIN", self.owner)];
         for role in &self.roles {
             sql.push(format!("CREATE ROLE \"{role}\" NOLOGIN"));
         }
+        sql
+    }
+
+    /// Schemas and objects: create them in every database.
+    fn object_sql(&self) -> Vec<String> {
+        let mut sql = Vec::new();
         for schema in &self.schemas {
             sql.push(format!(
                 "CREATE SCHEMA \"{schema}\" AUTHORIZATION \"{}\"",
@@ -126,6 +151,23 @@ impl Universe {
              ALTER FUNCTION \"{}\".f(integer) OWNER TO \"{}\"",
             self.schemas[0], self.schemas[0], self.owner
         ));
+        sql
+    }
+
+    /// Remove this universe's objects and everything the roles own or hold
+    /// in the current database, leaving the roles themselves.
+    fn object_cleanup_sql(&self) -> Vec<String> {
+        let mut sql: Vec<String> = self
+            .schemas
+            .iter()
+            .map(|schema| format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+            .collect();
+        for role in self.roles.iter().chain(std::iter::once(&self.owner)) {
+            sql.push(format!(
+                "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN \
+                 EXECUTE 'DROP OWNED BY \"{role}\"'; END IF; END $$"
+            ));
+        }
         sql
     }
 
@@ -213,6 +255,19 @@ fn gen_policy(rng: &mut Rng, u: &Universe) -> Value {
                 "role": rng.pick(&u.roles),
                 "privileges": ["SELECT"],
                 "on_type": "table",
+                "ensure": if rng.chance(25) { "absent" } else { "present" },
+            }],
+        }));
+    }
+    // The global layer is inspected per owner rather than per schema.
+    if rng.chance(15) {
+        default_privileges.push(json!({
+            "owner": u.owner,
+            "scope": {"type": "global"},
+            "grant": [{
+                "role": rng.pick(&u.roles),
+                "privileges": ["EXECUTE"],
+                "on_type": "function",
                 "ensure": if rng.chance(25) { "absent" } else { "present" },
             }],
         }));
@@ -395,10 +450,25 @@ fn mentioned_roles(other: &RoleGraph, spec: &PostgresPolicySpec) -> BTreeSet<Str
 }
 
 /// The first change in `changes` that undoes something `other` asserts.
-fn first_undo(changes: &[Change], other: &Policy) -> Option<String> {
+///
+/// With `other_database`, the two policies run on different databases of one
+/// server, so only changes to server-wide state can reach the other: roles,
+/// memberships, and the shared-object privileges `DROP OWNED` revokes.
+fn first_undo(changes: &[Change], other: &Policy, other_database: bool) -> Option<String> {
     let graph = &other.desired;
     let mentioned = mentioned_roles(graph, &other.spec);
     for change in changes {
+        let per_database = matches!(
+            change,
+            Change::Revoke { .. }
+                | Change::Grant { .. }
+                | Change::RevokeDefaultPrivilege { .. }
+                | Change::SetDefaultPrivilege { .. }
+                | Change::AlterSchemaOwner { .. }
+        );
+        if other_database && per_database {
+            continue;
+        }
         let undo = match change {
             Change::Revoke {
                 role,
@@ -533,14 +603,23 @@ async fn with_universe<T>(
     result
 }
 
-async fn run_pair(pool: &PgPool, seed: u64, a: &Policy, b: &Policy) -> Result<(), String> {
-    let policies = [("A", a, b), ("B", b, a)];
+/// Run `a` against `pool_a` and `b` against `pool_b` alternately. The pools
+/// are the same database, or two databases of one server.
+async fn run_pair(
+    pool_a: &PgPool,
+    pool_b: &PgPool,
+    seed: u64,
+    a: &Policy,
+    b: &Policy,
+) -> Result<(), String> {
+    let other_database = !std::ptr::eq(pool_a, pool_b);
+    let policies = [("A", pool_a, a, b), ("B", pool_b, b, a)];
     for round in 0..ROUNDS {
-        for (label, this, other) in &policies {
+        for (label, pool, this, other) in &policies {
             let (changes, sql) = plan(pool, this)
                 .await
                 .map_err(|e| format!("round {round}: planning {label}: {e}"))?;
-            if let Some(undo) = first_undo(&changes, other) {
+            if let Some(undo) = first_undo(&changes, other, other_database) {
                 return Err(format!(
                     "round {round}: {label}'s plan undoes the other policy: {undo}"
                 ));
@@ -553,7 +632,7 @@ async fn run_pair(pool: &PgPool, seed: u64, a: &Policy, b: &Policy) -> Result<()
                 .map_err(|e| format!("round {round}: executing {label}: {e}\n{sql}"))?;
         }
     }
-    for (label, this, _) in &policies {
+    for (label, pool, this, _) in &policies {
         let (changes, _) = plan(pool, this).await?;
         if !changes.is_empty() {
             return Err(format!(
@@ -577,6 +656,7 @@ fn policies_without_conflicts_never_undo_each_other() {
         .expect("current_database");
 
     let (mut checked, mut conflicting, mut invalid) = (0, 0, 0);
+    let mut flagged_and_fought = 0;
     let mut failures = Vec::new();
     let mut solo_findings = Vec::new();
     let seeds: Vec<u64> = match std::env::var("PGROLES_CLAIMS_PROPERTY_SEED") {
@@ -599,6 +679,16 @@ fn policies_without_conflicts_never_undo_each_other() {
         };
         if a.claims.overlaps(&b.claims) {
             conflicting += 1;
+            if measure_precision() {
+                let fought = runtime
+                    .block_on(with_universe(
+                        &pool,
+                        &universe,
+                        run_pair(&pool, &pool, seed, &a, &b),
+                    ))
+                    .is_err();
+                flagged_and_fought += usize::from(fought);
+            }
             continue;
         }
 
@@ -624,7 +714,7 @@ fn policies_without_conflicts_never_undo_each_other() {
         let outcome = runtime.block_on(with_universe(
             &pool,
             &universe,
-            run_pair(&pool, seed, &a, &b),
+            run_pair(&pool, &pool, seed, &a, &b),
         ));
         if let Err(error) = outcome {
             failures.push(format!(
@@ -638,8 +728,189 @@ fn policies_without_conflicts_never_undo_each_other() {
          as conflicting, {invalid} invalid, {} policies that do not converge alone",
         solo_findings.len()
     );
+    if measure_precision() {
+        eprintln!(
+            "claims precision: {flagged_and_fought} of {conflicting} reported pairs (or \
+             single-policy findings among them) fail when run together"
+        );
+    }
     // Not this test's property, but worth seeing: each is a single-policy
     // convergence problem found along the way.
+    for finding in &solo_findings {
+        eprintln!("single-policy finding: {finding}");
+    }
+    assert!(checked > 0, "no accepted pair was generated");
+    assert!(
+        failures.is_empty(),
+        "{} accepted pair(s) violated the contract:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A second database on the test server, created on first use.
+async fn peer_database(pool: &PgPool) -> Result<PgPool, String> {
+    use sqlx::postgres::PgConnectOptions;
+    let current: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let peer = format!("{current}_claims_peer");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&peer)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if !exists {
+        sqlx::raw_sql(&format!("CREATE DATABASE \"{peer}\""))
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let options: PgConnectOptions = database_url().parse().map_err(|e| format!("{e}"))?;
+    PgPool::connect_with(options.database(&peer))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// As [`with_universe`], with the universe's objects in both databases and its
+/// roles, which are server-wide, created once.
+async fn with_universe_on_two<T>(
+    pool_a: &PgPool,
+    pool_b: &PgPool,
+    universe: &Universe,
+    body: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let cleanup = async {
+        for statement in universe.object_cleanup_sql() {
+            let _ = sqlx::raw_sql(&statement).execute(pool_b).await;
+        }
+        for statement in universe.cleanup_sql() {
+            let _ = sqlx::raw_sql(&statement).execute(pool_a).await;
+        }
+    };
+    cleanup.await;
+    let setup = universe
+        .role_sql()
+        .into_iter()
+        .chain(universe.object_sql())
+        .map(|statement| (pool_a, statement))
+        .chain(
+            universe
+                .object_sql()
+                .into_iter()
+                .map(|statement| (pool_b, statement)),
+        );
+    for (pool, statement) in setup {
+        sqlx::raw_sql(&statement)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("setup `{statement}`: {e}"))?;
+    }
+    let result = body.await;
+    for statement in universe.object_cleanup_sql() {
+        let _ = sqlx::raw_sql(&statement).execute(pool_b).await;
+    }
+    for statement in universe.cleanup_sql() {
+        let _ = sqlx::raw_sql(&statement).execute(pool_a).await;
+    }
+    result
+}
+
+/// Policies on different databases of one server share roles and
+/// memberships, and nothing else. A pair `conflicts_on(.., Server)` accepts
+/// must never undo the other's roles or memberships, and both must converge.
+#[test]
+#[ignore]
+fn policies_on_two_databases_without_server_conflicts_never_undo_each_other() {
+    use pgroles_operator::crd::SharedTarget;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let pool_a = runtime
+        .block_on(PgPool::connect(&database_url()))
+        .expect("failed to connect to live test database");
+    let pool_b = runtime
+        .block_on(peer_database(&pool_a))
+        .expect("failed to create or connect to the peer database");
+    let database_of = |pool: &PgPool| -> String {
+        runtime
+            .block_on(sqlx::query_scalar("SELECT current_database()").fetch_one(pool))
+            .expect("current_database")
+    };
+    let (database_a, database_b) = (database_of(&pool_a), database_of(&pool_b));
+
+    let (mut checked, mut conflicting, mut invalid) = (0, 0, 0);
+    let mut failures = Vec::new();
+    let mut solo_findings = Vec::new();
+    let seeds: Vec<u64> = match std::env::var("PGROLES_CLAIMS_PROPERTY_SEED") {
+        Ok(one) => vec![
+            one.parse()
+                .expect("PGROLES_CLAIMS_PROPERTY_SEED is a number"),
+        ],
+        Err(_) => (0..seed_count()).collect(),
+    };
+    for seed in seeds {
+        // One set of names on both databases: the same roles, and schemas
+        // that happen to share names.
+        let universe_a = Universe::with_prefix("clx", seed, database_a.clone());
+        let universe_b = Universe::with_prefix("clx", seed, database_b.clone());
+        let mut rng = Rng::new(seed);
+        let (left, right) = (
+            gen_policy(&mut rng, &universe_a),
+            gen_policy(&mut rng, &universe_b),
+        );
+        let (Some(a), Some(b)) = (prepare(&left), prepare(&right)) else {
+            invalid += 1;
+            continue;
+        };
+        if !a
+            .claims
+            .conflicts_on(&b.claims, SharedTarget::Server)
+            .is_empty()
+        {
+            conflicting += 1;
+            continue;
+        }
+
+        let solo: Vec<String> = [("A", &pool_a, &a, &left), ("B", &pool_b, &b, &right)]
+            .into_iter()
+            .filter_map(|(label, pool, policy, raw)| {
+                runtime
+                    .block_on(with_universe_on_two(
+                        &pool_a,
+                        &pool_b,
+                        &universe_a,
+                        converges_alone(pool, policy),
+                    ))
+                    .err()
+                    .map(|error| format!("seed {seed} {label} alone: {error}\n  {raw}"))
+            })
+            .collect();
+        if !solo.is_empty() {
+            solo_findings.extend(solo);
+            continue;
+        }
+        checked += 1;
+
+        let outcome = runtime.block_on(with_universe_on_two(
+            &pool_a,
+            &pool_b,
+            &universe_a,
+            run_pair(&pool_a, &pool_b, seed, &a, &b),
+        ));
+        if let Err(error) = outcome {
+            failures.push(format!(
+                "seed {seed} ({}):\n  {error}\n  A = {left}\n  B = {right}",
+                universe_a.prefix
+            ));
+        }
+    }
+    eprintln!(
+        "claims property across databases: {checked} accepted pairs executed, {conflicting} \
+         pairs reported as conflicting, {invalid} invalid, {} policies that do not converge alone",
+        solo_findings.len()
+    );
     for finding in &solo_findings {
         eprintln!("single-policy finding: {finding}");
     }
