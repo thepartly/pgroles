@@ -4,8 +4,10 @@ Two specifications, model-checked with TLC (`tla2tools.jar` from the `v1.8.0` re
 
 | Spec | Models | Branch |
 | --- | --- | --- |
-| `PolicyConflictDetection.tla` | Cross-connection conflict detection between `PostgresPolicy` objects (PR #263 + #265) | `conflict-claims-by-reach` |
+| `PolicyConflictDetection.tla` | Cross-connection conflict detection between `PostgresPolicy` objects (#263, #265) | `main` |
 | `AttachmentPrecedence.tla` | Precedence and retention for policies attached to a `PostgresDatabase` (draft ADR-002, Decision 3) | `prototype/postgres-database` |
+
+Model 2's findings describe the prototype as it was when modelled (commit `c5ad3063`). The prototype has since fixed the three retention gaps (`AP_ProfilesBypass`, `AP_StatusLoss`, `AP_NameReuse`) as the fixed variants model them; ADR-002 records the fixes.
 
 Each `.tla` file opens with the mapping from variables and actions to code (file and function) and the list of abstractions.
 

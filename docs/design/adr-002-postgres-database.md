@@ -34,8 +34,9 @@ not fully trust each other.
 - A conflict blocks both policies, so a new or careless policy can freeze one
   that was converging.
 - Which policies count as "the same database" is inferred. #263 infers it from
-  the server, but cannot see across separate operator installs, and leaves a
-  window of one apply before two new policies see each other.
+  the server, but cannot see across separate operator installs, and a policy
+  sees a peer only once the peer has recorded its target, so a new policy can
+  apply before a conflicting peer has.
 
 **Bundles (CLI).** Ownership is tracked per grant, membership and default
 privilege, which is the right granularity. Scope, however, is declared by each
@@ -327,16 +328,24 @@ delegation.
   priority, which is usually what an owner wants but can surprise.
 - Neutral, because policies with `connection` remain, so the operator carries
   two models.
-- Neutral, because the claims model changes bundle composition too: external
-  declarations stop being owned.
+- Neutral, because until open question 8 is decided, attached policies and CLI
+  bundles treat external declarations differently: attached policies as
+  references, bundles as claims.
 
 ### Confirmation
 
-- Unit tests for the admission rules, precedence and retention in
-  `crates/pgroles-core/src/attachment.rs`.
-- Unit tests for the claims model, including a property test that two
-  policies the model accepts never plan to undo each other. #265 carries the
-  operator-side tests for independent policies.
+- Unit tests for admission, precedence, retention and implicit external roles
+  in `crates/pgroles-core/src/attachment.rs`, and for the controller's
+  decision (`plan_database`) in `crates/pgroles-operator/src/database.rs`.
+- For independent policies, #265's live property tests: random policy pairs
+  the conflict rules accept never undo each other when run against
+  PostgreSQL. Attached policies have no property test yet.
+- A cluster scenario,
+  `crates/pgroles-operator/tests/cluster_e2e/postgres_database.rs`, that CI
+  runs on kind with the operator under its real ClusterRole and a
+  non-superuser executor: three teams composed under delegations, rejection
+  by delegation, scope and precedence, retention through an out-of-scope edit
+  and through a refused `profiles` edit, and a team leaving.
 - A scripted scenario in `scripts/prototype-postgres-database/` that drives
   three teams and four bad policies against a real API server and PostgreSQL,
   and checks the outcome in both (results below).
@@ -344,9 +353,6 @@ delegation.
   precedence, retention and composition; `PolicyConflictDetection.tla` checks
   conflict detection between independent policies. The README there lists
   each property and its result.
-- Before this ADR is accepted: port that scenario to the Rust cluster harness
-  in `crates/pgroles-operator/tests/cluster_e2e/`, so CI runs it on every
-  change, including the retention and readiness cases.
 
 ## Pros and cons of the options
 
@@ -370,8 +376,8 @@ delegation.
 - Bad, because every team still holds an executor credential (D6), and
   containment depends on how narrowly each executor is privileged (D1).
 - Bad, because conflicts still block both policies (D2).
-- Bad, because separate operator installs cannot see each other, and two new
-  policies can each apply once before either sees the other.
+- Bad, because separate operator installs cannot see each other, and a new
+  policy can apply before a conflicting peer has recorded its target.
 
 ### 3. Claims recorded in the database
 
@@ -414,11 +420,13 @@ delegation.
 
 Branch:
 [`prototype/postgres-database`](https://github.com/thepartly/pgroles/tree/prototype/postgres-database),
-now based on `main` with #263 and #265. It implements decisions 1 to 6,
-including decision 2's references and implicit external roles, decision 3's
-retention on every rejection path, and named delegations. It is evidence for
-this record, not code to merge as is: change provenance, `executedBy`,
-`DanglingReference` and the open questions are not implemented.
+now based on `main` with #263 and #265, and run by CI through draft #267. It
+implements decisions 1, 2, 3 and 6, including decision 2's references and
+implicit external roles, decision 3's retention on every rejection path, and
+named delegations; of decisions 4 and 5, the composed policy and
+`executorRole`. It is evidence for this record, not code to merge as is:
+change provenance, `executedBy`, `DanglingReference`, password Secrets in
+the attached policy's namespace and the open questions are not implemented.
 
 It ran against a real `kube-apiserver` 1.31 and PostgreSQL 16, with a
 non-superuser `CREATEROLE` executor. The teams are `examples/microservices`
@@ -514,8 +522,8 @@ Independent policies (`PolicyConflictDetection.tla`, the operator on `main`):
    others grant to its roles (as Gateway API's `ReferenceGrant` does).
 5. **Delegation selectors.** Namespace names only, or label selectors?
 6. **Retained content.** The prototype keeps it in `PostgresDatabase` status,
-   which is bounded by object size, and must record it before patching the
-   composed policy (decision 3).
+   recorded before the composed policy is patched (decision 3). Status is
+   bounded by object size.
 7. **Candidates and ephemeral access.** How `PostgresPolicyCandidate` and
    `EphemeralAccessPolicy` refer to attached policies.
 8. **CLI bundles.** A bundle root is close to a `PostgresDatabase`; bundles
