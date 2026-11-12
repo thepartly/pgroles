@@ -52,7 +52,6 @@ rendering and reloading a bundle produces the same role names. An explicit
 ```yaml
 # bundle.yaml
 shared:
-  default_owner: app_owner
   profiles:
     editor:
       grants:
@@ -120,7 +119,6 @@ spec:
   mode: apply
   approval: auto
   # ... paste the rendered manifest body here:
-  default_owner: app_owner
   profiles:
     editor:
       # ...

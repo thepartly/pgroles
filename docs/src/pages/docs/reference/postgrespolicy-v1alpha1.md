@@ -201,6 +201,9 @@ For workflows, see [operator guidance](/docs/operator), [approval](/docs/operato
 | ` status.owned_schemas[] ` | **string; item or branch.** Constraints on this array item, map value, or conditional schema. |
 | ` status.plan_warnings ` | **array; optional.** Advisory warnings from the last reconciliation's computed plan — for example adopt-mode schema ownership transfers or an undeclared &#96;default&#95;owner&#96;. Populated even when the plan applied cleanly. **Default:** ` [] `. |
 | ` status.plan_warnings[] ` | **string; item or branch.** Constraints on this array item, map value, or conditional schema. |
+| ` status.resolved_database_target ` | **object; optional.** The database this policy's connection reached, as the server reports it. Other policies compare against this to detect ownership conflicts on one database reached through different Secrets or namespaces. **Constraints:** ` {"nullable":true,"required":["connection_identity","key"]} `. |
+| ` status.resolved_database_target.connection_identity ` | **string; required.** The &#91;&#96;DatabaseIdentity&#96;&#93; the key was resolved through. A peer's key is trusted only while this still matches the peer's spec, so a key left over from before a connection change cannot match. |
+| ` status.resolved_database_target.key ` | **string; required.** Opaque digest of the server-reported identity: &#96;system&#95;identifier&#96;, &#96;inet&#95;server&#95;addr()&#96;, &#96;inet&#95;server&#95;port()&#96; and &#96;current&#95;database()&#96;. |
 | ` status.transient_failure_count ` | **integer; optional.** Consecutive transient operational failures used for exponential backoff. **Default:** ` 0 `. **Constraints:** ` {"format":"int32"} `. |
 
 [Download the complete served OpenAPI schema](/crd-reference/postgrespolicy-v1alpha1.json) for structural composition and all Kubernetes extensions.

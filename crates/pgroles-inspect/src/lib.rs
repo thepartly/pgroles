@@ -39,7 +39,7 @@ pub use guards::{
     ExecutionBlocker, ExecutionGuard, ExecutionGuardFindings, ExecutionSettings,
     evaluate_execution_guards, refused_schema_owner_transfers,
 };
-pub use identity::detect_system_identifier;
+pub use identity::{ServerEndpoint, detect_server_endpoint, detect_system_identifier};
 pub use memberships::{
     MembershipRow, fetch_memberships, fetch_predefined_memberships, format_predefined_memberships,
 };
