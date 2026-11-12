@@ -2156,10 +2156,17 @@ pub struct OwnershipClaims {
     pub asserted_roles: BTreeSet<String>,
     /// Roles this policy adds members to.
     pub membership_roles: BTreeSet<String>,
+    /// Roles this policy adds as members of other roles.
+    pub membership_members: BTreeSet<String>,
     /// Roles whose undeclared privileges and members this policy revokes:
-    /// every declared role (external included) and every retired role. Empty
-    /// for an `additive` policy.
+    /// every declared role (external included), every retired role, and the
+    /// granted role of every `exclusive` membership stanza, which may be a
+    /// predefined `pg_*` role the policy does not declare. Empty for an
+    /// `additive` policy.
     pub revoke_reach: BTreeSet<String>,
+    /// Roles this policy drops: its retirements, in `authoritative` mode only
+    /// (`adopt` and `additive` filter role drops).
+    pub drop_reach: BTreeSet<String>,
     /// Databases whose PUBLIC privileges this policy asserts.
     ///
     /// PUBLIC cannot be claimed as a role, and it is one shared surface per
@@ -2231,6 +2238,27 @@ impl OwnershipClaims {
             reasons.push(format!(
                 "the other policy can revoke what this one asserts for roles: {}",
                 join(revoked_there)
+            ));
+        }
+
+        let dropped_here: BTreeSet<_> = self
+            .drop_reach
+            .intersection(&other.membership_members)
+            .collect();
+        if !dropped_here.is_empty() {
+            reasons.push(format!(
+                "this policy retires roles the other adds as members: {}",
+                join(dropped_here)
+            ));
+        }
+        let dropped_there: BTreeSet<_> = other
+            .drop_reach
+            .intersection(&self.membership_members)
+            .collect();
+        if !dropped_there.is_empty() {
+            reasons.push(format!(
+                "the other policy retires roles this one adds as members: {}",
+                join(dropped_there)
             ));
         }
 
@@ -2774,6 +2802,11 @@ impl PostgresPolicySpec {
             .iter()
             .map(|m| m.role.clone())
             .collect();
+        let membership_members: BTreeSet<String> = expanded
+            .memberships
+            .iter()
+            .flat_map(|m| m.members.iter().map(|member| member.name.clone()))
+            .collect();
         let asserted_roles: BTreeSet<String> = expanded
             .grants
             .iter()
@@ -2791,14 +2824,28 @@ impl PostgresPolicySpec {
         // Inspection covers every declared role, external or not, plus retired
         // roles; adopt and authoritative revoke what they find undeclared
         // there. Additive revokes only what it names.
+        // An exclusive stanza revokes every undeclared member of its granted
+        // role, which can be a predefined `pg_*` role inspected without being
+        // declared.
         let revoke_reach: BTreeSet<String> = match self.reconciliation_mode {
             CrdReconciliationMode::Additive => BTreeSet::new(),
             CrdReconciliationMode::Authoritative | CrdReconciliationMode::Adopt => expanded
                 .roles
                 .iter()
                 .map(|role| role.name.clone())
-                .chain(retired)
+                .chain(retired.clone())
+                .chain(
+                    expanded
+                        .memberships
+                        .iter()
+                        .filter(|m| m.exclusive)
+                        .map(|m| m.role.clone()),
+                )
                 .collect(),
+        };
+        let drop_reach: BTreeSet<String> = match self.reconciliation_mode {
+            CrdReconciliationMode::Authoritative => retired.collect(),
+            CrdReconciliationMode::Additive | CrdReconciliationMode::Adopt => BTreeSet::new(),
         };
 
         Ok(OwnershipClaims {
@@ -2806,7 +2853,9 @@ impl PostgresPolicySpec {
             schemas,
             asserted_roles,
             membership_roles,
+            membership_members,
             revoke_reach,
+            drop_reach,
             public_databases,
             grants: expanded.grants,
             default_privileges: expanded.default_privileges,
@@ -5237,6 +5286,50 @@ params:
                 .overlap_summary(&owner)
                 .contains("this policy adds members to roles the other manages: team_payments")
         );
+    }
+
+    #[test]
+    fn an_exclusive_membership_reaches_an_undeclared_predefined_role() {
+        let exclusive = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "roles": [{"name": "alice"}],
+            "memberships": [{"role": "pg_monitor", "exclusive": true, "members": [{"name": "alice"}]}],
+        }));
+        let other = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "bob"}],
+            "memberships": [{"role": "pg_monitor", "members": [{"name": "bob"}]}],
+        }));
+        assert!(
+            exclusive
+                .overlap_summary(&other)
+                .contains("this policy can revoke what the other asserts for roles: pg_monitor")
+        );
+    }
+
+    #[test]
+    fn retiring_a_role_another_policy_adds_as_a_member_conflicts() {
+        let retiring = claims_of(serde_json::json!({
+            "reconciliation_mode": "authoritative",
+            "retirements": [{"role": "alice"}],
+        }));
+        let member = claims_of(serde_json::json!({
+            "reconciliation_mode": "additive",
+            "roles": [{"name": "team"}],
+            "memberships": [{"role": "team", "members": [{"name": "alice"}]}],
+        }));
+        assert!(
+            retiring
+                .overlap_summary(&member)
+                .contains("this policy retires roles the other adds as members: alice")
+        );
+
+        // Adopt never drops roles, so the same pair is safe there.
+        let adopt = claims_of(serde_json::json!({
+            "reconciliation_mode": "adopt",
+            "retirements": [{"role": "alice"}],
+        }));
+        assert!(!adopt.overlap_summary(&member).contains("retires"));
     }
 
     #[test]

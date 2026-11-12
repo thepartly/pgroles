@@ -251,9 +251,12 @@ Two policies conflict when one can undo the other's work:
 - both declare the same schema under `schemas`;
 - one grants a privilege the other declares `ensure: absent`;
 - one adds members to a role the other manages;
+- one is `authoritative` and retires a role the other adds as a member;
 - one is `adopt` or `authoritative`, declares a role (external or not), and the
-  other grants to that role. Those modes revoke undeclared privileges of every
-  role they declare, so they would revoke the other policy's grants;
+  other grants to that role or adds members to it. Those modes revoke
+  undeclared privileges of every role they declare, and undeclared members of
+  any role they list with `exclusive: true` (including predefined `pg_*`
+  roles), so they would revoke the other policy's work;
 - both write `PUBLIC` privileges on the same database.
 
 Policies that only grant to the same role do not conflict. To let several
