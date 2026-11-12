@@ -7,15 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-12
+
+### Highlights
+
+- **Conflict detection across namespaces, Secrets and databases.** The operator compares policies by what the server reports about the database each one reached, not by the Secret they connect through. Policies reaching one database from different namespaces or through different Secrets are now checked against each other, and so are policies on different databases of one server, for the roles and memberships every database of a server shares. Previously only policies sharing a namespace and Secret were compared, so overlapping policies elsewhere could revoke each other's grants on every reconcile. (#263, #265)
+- **Policies can share a role.** A policy now claims only what it manages: the roles it creates, the schemas it declares and the grants it asserts. Granting to a role is a reference. Two policies conflict only where one can undo the other's work, judged by what each inspects, and the `ConflictingPolicy` message names the rule. One policy can create `app_runtime` in any mode while others declare it `external: true` and grant on their own schemas. See [policy conflicts](https://thepartly.github.io/pgroles/docs/operator-troubleshooting/#policy-conflicts). (#265)
+
+### Upgrade notes
+
+- **Apply the 0.16 CRDs before upgrading the controller.** `PostgresPolicy` adds `status.resolved_database_target`. Until the CRDs are updated, the API server prunes it and detection falls back to comparing connections, as in 0.15. (#263, #265)
+- **Policies that were never compared may now report `ConflictingPolicy`.** After upgrading, look for it with `kubectl get postgrespolicies -A`. A conflict stops both policies once both have recorded their target, but the first to reconcile after the upgrade can apply once before its peer records. Where policies may overlap, set `approval: manual` or `mode: observe` on them for the upgrade, and review their plans before re-enabling. Typical causes: both manage the same role, one removes members another adds, one grants what the other declares `ensure: absent` on the same database, or an `adopt` or `authoritative` policy can revoke privileges another grants in a schema both name. If several policies declare one role, keep the full declaration in the policy that creates it and set `external: true` in the others. (#263, #265)
+- **`status.owned_roles` lists only the roles a policy manages**, not every role it grants to. (#265)
+
 ### Changed
 
-- Policy conflict detection separates the roles a policy manages from the roles it only grants to. Granting to a role, naming a schema in a grant, or adding a role as a member no longer claims it. Two policies conflict where one can undo the other's work, judged by what each inspects: an `adopt` or `authoritative` policy revokes a declared role's privileges only in the schemas it names, and removes members only from roles it creates or lists `exclusive`. The `ConflictingPolicy` message says which rule applied. `status.owned_roles` now lists only the roles a policy manages.
-- Policies in `observe` mode and suspended policies no longer block other policies, since they cannot execute. They still report their own conflicts.
+- Policy conflict detection separates the roles a policy manages from the roles it only grants to, and judges conflicts by what each policy inspects: an `adopt` or `authoritative` policy revokes a declared role's privileges only in the schemas it names, on the database if it declares a database grant, and in the global default privileges of owners it names, and removes members only from roles it creates or lists `exclusive`. (#265)
+- Policies in `observe` mode and suspended policies no longer block other policies, since they cannot execute. They still report their own conflicts. (#265)
 
 ### Fixed
 
-- The operator now detects ownership conflicts between policies that reach the same database through different Secrets or from different namespaces. Policies are compared across every namespace the operator watches. Each policy records the database its connection reached, as reported by the server, in `status.resolved_database_target`, and policies compare those records. Previously only policies sharing a namespace and Secret were compared, so overlapping policies elsewhere could revoke each other's grants on every reconcile. Roles and memberships are server-wide, so policies on different databases of one server are compared too, on the rules about roles, memberships and retirement. **Upgrade note:** such policies now report `ConflictingPolicy` when they can undo each other's work, for example when both manage the same role, one removes members another adds, one grants what the other declares `ensure: absent` on the same database, or an `adopt` or `authoritative` policy can revoke privileges another grants in a schema both name. Policies that only grant to the same role in different schemas do not conflict. If several policies declare one role, keep the full declaration in the policy that creates it and set `external: true` in the others. Apply the updated CRDs: until then the API server prunes the new status field and detection falls back to comparing connections, as before.
-- The bundle examples in the bundle composition guide and manifest reference failed composition: a shared `default_owner` made the bindings-only fragment claim schema ownership. The examples now set `owner` explicitly in the owning fragment, the reference explains the rule, and a test composes every bundle in the docs.
+- The operator detects ownership conflicts between policies that reach one database through different Secrets or from different namespaces, and between policies on different databases of one server. Each policy records the target it reached, as reported by the server, in `status.resolved_database_target`, and policies compare those records across every namespace the operator watches. (#263, #265)
+- The bundle examples in the bundle composition guide and manifest reference failed composition: a shared `default_owner` made the bindings-only fragment claim schema ownership. The examples now set `owner` explicitly in the owning fragment, the reference explains the rule, and a test composes every bundle in the docs. (#263)
+
+### Security
+
+- Updated `rustls-webpki` to 0.103.16, `webpki-roots` to 1.0.11 and `ctutils` to 0.4.8 for RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0385. (#263)
 
 ## [0.15.0] - 2026-10-19
 
