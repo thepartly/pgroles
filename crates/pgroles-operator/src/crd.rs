@@ -1166,7 +1166,10 @@ pub struct PostgresPolicyStatus {
     /// it. Other policies compare against this to detect ownership conflicts
     /// on one database, or on one server, reached through different Secrets
     /// or namespaces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Serialized as `null` when absent: status is written as a merge patch,
+    // and an omitted field would leave a target recorded through an earlier
+    // connection in place after the server stops identifying itself.
+    #[serde(default)]
     pub resolved_database_target: Option<ResolvedDatabaseTarget>,
 
     /// Roles claimed by this policy's declared ownership scope.
@@ -5315,6 +5318,16 @@ params:
     fn matching_connection_identities_count_without_resolved_targets() {
         let id = DatabaseIdentity::from_connection("ns", &secret_connection("db"));
         assert!(targets_same_database(&id, None, &id, None));
+    }
+
+    #[test]
+    fn an_absent_resolved_target_is_written_as_null_so_a_merge_patch_clears_it() {
+        let status = PostgresPolicyStatus::default();
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json.get("resolved_database_target"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
