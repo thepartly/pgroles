@@ -1,0 +1,42 @@
+PCD_Fresh                    holds                                                      936192 distinct / 4683264 generated      13s
+PCD_FreshLive                holds                                                      66784 distinct / 267392 generated        12s
+PCD_Upgrade                  holds                                                      731136 distinct / 3657984 generated      11s
+PCD_UpgradeLive              holds                                                      66784 distinct / 267392 generated        12s
+PCD_CrdPrunedRemaining       holds                                                      854400 distinct / 4274304 generated      11s
+PCD_CrdPrunedRemainingLive   holds                                                      47232 distinct / 189184 generated        10s
+PCD_ConnEdit                 holds                                                      822384 distinct / 4934592 generated      16s
+PCD_ConnEditLive             holds                                                      822384 distinct / 4934592 generated      187s
+PCD_RetargetClobber          holds                                                      4481680 distinct / 17926784 generated    59s
+PCD_ContentEdit              holds                                                      5709296 distinct / 22837248 generated    64s
+PCD_UpgradeWindow            VIOLATED: Invariant NoClobber                              1033 distinct / 1465 generated           1s
+PCD_CrdPruned                VIOLATED: Invariant NeverBothApplied                       3249 distinct / 5562 generated           1s
+PCD_CrdPrunedLive            VIOLATED: Temporal property ConflictingPairBlocks          5248 distinct / 10560 generated          2s
+PCD_ConnEditClobber          VIOLATED: Invariant NoClobber                              349576 distinct / 1356166 generated      7s
+PCD_Retarget                 VIOLATED: Invariant TrustedRecordAccurate                  2061 distinct / 4903 generated           1s
+PCD_RetargetPhantom          VIOLATED: Invariant NoPhantomConflict                      23480 distinct / 74700 generated         2s
+PCD_RetargetLive             VIOLATED: Temporal property NonConflictingApplies          447488 distinct / 2685184 generated      61s
+PCD_ContentEditStale         VIOLATED: Invariant NoStaleClobber                         38674 distinct / 104333 generated        2s
+PCD_ContentEditAba           VIOLATED: Invariant NoAbaClobber                           56731 distinct / 154391 generated        3s
+PCD_Starvation               VIOLATED: Temporal property NonConflictingAppliesNoLockAssumption 5920 distinct / 11904 generated          2s
+PCD_Fresh3                   holds                                                      2044224 distinct / 6134400 generated     37s
+PCD_Upgrade3                 holds                                                      2044224 distinct / 6134400 generated     34s
+AP_Retention                 holds                                                      835525 distinct / 4310705 generated      110s
+AP_Retention2                holds                                                      945465 distinct / 6460772 generated      51s
+AP_Retention2NoRecreate      holds                                                      38693 distinct / 190990 generated        4s
+AP_ProfilesRetained          holds                                                      60979 distinct / 345946 generated        6s
+AP_Prototype                 holds                                                      1457824 distinct / 8304668 generated     195s
+AP_NoRetentionRest           holds                                                      646426 distinct / 3471191 generated      80s
+AP_NoRetention               VIOLATED: Invariant NoTakeoverByYounger                    2048 distinct / 4703 generated           2s
+AP_ElderKnockout             VIOLATED: Invariant NoTakeoverByYounger                    63272 distinct / 166876 generated        7s
+AP_Retention2Recreate        VIOLATED: Invariant NoTakeoverByYounger                    42450 distinct / 183947 generated        6s
+AP_StrictTakeover            VIOLATED: Action property StrictNoTakeover                 1780 distinct / 3962 generated           1s
+AP_ProfilesBypass            VIOLATED: Invariant NoTakeoverByYounger                    2921 distinct / 7404 generated           1s
+AP_StatusLoss                VIOLATED: Invariant NoTakeoverByYounger                    3927 distinct / 8642 generated           2s
+AP_NameReuse                 VIOLATED: Action property YoungerTakeoverOnlyViaElder      304471 distinct / 1516027 generated      32s
+AP_ElderWithdraws            VIOLATED: Invariant NoTakeoverAfterElderWithdraws          1109173 distinct / 4325942 generated     157s
+AP_RetainedDropped           VIOLATED: Action property RetainedStaysServed              5375 distinct / 18374 generated          2s
+AP_Ties                      VIOLATED: Invariant NewIsYoungest                          109 distinct / 118 generated             0s
+AP_StableDeletion            VIOLATED: Action property StableDespiteElderDeletion       15199 distinct / 30947 generated         5s
+AP_RawListing                VIOLATED: Invariant RawListingOrderIrrelevant              20 distinct / 22 generated               0s
+AP_StatusLossRest            holds                                                      124740 distinct / 700347 generated       11s
+AP_TiesRest                  holds                                                      567462 distinct / 4327147 generated      36s

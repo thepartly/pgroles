@@ -57,6 +57,19 @@ use sqlx::PgPool;
 
 const ROUNDS: usize = 3;
 
+/// The tests in this file share one server and grant on one database, so they
+/// take turns: two concurrent `GRANT ... ON DATABASE` statements update the
+/// same `pg_database` row, and PostgreSQL rejects the second with "tuple
+/// concurrently updated". (The operator serializes such work per database
+/// with an advisory lock; these tests bypass it.)
+static LIVE_DATABASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn take_live_database() -> std::sync::MutexGuard<'static, ()> {
+    LIVE_DATABASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for live DB tests")
 }
@@ -654,6 +667,7 @@ async fn run_pair(
 #[test]
 #[ignore]
 fn policies_without_conflicts_never_undo_each_other() {
+    let _turn = take_live_database();
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let pool = runtime
         .block_on(PgPool::connect(&database_url()))
@@ -833,6 +847,7 @@ async fn with_universe_on_two<T>(
 fn policies_on_two_databases_without_server_conflicts_never_undo_each_other() {
     use pgroles_operator::crd::SharedTarget;
 
+    let _turn = take_live_database();
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let pool_a = runtime
         .block_on(PgPool::connect(&database_url()))
@@ -936,6 +951,7 @@ fn policies_on_two_databases_without_server_conflicts_never_undo_each_other() {
 #[test]
 #[ignore]
 fn fixed_pairs_behave_as_the_rules_say() {
+    let _turn = take_live_database();
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let pool = runtime
         .block_on(PgPool::connect(&database_url()))

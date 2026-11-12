@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use k8s_openapi::api::core::v1::{ConfigMap, Pod, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Pod, Secret};
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::wait::{await_condition, conditions};
 use kube::{Client, Resource, ResourceExt};
@@ -17,6 +17,7 @@ use pgroles_operator::crd::{
     PlanPhase, PolicyCondition, PostgresPolicy, PostgresPolicyCandidate, PostgresPolicyPlan,
     REQUESTED_RECONCILE_ANNOTATION, SqlCompression,
 };
+use pgroles_operator::database::PostgresDatabase;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -36,6 +37,8 @@ pub struct Scenario {
     secrets: Mutex<Vec<String>>,
     roles: Mutex<Vec<String>>,
     schemas: Mutex<Vec<String>>,
+    namespaces: Mutex<Vec<String>>,
+    databases: Mutex<Vec<(String, String)>>,
 }
 
 /// Run `body`, then remove what it created whether or not it passed.
@@ -56,6 +59,8 @@ where
         secrets: Mutex::default(),
         roles: Mutex::default(),
         schemas: Mutex::default(),
+        namespaces: Mutex::default(),
+        databases: Mutex::default(),
     });
     let outcome = AssertUnwindSafe(body(scenario.clone()))
         .catch_unwind()
@@ -71,7 +76,17 @@ where
 
 /// The cluster's PostgreSQL, reached through a port-forward to `postgres-0`
 /// that this process owns, so no `kubectl` subprocess is involved.
+///
+/// `PGROLES_E2E_DATABASE_URL` connects directly instead, for an API server
+/// without nodes and a PostgreSQL the operator reaches the same way.
 async fn connect_postgres(client: Client) -> PgPool {
+    if let Ok(url) = std::env::var("PGROLES_E2E_DATABASE_URL") {
+        return PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL at PGROLES_E2E_DATABASE_URL");
+    }
     let pods: Api<Pod> = Api::namespaced(client, NAMESPACE);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -162,8 +177,21 @@ impl Scenario {
     /// A Secret holding a DATABASE_URL for `user` on the cluster's database:
     /// the shared superuser URL with its credentials replaced.
     pub async fn database_secret(&self, name: &str, user: &str, password: &str) {
-        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), NAMESPACE);
-        let shared = secrets.get("postgres-credentials").await.unwrap();
+        self.database_secret_in(NAMESPACE, name, user, password)
+            .await;
+    }
+
+    /// As [`Self::database_secret`], in `namespace`.
+    pub async fn database_secret_in(
+        &self,
+        namespace: &str,
+        name: &str,
+        user: &str,
+        password: &str,
+    ) {
+        let shared: Api<Secret> = Api::namespaced(self.client.clone(), NAMESPACE);
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        let shared = shared.get("postgres-credentials").await.unwrap();
         let url = String::from_utf8(shared.data.unwrap()["DATABASE_URL"].0.clone()).unwrap();
         let (scheme, rest) = url.split_once("://").unwrap();
         let host = rest.rsplit_once('@').unwrap().1;
@@ -174,9 +202,73 @@ impl Scenario {
             "stringData": {"DATABASE_URL": format!("{scheme}://{user}:{password}@{host}")},
         }))
         .unwrap();
-        self.secrets.lock().unwrap().push(name.to_string());
+        if namespace == NAMESPACE {
+            // Other namespaces are the scenario's own and go with it.
+            self.secrets.lock().unwrap().push(name.to_string());
+        }
         secrets
             .create(&PostParams::default(), &secret)
+            .await
+            .unwrap();
+    }
+
+    /// A namespace for this scenario, removed with everything in it.
+    pub async fn create_namespace(&self, name: &str) {
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+        let namespace: Namespace =
+            serde_json::from_value(json!({"metadata": {"name": name}})).unwrap();
+        self.namespaces.lock().unwrap().push(name.to_string());
+        namespaces
+            .create(&PostParams::default(), &namespace)
+            .await
+            .unwrap();
+    }
+
+    pub fn policies_in(&self, namespace: &str) -> Api<PostgresPolicy> {
+        Api::namespaced(self.client.clone(), namespace)
+    }
+
+    pub fn databases_in(&self, namespace: &str) -> Api<PostgresDatabase> {
+        Api::namespaced(self.client.clone(), namespace)
+    }
+
+    pub async fn create_policy_in(&self, namespace: &str, name: &str, spec: Value) {
+        let policy = PostgresPolicy::new(
+            name,
+            serde_json::from_value(spec).expect("a well-formed PostgresPolicy spec"),
+        );
+        self.policies_in(namespace)
+            .create(&PostParams::default(), &policy)
+            .await
+            .unwrap();
+    }
+
+    pub async fn patch_policy_spec_in(&self, namespace: &str, name: &str, patch: Value) {
+        self.policies_in(namespace)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({"spec": patch})),
+            )
+            .await
+            .unwrap();
+    }
+
+    pub async fn delete_policy_in(&self, namespace: &str, name: &str) {
+        delete_and_wait(&self.policies_in(namespace), name).await;
+    }
+
+    pub async fn create_database(&self, namespace: &str, name: &str, spec: Value) {
+        let database = PostgresDatabase::new(
+            name,
+            serde_json::from_value(spec).expect("a well-formed PostgresDatabase spec"),
+        );
+        self.databases
+            .lock()
+            .unwrap()
+            .push((namespace.to_string(), name.to_string()));
+        self.databases_in(namespace)
+            .create(&PostParams::default(), &database)
             .await
             .unwrap();
     }
@@ -266,6 +358,62 @@ impl Scenario {
                 panic!("{name} did not reach {what} within {WAIT_LIMIT:?}; last seen:\n{last:#?}")
             }
         }
+    }
+
+    /// Follow a policy in `namespace` until its condition `kind` has `reason`.
+    pub async fn wait_policy_condition_in(
+        &self,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+        status: &str,
+        reason: &str,
+    ) -> PostgresPolicy {
+        let (kind, status, reason) = (kind.to_string(), status.to_string(), reason.to_string());
+        self.wait_for(
+            &self.policies_in(namespace),
+            name,
+            &format!("{kind}={status}/{reason}"),
+            move |policy| {
+                policy.status.as_ref().is_some_and(|s| {
+                    s.conditions.iter().any(|c| {
+                        c.condition_type == kind
+                            && c.status == status
+                            && c.reason.as_deref() == Some(&reason)
+                    })
+                })
+            },
+        )
+        .await
+    }
+
+    /// Request a reconcile of a policy in `namespace` and wait until the
+    /// operator has run it.
+    pub async fn reconcile_in(&self, namespace: &str, name: &str) -> PostgresPolicy {
+        let requested = jiff::Timestamp::now().to_string();
+        self.policies_in(namespace)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({
+                    "metadata": {"annotations": {REQUESTED_RECONCILE_ANNOTATION: requested}}
+                })),
+            )
+            .await
+            .unwrap();
+        self.wait_for(
+            &self.policies_in(namespace),
+            name,
+            &format!("an attempted reconcile for {requested}"),
+            move |policy| {
+                policy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.last_attempted_reconcile_at.as_deref())
+                    == Some(requested.as_str())
+            },
+        )
+        .await
     }
 
     pub async fn wait_policy_ready(
@@ -497,6 +645,17 @@ impl Scenario {
         let policies = self.policies.lock().unwrap().clone();
         for name in policies {
             delete_and_wait(&self.policies(), &name).await;
+        }
+        // A database goes before its namespace, so the operator-owned
+        // composed policy is removed while the operator still sees it.
+        let databases = self.databases.lock().unwrap().clone();
+        for (namespace, name) in databases {
+            delete_and_wait(&self.databases_in(&namespace), &name).await;
+        }
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+        let created = self.namespaces.lock().unwrap().clone();
+        for name in created {
+            delete_and_wait(&namespaces, &name).await;
         }
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), NAMESPACE);
         let names = self.secrets.lock().unwrap().clone();

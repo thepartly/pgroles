@@ -20,6 +20,17 @@ rules:
   - apiGroups: ["pgroles.io"]
     resources: ["postgrespolicies/finalizers"]
     verbs: ["update"]
+  # PostgresDatabase (ADR-002 prototype): read databases, write their status,
+  # and create the operator-owned composed policy for each.
+  - apiGroups: ["pgroles.io"]
+    resources: ["postgresdatabases"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["pgroles.io"]
+    resources: ["postgresdatabases/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["pgroles.io"]
+    resources: ["postgrespolicies"]
+    verbs: ["create"]
   # Logical verb consumed by the plan-decision admission policy to tell the
   # operator's own plan-status writes from a reviewer's decision, without
   # hard-coding a ServiceAccount identity. Grant it to controllers only:

@@ -1,0 +1,23 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata:
+  name: billing
+  namespace: billing
+spec:
+  roles:
+  - name: billing_migrator
+    login: true
+    comment: Runs billing service migrations and owns billing objects
+  schemas:
+  - name: billing
+    owner: billing_migrator
+  grants:
+  - role: billing_migrator
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  databaseRef:
+    name: appdb
+    namespace: platform

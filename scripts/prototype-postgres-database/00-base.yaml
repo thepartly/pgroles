@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Namespace
+metadata: {name: platform}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: billing}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: shipping}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: analytics}
+---
+# The only database credential in the cluster lives with the database owner.
+apiVersion: v1
+kind: Secret
+metadata: {name: appdb-executor, namespace: platform}
+stringData:
+  DATABASE_URL: postgres://pgroles_executor:executorpw@127.0.0.1:5432/appdb

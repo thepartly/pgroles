@@ -24,3 +24,4 @@ mod harness;
 mod membership_options;
 mod plan_authority;
 mod plan_cleanup;
+mod postgres_database;

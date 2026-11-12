@@ -168,6 +168,7 @@ const generatedCrdPages = [
   ['PostgresPolicyCandidate', '/docs/reference/postgrespolicycandidate-v1alpha1'],
   ['EphemeralAccessPolicy', '/docs/reference/ephemeralaccesspolicy-v1alpha1'],
   ['EphemeralAccessRequest', '/docs/reference/ephemeralaccessrequest-v1alpha1'],
+  ['PostgresDatabase (prototype)', '/docs/reference/postgresdatabase-v1alpha1'],
 ].map(([title, href]) => ({
   title,
   navigationTitle: title,

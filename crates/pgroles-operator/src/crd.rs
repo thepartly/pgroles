@@ -51,8 +51,21 @@ pub const VALID_SSL_MODES: &[&str] = &[
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 pub struct PostgresPolicySpec {
-    /// Database connection configuration.
+    /// Database connection configuration. Leave unset when `databaseRef`
+    /// attaches the policy to a `PostgresDatabase`, which owns the connection.
+    #[serde(default)]
     pub connection: ConnectionSpec,
+
+    /// Attach this policy to a `PostgresDatabase` instead of connecting
+    /// directly. The database owner's delegations decide what the policy may
+    /// manage, and the operator composes every attached policy into one plan
+    /// per database.
+    #[serde(
+        default,
+        rename = "databaseRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub database_ref: Option<DatabaseReference>,
 
     /// Reconciliation interval (e.g. "5m", "1h"). Defaults to "5m".
     #[serde(default = "default_interval")]
@@ -311,7 +324,7 @@ impl From<CrdReconciliationMode> for pgroles_core::diff::ReconciliationMode {
 ///
 /// Params mode can also use provider-backed authentication instead of a static
 /// password, for example GKE Workload Identity to Cloud SQL IAM.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSpec {
     /// Reference to a Kubernetes Secret containing a connection URL.
@@ -2128,6 +2141,18 @@ impl ResolvedDatabaseTarget {
             server_key: Some(server_key),
         })
     }
+}
+
+/// A reference from a `PostgresPolicy` to the `PostgresDatabase` it attaches to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DatabaseReference {
+    /// Name of the `PostgresDatabase`.
+    #[schemars(length(min = 1, max = 253))]
+    pub name: String,
+    /// Namespace of the `PostgresDatabase`. Defaults to the policy's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 63))]
+    pub namespace: Option<String>,
 }
 
 /// Whether a peer policy targets the same database as this one.
@@ -3989,6 +4014,7 @@ mod tests {
     #[test]
     fn spec_to_policy_manifest_roundtrip() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -4055,6 +4081,7 @@ mod tests {
     #[test]
     fn spec_to_policy_manifest_preserves_profile_inherit() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -4141,6 +4168,7 @@ mod tests {
         );
 
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -4202,6 +4230,7 @@ mod tests {
     #[test]
     fn a_global_default_privilege_claims_the_implicit_default_owner() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -4514,6 +4543,7 @@ mod tests {
     /// Helper to build a minimal spec with the given connection and no roles/grants.
     pub(super) fn spec_with_connection(connection: ConnectionSpec) -> PostgresPolicySpec {
         PostgresPolicySpec {
+            database_ref: None,
             connection,
             interval: "5m".into(),
             suspend: false,
@@ -5423,6 +5453,7 @@ params:
         ensure: pgroles_core::manifest::Ensure,
     ) -> PostgresPolicySpec {
         PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-secret".to_string(),
@@ -6246,6 +6277,7 @@ retirements:
     #[test]
     fn referenced_secret_names_includes_connection_secret() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6279,6 +6311,7 @@ retirements:
     #[test]
     fn referenced_secret_names_includes_password_secrets() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6387,6 +6420,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_password_without_login() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6443,6 +6477,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_password_with_login_omitted() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6499,6 +6534,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_password_mode() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6559,6 +6595,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_length() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6617,6 +6654,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_secret_key() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6676,6 +6714,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_invalid_generated_secret_name() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6734,6 +6773,7 @@ retirements:
     #[test]
     fn validate_password_specs_rejects_reserved_generated_secret_key() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "pg-conn".to_string(),
@@ -6821,6 +6861,7 @@ retirements:
     #[test]
     fn effective_approval_infers_from_mode() {
         let base = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "test".into(),
@@ -6970,6 +7011,7 @@ retirements:
     #[test]
     fn effective_approval_explicit_auto_overrides_plan_mode() {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "test".into(),
@@ -7423,6 +7465,7 @@ retirements:
         // suspend, approval, or ownership-transfer allowance.
         let execution = [
             "connection",
+            "databaseRef",
             "interval",
             "mode",
             "suspend",
