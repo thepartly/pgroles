@@ -160,7 +160,7 @@ We will:
 7. **Check authority per identity, without fallback.** Each generated policy
    runs the existing authority preflight on its own connection. If it reports
    issues, that policy's plan does not run; its status is `Ready=False`,
-   reason `ExecutorLacksAuthority`, naming the delegation, the executor role,
+   reason `ExecutorAuthority` (as today), naming the delegation, the executor role,
    the changes, and what the database owner needs to grant (for example
    `GRANT billing_migrator TO pgroles_billing WITH INHERIT TRUE`). Other
    identities' plans still run.
@@ -206,7 +206,7 @@ We will:
 
 - Extend the ADR-002 scenario with three executor roles: grants converge
   under each team's identity; a policy whose team executor lacks a needed
-  membership reports `ExecutorLacksAuthority` and nothing runs as the owner
+  membership reports `ExecutorAuthority` and nothing runs as the owner
   for it; a forged change attributed to billing but touching shipping's schema
   is refused by PostgreSQL.
 - A property test that plans attributed to different delegations commute: any
@@ -278,7 +278,7 @@ opt in. A delegation with `executor` runs its grants, default privileges and
 Migration: adding `executor` to an existing delegation moves its changes to a
 new identity, which is a new approval (item 8). Grants made earlier by the
 owner's executor stay attributed to that grantor; until a re-grant step exists
-(see Unresolved), revokes of those grants report `ExecutorLacksAuthority`
+(see Unresolved), revokes of those grants report `ExecutorAuthority`
 rather than running as the owner.
 
 ### Process
