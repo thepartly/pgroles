@@ -938,6 +938,9 @@ pub async fn preflight_authority_issues(
         })
         .collect();
     let mut early_default_owners = BTreeSet::new();
+    // Owners whose automatic creation edge no longer inherits by the time
+    // their first default grant runs.
+    let mut downgraded_default_owners = BTreeSet::new();
     if !executor_is_superuser && server_major >= 16 {
         for owner in &set_owners {
             let first_default = changes.iter().position(|change| {
@@ -959,20 +962,38 @@ pub async fn preflight_authority_issues(
                     _ => None,
                 })
                 .collect();
-            if !early_edges.is_empty()
-                && roles_unreachable_in_graph(
-                    pool,
-                    std::slice::from_ref(owner),
-                    &[],
-                    &early_edges,
-                    &created,
-                    &creation_edges,
-                    &[],
-                )
-                .await?
-                .is_empty()
-            {
+            // The creator's automatic INHERIT edge is granted by the creator,
+            // so its own earlier `GRANT ... WITH INHERIT FALSE` overwrites it.
+            let early_creation_edges: Vec<(String, String)> = creation_edges
+                .iter()
+                .filter(|(role, _)| {
+                    !changes[..first_default].iter().any(|change| {
+                        matches!(change,
+                        Change::AddMember { role: target, member, inherit: false, .. }
+                            if target == role && *member == executor)
+                    })
+                })
+                .cloned()
+                .collect();
+            let downgraded = early_creation_edges.len() != creation_edges.len();
+            if early_edges.is_empty() && !downgraded {
+                continue;
+            }
+            let reachable = roles_unreachable_in_graph(
+                pool,
+                std::slice::from_ref(owner),
+                &[],
+                &early_edges,
+                &created,
+                &early_creation_edges,
+                &[],
+            )
+            .await?
+            .is_empty();
+            if reachable && !early_edges.is_empty() {
                 early_default_owners.insert(owner.clone());
+            } else if !reachable && downgraded {
+                downgraded_default_owners.insert(owner.clone());
             }
         }
     }
@@ -1120,7 +1141,7 @@ pub async fn preflight_authority_issues(
             }
             if created.contains(owner)
                 && !executor_is_superuser
-                && !inherits_created
+                && (!inherits_created || downgraded_default_owners.contains(owner))
                 && !early_default_owners.contains(owner)
                 && (set_owners.contains(owner) || !revoke_owners_phase_checked)
             {
@@ -1372,10 +1393,27 @@ async fn schema_owner_set_issues(
     }) {
         return Ok(Vec::new());
     }
-    let rows = crate::memberships::fetch_memberships(pool, None).await?;
+    // Every edge can carry SET, so read `pg_auth_members` unfiltered: the
+    // inspection queries skip `pg_*` roles, and their `LIKE 'pg_%'` also skips
+    // ordinary roles such as `pgbouncer`. Before PostgreSQL 16 every
+    // membership permits SET ROLE and grants are not attributed.
+    let rows: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(if server_major >= 16 {
+        "SELECT r.rolname::text, m.rolname::text, g.rolname::text, a.set_option \
+         FROM pg_auth_members a \
+         JOIN pg_roles r ON r.oid = a.roleid \
+         JOIN pg_roles m ON m.oid = a.member \
+         LEFT JOIN pg_roles g ON g.oid = a.grantor"
+    } else {
+        "SELECT r.rolname::text, m.rolname::text, NULL::text, true \
+         FROM pg_auth_members a \
+         JOIN pg_roles r ON r.oid = a.roleid \
+         JOIN pg_roles m ON m.oid = a.member"
+    })
+    .fetch_all(pool)
+    .await?;
     let mut edges: BTreeMap<(String, String, Option<String>), bool> = rows
         .into_iter()
-        .map(|r| ((r.role_name, r.member_name, r.grantor), r.set_option))
+        .map(|(role, member, grantor, set)| ((role, member, grantor), set))
         .collect();
     let sets_created = if server_major >= 16 {
         let setting: String = sqlx::query_scalar("SHOW createrole_self_grant")
@@ -1391,9 +1429,11 @@ async fn schema_owner_set_issues(
     for change in changes {
         match change {
             Change::CreateRole { name, .. } if sets_created => {
-                // The automatic edge is attributed to the bootstrap superuser,
-                // independently of subsequent grants by this executor.
-                edges.insert((name.clone(), executor.into(), None), true);
+                // `createrole_self_grant` adds a second edge granted by the
+                // creator itself; the bootstrap superuser's edge carries only
+                // ADMIN. A later grant by this executor updates this edge and
+                // keeps its SET option.
+                edges.insert((name.clone(), executor.into(), Some(executor.into())), true);
             }
             Change::AddMember { role, member, .. } => {
                 // New grants default to SET TRUE; an existing grant keeps its

@@ -8,9 +8,15 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use std::str::FromStr;
 
+/// Tests in this file run in parallel. Granting and dropping database
+/// privileges both rewrite the `pg_database` row, and concurrent rewrites fail
+/// with "tuple concurrently updated".
+static DATABASE_ACL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
 async fn explicit_fresh_owner_membership_bootstraps_schema_without_self_grant() {
+    let _database_acl = DATABASE_ACL.lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     let root = PgPool::connect(&url).await.unwrap();
     let database: String = sqlx::query_scalar("SELECT current_database()")
@@ -271,6 +277,158 @@ async fn schema_owner_preflight_follows_set_edges_at_each_statement() {
     }
     pool.close().await;
     root.execute("DROP ROLE sbp_owner, sbp_bridge, sbp_executor")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
+async fn preflight_agrees_with_postgres_for_self_grants_and_pg_prefixed_owners() {
+    use pgroles_core::manifest::{ObjectType, Privilege};
+    use pgroles_core::model::{DefaultPrivilegeScope, Grantee, RoleGraph, RoleState};
+    use pgroles_inspect::AuthorityIssue;
+    use std::collections::BTreeSet;
+
+    let _database_acl = DATABASE_ACL.lock().await;
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let root = PgPool::connect(&url).await.unwrap();
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&root)
+        .await
+        .unwrap();
+    let executor_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbs_executor')")
+            .fetch_one(&root)
+            .await
+            .unwrap();
+    if executor_exists {
+        root.execute("DROP OWNED BY sbs_executor").await.unwrap();
+    }
+    // `pgsbs_owner` matches the inspection queries' `LIKE 'pg_%'` filter.
+    root.execute(
+        "DROP ROLE IF EXISTS pgsbs_owner, sbs_executor;
+        CREATE ROLE sbs_executor LOGIN CREATEROLE PASSWORD 'sbs-test-password';
+        CREATE ROLE pgsbs_owner;
+        GRANT pgsbs_owner TO sbs_executor WITH INHERIT FALSE, SET TRUE",
+    )
+    .await
+    .unwrap();
+    root.execute(
+        format!(
+            "GRANT CREATE ON DATABASE {} TO sbs_executor",
+            quote_ident(&database)
+        )
+        .as_str(),
+    )
+    .await
+    .unwrap();
+    let current = RoleGraph::default();
+    let create = Change::CreateRole {
+        name: "sbs_new_owner".into(),
+        state: RoleState::default(),
+    };
+    let member = |inherit| Change::AddMember {
+        role: "sbs_new_owner".into(),
+        member: "sbs_executor".into(),
+        inherit,
+        admin: false,
+    };
+    let schema = |owner: &str| Change::CreateSchema {
+        name: "sbs_schema".into(),
+        owner: Some(owner.into()),
+    };
+    let defaults = Change::SetDefaultPrivilege {
+        owner: "sbs_new_owner".into(),
+        scope: DefaultPrivilegeScope::Global,
+        on_type: ObjectType::Table,
+        grantee: Grantee::Role("sbs_executor".into()),
+        privileges: BTreeSet::from([Privilege::Select]),
+    };
+    let fresh = schema("sbs_new_owner");
+    for (label, self_grant, changes, blocked) in [
+        (
+            "existing SET path into a pg-prefixed owner",
+            "",
+            vec![schema("pgsbs_owner")],
+            false,
+        ),
+        (
+            "automatic SET and INHERIT",
+            "set,inherit",
+            vec![create.clone(), fresh.clone(), defaults.clone()],
+            false,
+        ),
+        (
+            "inheriting membership",
+            "set,inherit",
+            vec![
+                create.clone(),
+                member(true),
+                fresh.clone(),
+                defaults.clone(),
+            ],
+            false,
+        ),
+        (
+            "non-inheriting membership after the default grant",
+            "set,inherit",
+            vec![
+                create.clone(),
+                fresh.clone(),
+                defaults.clone(),
+                member(false),
+            ],
+            false,
+        ),
+        (
+            "non-inheriting membership before the default grant",
+            "set,inherit",
+            vec![
+                create.clone(),
+                member(false),
+                fresh.clone(),
+                defaults.clone(),
+            ],
+            true,
+        ),
+    ] {
+        let options = PgConnectOptions::from_str(&url)
+            .unwrap()
+            .username("sbs_executor")
+            .password("sbs-test-password")
+            .options([("createrole_self_grant", self_grant)]);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let issues = preflight_authority_issues(&pool, &changes, &current)
+            .await
+            .unwrap();
+        if blocked {
+            assert!(
+                issues
+                    .iter()
+                    .any(|i| matches!(i, AuthorityIssue::DefaultPrivilegeOwner { .. })),
+                "{label}: {issues:?}"
+            );
+        } else {
+            assert!(issues.is_empty(), "{label}: {issues:?}");
+        }
+        // The plan must fail in PostgreSQL exactly when preflight blocks it.
+        let mut tx = pool.begin().await.unwrap();
+        let mut failed = false;
+        for statement in render_batch_with_context(&changes, &SqlContext::default()).unwrap() {
+            if tx.execute(statement.sql.as_str()).await.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        tx.rollback().await.unwrap();
+        assert_eq!(failed, blocked, "{label}");
+        pool.close().await;
+    }
+    root.execute("DROP OWNED BY sbs_executor; DROP ROLE pgsbs_owner, sbs_executor")
         .await
         .unwrap();
 }
