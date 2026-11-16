@@ -34,7 +34,10 @@ the migration window ends.
    `shared.role_pattern` → built-in default. Every declared pattern requires
    `{profile}`. Review naming changes as role changes, not cosmetic edits.
 4. Declare managed roles and memberships explicitly. Use `external: true` for a
-   role whose lifecycle belongs to a provider or another system.
+   role whose lifecycle belongs to a provider or another system. For fresh schema
+   owners, declare the executor's inheriting membership explicitly: managed
+   services may omit PostgreSQL's automatic creator membership. These declared
+   grants execute before schema creation and default privileges.
 5. Model current and future objects separately: ordinary grants cover existing
    objects; default privileges cover only future objects created by the named
    owner.

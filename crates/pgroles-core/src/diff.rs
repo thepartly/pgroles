@@ -27,7 +27,7 @@ use crate::model::{
 ///
 /// Changes are produced in dependency order by [`diff`]:
 /// 1. Create roles (before granting anything to them)
-/// 2. Alter roles (attribute changes)
+/// 2. Alter roles and grant declared memberships in newly created schema owners
 /// 3. Grant privileges
 /// 4. Set default privileges
 /// 5. Revoke privileges (before membership removals: a grantor-targeted
@@ -778,10 +778,22 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
         });
     }
 
+    // Managed services may omit CREATE ROLE's automatic membership grants.
+    // Establish declared access to fresh owners before schemas/default ACLs use it.
+    let fresh_owners: BTreeSet<&str> = desired
+        .schemas
+        .values()
+        .filter_map(|schema| schema.owner.as_deref())
+        .filter(|owner| !current.roles.contains_key(*owner) && desired.roles.contains_key(*owner))
+        .collect();
+    let (owner_members, add_members): (Vec<_>, Vec<_>) = add_members.into_iter()
+        .partition(|change| matches!(change, Change::AddMember { role, inherit: true, .. } if fresh_owners.contains(role.as_str())));
+
     // ----- Assemble in dependency order -----
     let mut changes = Vec::new();
     changes.extend(creates);
     changes.extend(alters);
+    changes.extend(owner_members);
     changes.extend(schema_changes);
     changes.extend(schema_grants);
     changes.extend(grants);
@@ -2863,6 +2875,92 @@ grants:
             c,
             Change::RevokeDefaultPrivilege { privileges, .. } if privileges.contains(&Privilege::Delete)
         )));
+    }
+
+    #[test]
+    fn fresh_owner_memberships_precede_schema_creation_and_default_privileges() {
+        let mut current = empty_graph();
+        current
+            .roles
+            .insert("executor".into(), RoleState::default());
+        let mut desired = current.clone();
+        desired.roles.insert("owner".into(), RoleState::default());
+        desired
+            .schemas
+            .insert("app".into(), managed_schema("owner"));
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: true,
+            admin: false,
+        });
+        desired.default_privileges.insert(
+            DefaultPrivKey {
+                owner: "owner".into(),
+                scope: DefaultPrivilegeScope::Schema {
+                    schema: "app".into(),
+                },
+                on_type: ObjectType::Table,
+                grantee: "executor".into(),
+            },
+            DefaultPrivState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let changes = diff(&current, &desired);
+        let create_role = changes
+            .iter()
+            .position(|change| matches!(change, Change::CreateRole { name, .. } if name == "owner"))
+            .unwrap();
+        let membership = changes.iter().position(|change| matches!(change, Change::AddMember { role, member, .. } if role == "owner" && member == "executor")).unwrap();
+        let schema = changes
+            .iter()
+            .position(|change| matches!(change, Change::CreateSchema { name, .. } if name == "app"))
+            .unwrap();
+        let defaults = changes.iter().position(|change| matches!(change, Change::SetDefaultPrivilege { owner, .. } if owner == "owner")).unwrap();
+        assert!(
+            create_role < membership && membership < schema && schema < defaults,
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn noninheriting_fresh_owner_membership_stays_after_default_grants() {
+        let mut current = empty_graph();
+        current
+            .roles
+            .insert("executor".into(), RoleState::default());
+        let mut desired = current.clone();
+        desired.roles.insert("owner".into(), RoleState::default());
+        desired
+            .schemas
+            .insert("app".into(), managed_schema("owner"));
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: false,
+            admin: false,
+        });
+        desired.default_privileges.insert(
+            DefaultPrivKey {
+                owner: "owner".into(),
+                scope: DefaultPrivilegeScope::Schema {
+                    schema: "app".into(),
+                },
+                on_type: ObjectType::Table,
+                grantee: "executor".into(),
+            },
+            DefaultPrivState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let changes = diff(&current, &desired);
+        let membership = changes
+            .iter()
+            .position(|change| matches!(change, Change::AddMember { role, .. } if role == "owner"))
+            .unwrap();
+        let defaults = changes.iter().position(|change| matches!(change, Change::SetDefaultPrivilege { owner, .. } if owner == "owner")).unwrap();
+        assert!(defaults < membership, "{changes:?}");
     }
 
     #[test]

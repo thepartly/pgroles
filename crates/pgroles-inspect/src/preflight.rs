@@ -906,8 +906,8 @@ pub async fn preflight_authority_issues(
             _ => None,
         }))
         .collect();
-    // Owners of `SetDefaultPrivilege` changes, which execute before any
-    // membership change: the owner check below judges their initial authority.
+    // Default grants follow fresh-owner membership additions but precede
+    // all other membership changes.
     // The later phase check avoids duplicating that check's failures.
     let set_owners: BTreeSet<String> = changes
         .iter()
@@ -916,6 +916,45 @@ pub async fn preflight_authority_issues(
             _ => None,
         })
         .collect();
+    let mut early_default_owners = BTreeSet::new();
+    if !executor_is_superuser && server_major >= 16 {
+        for owner in &set_owners {
+            let first_default = changes.iter().position(|change| {
+                matches!(change,
+                Change::SetDefaultPrivilege { owner: target, .. } if target == owner)
+            });
+            let Some(first_default) = first_default else {
+                continue;
+            };
+            let early_edges: Vec<_> = changes[..first_default]
+                .iter()
+                .filter_map(|change| match change {
+                    Change::AddMember {
+                        role,
+                        member,
+                        inherit: true,
+                        ..
+                    } => Some((role.clone(), member.clone())),
+                    _ => None,
+                })
+                .collect();
+            if !early_edges.is_empty()
+                && roles_unreachable_in_graph(
+                    pool,
+                    std::slice::from_ref(owner),
+                    &[],
+                    &early_edges,
+                    &created,
+                    &creation_edges,
+                    &[],
+                )
+                .await?
+                .is_empty()
+            {
+                early_default_owners.insert(owner.clone());
+            }
+        }
+    }
     let phase_checks_active = !executor_is_superuser && server_major >= 16;
     // When the plan changes memberships at all, the phase graph — not the
     // current graph — is authoritative for RevokeDefaultPrivilege owners, so
@@ -1000,7 +1039,10 @@ pub async fn preflight_authority_issues(
             // Avoid duplicating a failing grant-phase check. A new owner
             // with inherited creation authority passes that check, but can
             // still lose authority before its later revoke.
-            if set_owners.contains(&owner) && !(inherits_created && created.contains(&owner)) {
+            if set_owners.contains(&owner)
+                && !(inherits_created && created.contains(&owner))
+                && !early_default_owners.contains(&owner)
+            {
                 continue;
             }
             issues.push(AuthorityIssue::DefaultPrivilegeOwner {
@@ -1011,8 +1053,8 @@ pub async fn preflight_authority_issues(
     }
 
     // --- Default-privilege owner authority ---
-    // `SetDefaultPrivilege` executes before any membership change, so the
-    // current graph judges it. `RevokeDefaultPrivilege` executes after the
+    // `SetDefaultPrivilege` uses current authority plus any declared
+    // fresh-owner memberships established earlier in the plan. `RevokeDefaultPrivilege` executes after the
     // removal and addition batches — when the plan changes memberships (and
     // the phase checks above ran), those owners were already judged against
     // the phase graph and are skipped here; both kinds still get the
@@ -1039,7 +1081,10 @@ pub async fn preflight_authority_issues(
         .await?;
         let known: BTreeSet<String> = rows.iter().map(|(owner, _)| owner.clone()).collect();
         for (owner, can_act) in rows {
-            if !can_act && (set_owners.contains(&owner) || !revoke_owners_phase_checked) {
+            if !can_act
+                && !early_default_owners.contains(&owner)
+                && (set_owners.contains(&owner) || !revoke_owners_phase_checked)
+            {
                 issues.push(AuthorityIssue::DefaultPrivilegeOwner {
                     owner,
                     executor: executor.clone(),
@@ -1055,6 +1100,7 @@ pub async fn preflight_authority_issues(
             if created.contains(owner)
                 && !executor_is_superuser
                 && !inherits_created
+                && !early_default_owners.contains(owner)
                 && (set_owners.contains(owner) || !revoke_owners_phase_checked)
             {
                 issues.push(AuthorityIssue::DefaultPrivilegeOwner {

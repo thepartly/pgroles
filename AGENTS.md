@@ -99,7 +99,7 @@ diff(current, effective desired) → Vec<Change> → sql::render_all_with_contex
 
 ### Diff Change Ordering
 
-`diff()` assembles changes in dependency order: creates → alters/comments → grants → default privileges → object revocations → membership removes → membership adds → default privilege revocations → drops. Retirement steps (terminate sessions, reassign owned, drop owned) are inserted immediately before the matching `DropRole` by `apply_role_retirements()`. `apply` executes the whole plan in a single transaction.
+`diff()` assembles changes in dependency order: creates → alters/comments → inheriting memberships in fresh schema owners → schemas → grants → default privileges → object revocations → membership removes → membership adds → default privilege revocations → drops. Retirement steps (terminate sessions, reassign owned, drop owned) are inserted immediately before the matching `DropRole` by `apply_role_retirements()`. `apply` executes the whole plan in a single transaction.
 
 ## CI
 
