@@ -1,4 +1,4 @@
-//! Fresh owner access must not depend on managed-service automatic grants.
+//! Fresh owner access must not depend on automatic creator memberships.
 use pgroles_core::diff::{Change, ReconciliationMode, diff, filter_changes};
 use pgroles_core::sql::{SqlContext, quote_ident, render_batch_with_context};
 use pgroles_inspect::{
@@ -22,16 +22,28 @@ async fn explicit_fresh_owner_membership_bootstraps_schema_without_self_grant() 
 roles:
   - name: sbo_owner
     login: false
+  - name: sbo_defaults_owner
+    login: false
   - name: sbo_executor
     external: true
     preserve_undeclared_grants: true
 schemas:
   - name: sbo_schema
     owner: sbo_owner
+  - name: sbo_existing
+    owner: sbo_owner
 memberships:
   - role: sbo_owner
     members: [{ name: sbo_executor }]
+  - role: sbo_defaults_owner
+    members: [{ name: sbo_executor }]
 default_privileges:
+  - owner: sbo_defaults_owner
+    scope: { type: global }
+    grant:
+      - role: sbo_executor
+        on_type: table
+        privileges: [SELECT]
   - owner: sbo_owner
     scope: { type: schema, schema: sbo_schema }
     grant:
@@ -41,9 +53,25 @@ default_privileges:
 "#,
     )
     .unwrap();
+    root.execute("DROP SCHEMA IF EXISTS sbo_schema, sbo_existing CASCADE")
+        .await
+        .unwrap();
+    for role in ["sbo_owner", "sbo_defaults_owner", "sbo_executor"] {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+                .bind(role)
+                .fetch_one(&root)
+                .await
+                .unwrap();
+        if exists {
+            root.execute(format!("DROP OWNED BY {}", quote_ident(role)).as_str())
+                .await
+                .unwrap();
+        }
+    }
     root.execute(
-        "DROP SCHEMA IF EXISTS sbo_schema CASCADE; DROP ROLE IF EXISTS sbo_owner, sbo_executor;
-        CREATE ROLE sbo_executor LOGIN CREATEROLE PASSWORD 'sbo-test-password'",
+        "DROP ROLE IF EXISTS sbo_owner, sbo_defaults_owner, sbo_executor;
+        CREATE ROLE sbo_executor LOGIN CREATEROLE PASSWORD 'sbo-test-password'; CREATE SCHEMA sbo_existing AUTHORIZATION sbo_executor",
     )
     .await
     .unwrap();
@@ -111,5 +139,138 @@ default_privileges:
         .unwrap();
     assert!(can_set);
     pool.close().await;
-    root.execute("DROP SCHEMA sbo_schema CASCADE; DROP OWNED BY sbo_owner, sbo_executor; DROP ROLE sbo_owner, sbo_executor").await.unwrap();
+    root.execute("DROP SCHEMA sbo_schema, sbo_existing CASCADE")
+        .await
+        .unwrap();
+    for role in ["sbo_owner", "sbo_defaults_owner", "sbo_executor"] {
+        root.execute(format!("DROP OWNED BY {}", quote_ident(role)).as_str())
+            .await
+            .unwrap();
+    }
+    root.execute("DROP ROLE sbo_owner, sbo_defaults_owner, sbo_executor")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL 16+ database and DATABASE_URL"]
+async fn schema_owner_preflight_follows_set_edges_at_each_statement() {
+    use pgroles_core::model::{RoleGraph, RoleState};
+    use pgroles_inspect::AuthorityIssue;
+
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let root = PgPool::connect(&url).await.unwrap();
+    root.execute(
+        "DROP ROLE IF EXISTS sbp_owner, sbp_bridge, sbp_executor;
+        CREATE ROLE sbp_executor LOGIN CREATEROLE PASSWORD 'sbp-test-password';
+        CREATE ROLE sbp_bridge;
+        CREATE ROLE sbp_owner;
+        GRANT sbp_owner TO sbp_bridge WITH INHERIT FALSE, SET TRUE;
+        GRANT sbp_bridge TO sbp_executor WITH INHERIT FALSE, SET TRUE",
+    )
+    .await
+    .unwrap();
+    let options = PgConnectOptions::from_str(&url)
+        .unwrap()
+        .username("sbp_executor")
+        .password("sbp-test-password")
+        .options([("createrole_self_grant", "")]);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let current = RoleGraph::default();
+    for schema in [
+        Change::CreateSchema {
+            name: "sbp_schema".into(),
+            owner: Some("sbp_owner".into()),
+        },
+        Change::AlterSchemaOwner {
+            name: "sbp_schema".into(),
+            owner: "sbp_owner".into(),
+        },
+    ] {
+        let issues = preflight_authority_issues(&pool, std::slice::from_ref(&schema), &current)
+            .await
+            .unwrap();
+        assert!(issues.is_empty(), "SET-only transitive path: {issues:?}");
+        root.execute(
+            "GRANT sbp_owner TO sbp_bridge WITH INHERIT TRUE, SET FALSE;
+            GRANT sbp_bridge TO sbp_executor WITH INHERIT TRUE, SET TRUE",
+        )
+        .await
+        .unwrap();
+        let issues = preflight_authority_issues(&pool, std::slice::from_ref(&schema), &current)
+            .await
+            .unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, AuthorityIssue::SchemaOwnerSet { .. })),
+            "INHERIT without SET: {issues:?}"
+        );
+        root.execute(
+            "GRANT sbp_owner TO sbp_bridge WITH INHERIT FALSE, SET TRUE;
+            GRANT sbp_bridge TO sbp_executor WITH INHERIT FALSE, SET TRUE",
+        )
+        .await
+        .unwrap();
+        let removal = Change::RemoveMember {
+            role: "sbp_owner".into(),
+            member: "sbp_bridge".into(),
+            grantor: None,
+        };
+        let issues = preflight_authority_issues(&pool, &[removal, schema], &current)
+            .await
+            .unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, AuthorityIssue::SchemaOwnerSet { .. })),
+            "removed SET path: {issues:?}"
+        );
+    }
+    for inherit in [false, true] {
+        let create = Change::CreateRole {
+            name: "sbp_new_owner".into(),
+            state: RoleState::default(),
+        };
+        let edge = Change::AddMember {
+            role: "sbp_new_owner".into(),
+            member: "sbp_executor".into(),
+            inherit,
+            admin: false,
+        };
+        let schema = Change::CreateSchema {
+            name: "sbp_schema".into(),
+            owner: Some("sbp_new_owner".into()),
+        };
+        let issues = preflight_authority_issues(
+            &pool,
+            &[create.clone(), edge.clone(), schema.clone()],
+            &current,
+        )
+        .await
+        .unwrap();
+        assert!(issues.is_empty(), "early membership: {issues:?}");
+        for changes in [
+            vec![create.clone(), schema.clone(), edge],
+            vec![create, schema],
+        ] {
+            let issues = preflight_authority_issues(&pool, &changes, &current)
+                .await
+                .unwrap();
+            assert!(
+                issues
+                    .iter()
+                    .any(|i| matches!(i, AuthorityIssue::SchemaOwnerSet { .. })),
+                "late or missing membership: {issues:?}"
+            );
+        }
+    }
+    pool.close().await;
+    root.execute("DROP ROLE sbp_owner, sbp_bridge, sbp_executor")
+        .await
+        .unwrap();
 }

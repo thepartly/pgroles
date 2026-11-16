@@ -57,6 +57,14 @@ pub enum AuthorityIssue {
     /// `ALTER DEFAULT PRIVILEGES` change.
     DefaultPrivilegeOwner { owner: String, executor: String },
 
+    /// The executor cannot SET ROLE to a schema's proposed owner at that
+    /// statement's position in the plan.
+    SchemaOwnerSet {
+        schema: String,
+        owner: String,
+        executor: String,
+    },
+
     /// A planned `ALTER DEFAULT PRIVILEGES` names an owner that does not
     /// exist and that this plan does not create.
     MissingDefaultPrivilegeOwner { owner: String },
@@ -177,6 +185,7 @@ impl AuthorityIssue {
         match self {
             Self::MembershipOptionsBlocked { .. } => "MembershipOptionsBlocked",
             Self::DefaultPrivilegeOwner { .. } => "DefaultPrivilegeOwner",
+            Self::SchemaOwnerSet { .. } => "SchemaOwnerSet",
             Self::MissingDefaultPrivilegeOwner { .. } => "MissingDefaultPrivilegeOwner",
             Self::PredefinedRoleGrant { .. } => "PredefinedRoleGrant",
             Self::MissingPredefinedRole { .. } => "MissingPredefinedRole",
@@ -192,6 +201,14 @@ impl AuthorityIssue {
 impl std::fmt::Display for AuthorityIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AuthorityIssue::SchemaOwnerSet {
+                schema,
+                owner,
+                executor,
+            } => write!(
+                f,
+                "UnsatisfiableSchemaOwner: cannot assign schema \"{schema}\" to owner \"{owner}\" as executor \"{executor}\"; requires SET ROLE permission on the owner before the schema change"
+            ),
             AuthorityIssue::DefaultPrivilegeOwner { owner, executor } => write!(
                 f,
                 "UnsatisfiableDefaultPrivilegeChange: cannot ALTER DEFAULT PRIVILEGES \
@@ -406,6 +423,10 @@ pub async fn preflight_authority_issues(
     } else {
         Vec::new()
     };
+
+    if !executor_is_superuser {
+        issues.extend(schema_owner_set_issues(pool, changes, &executor, server_major).await?);
+    }
 
     // --- Predefined-role membership authority ---
     // Granting or revoking membership in a predefined (`pg_*`) role requires
@@ -906,7 +927,7 @@ pub async fn preflight_authority_issues(
             _ => None,
         }))
         .collect();
-    // Default grants follow fresh-owner membership additions but precede
+    // Default grants follow memberships in newly created roles but precede
     // all other membership changes.
     // The later phase check avoids duplicating that check's failures.
     let set_owners: BTreeSet<String> = changes
@@ -1054,7 +1075,7 @@ pub async fn preflight_authority_issues(
 
     // --- Default-privilege owner authority ---
     // `SetDefaultPrivilege` uses current authority plus any declared
-    // fresh-owner memberships established earlier in the plan. `RevokeDefaultPrivilege` executes after the
+    // memberships established earlier in the plan. `RevokeDefaultPrivilege` executes after the
     // removal and addition batches — when the plan changes memberships (and
     // the phase checks above ran), those owners were already judged against
     // the phase graph and are skipped here; both kinds still get the
@@ -1331,6 +1352,98 @@ pub async fn preflight_authority_issues(
         });
     }
 
+    Ok(issues)
+}
+
+/// Schema ownership requires SET reachability, independently of INHERIT.
+/// Project only changes preceding each schema statement; a later grant cannot
+/// authorize an earlier ownership change.
+async fn schema_owner_set_issues(
+    pool: &PgPool,
+    changes: &[Change],
+    executor: &str,
+    server_major: u32,
+) -> Result<Vec<AuthorityIssue>, sqlx::Error> {
+    if !changes.iter().any(|c| {
+        matches!(
+            c,
+            Change::CreateSchema { owner: Some(_), .. } | Change::AlterSchemaOwner { .. }
+        )
+    }) {
+        return Ok(Vec::new());
+    }
+    let rows = crate::memberships::fetch_memberships(pool, None).await?;
+    let mut edges: BTreeMap<(String, String, Option<String>), bool> = rows
+        .into_iter()
+        .map(|r| ((r.role_name, r.member_name, r.grantor), r.set_option))
+        .collect();
+    let sets_created = if server_major >= 16 {
+        let setting: String = sqlx::query_scalar("SHOW createrole_self_grant")
+            .fetch_one(pool)
+            .await?;
+        setting
+            .split(',')
+            .any(|s| s.trim().trim_matches('"').eq_ignore_ascii_case("set"))
+    } else {
+        false
+    };
+    let mut issues = Vec::new();
+    for change in changes {
+        match change {
+            Change::CreateRole { name, .. } if sets_created => {
+                // The automatic edge is attributed to the bootstrap superuser,
+                // independently of subsequent grants by this executor.
+                edges.insert((name.clone(), executor.into(), None), true);
+            }
+            Change::AddMember { role, member, .. } => {
+                // New grants default to SET TRUE; an existing grant keeps its
+                // SET option when only INHERIT/ADMIN are specified.
+                let grantor = (server_major >= 16).then(|| executor.to_owned());
+                edges
+                    .entry((role.clone(), member.clone(), grantor))
+                    .or_insert(true);
+            }
+            Change::RemoveMember {
+                role,
+                member,
+                grantor,
+            } => {
+                edges.retain(|(r, m, g), _| {
+                    r != role
+                        || m != member
+                        || grantor
+                            .as_ref()
+                            .is_some_and(|target| g.as_ref() != Some(target))
+                });
+            }
+            Change::CreateSchema {
+                name,
+                owner: Some(owner),
+            }
+            | Change::AlterSchemaOwner { name, owner } => {
+                let mut reachable = BTreeSet::from([executor.to_owned()]);
+                loop {
+                    let before = reachable.len();
+                    for ((role, member, _), set) in &edges {
+                        if *set && reachable.contains(member) {
+                            reachable.insert(role.clone());
+                        }
+                    }
+                    if before == reachable.len() {
+                        break;
+                    }
+                }
+                if !reachable.contains(owner) {
+                    issues.push(AuthorityIssue::SchemaOwnerSet {
+                        schema: name.clone(),
+                        owner: owner.clone(),
+                        executor: executor.into(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(issues)
 }
 

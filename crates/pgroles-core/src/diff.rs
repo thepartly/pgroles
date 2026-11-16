@@ -27,7 +27,7 @@ use crate::model::{
 ///
 /// Changes are produced in dependency order by [`diff`]:
 /// 1. Create roles (before granting anything to them)
-/// 2. Alter roles and grant declared memberships in newly created schema owners
+/// 2. Alter roles, then add memberships in roles this plan creates
 /// 3. Grant privileges
 /// 4. Set default privileges
 /// 5. Revoke privileges (before membership removals: a grantor-targeted
@@ -778,31 +778,24 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
         });
     }
 
-    // Managed services may omit CREATE ROLE's automatic membership grants.
-    // Establish declared access to fresh owners before schemas/default ACLs use it.
-    let fresh_owners: BTreeSet<&str> = desired
-        .schemas
-        .values()
-        .filter_map(|schema| schema.owner.as_deref())
-        .filter(|owner| !current.roles.contains_key(*owner) && desired.roles.contains_key(*owner))
+    // A newly created role has no existing memberships to revoke or update.
+    // Establish its declared edges before statements that act through it.
+    let created: BTreeSet<&str> = creates
+        .iter()
+        .filter_map(|change| match change {
+            Change::CreateRole { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
         .collect();
-    let (owner_members, add_members): (Vec<_>, Vec<_>) =
-        add_members.into_iter().partition(|change| {
-            matches!(
-                change,
-                Change::AddMember {
-                    role,
-                    inherit: true,
-                    ..
-                } if fresh_owners.contains(role.as_str())
-            )
-        });
+    let (into_created, add_members): (Vec<_>, Vec<_>) = add_members
+        .into_iter()
+        .partition(|change| matches!(change, Change::AddMember { role, .. } if created.contains(role.as_str())));
 
     // ----- Assemble in dependency order -----
     let mut changes = Vec::new();
     changes.extend(creates);
     changes.extend(alters);
-    changes.extend(owner_members);
+    changes.extend(into_created);
     changes.extend(schema_changes);
     changes.extend(schema_grants);
     changes.extend(grants);
@@ -2934,42 +2927,65 @@ grants:
     }
 
     #[test]
-    fn noninheriting_fresh_owner_membership_stays_after_default_grants() {
-        let mut current = empty_graph();
-        current
-            .roles
-            .insert("executor".into(), RoleState::default());
-        let mut desired = current.clone();
-        desired.roles.insert("owner".into(), RoleState::default());
-        desired
-            .schemas
-            .insert("app".into(), managed_schema("owner"));
-        desired.memberships.insert(MembershipEdge {
-            role: "owner".into(),
-            member: "executor".into(),
-            inherit: false,
-            admin: false,
-        });
-        desired.default_privileges.insert(
-            DefaultPrivKey {
-                owner: "owner".into(),
-                scope: DefaultPrivilegeScope::Schema {
-                    schema: "app".into(),
-                },
-                on_type: ObjectType::Table,
-                grantee: "executor".into(),
-            },
-            DefaultPrivState {
-                privileges: BTreeSet::from([Privilege::Select]),
-            },
-        );
-        let changes = diff(&current, &desired);
-        let membership = changes
-            .iter()
-            .position(|change| matches!(change, Change::AddMember { role, .. } if role == "owner"))
-            .unwrap();
-        let defaults = changes.iter().position(|change| matches!(change, Change::SetDefaultPrivilege { owner, .. } if owner == "owner")).unwrap();
-        assert!(defaults < membership, "{changes:?}");
+    fn fresh_role_memberships_precede_schema_changes_and_global_defaults() {
+        for inherit in [false, true] {
+            for admin in [false, true] {
+                let mut current = empty_graph();
+                current
+                    .roles
+                    .insert("executor".into(), RoleState::default());
+                current
+                    .schemas
+                    .insert("existing".into(), managed_schema("executor"));
+                let mut desired = current.clone();
+                desired.roles.insert("owner".into(), RoleState::default());
+                desired
+                    .roles
+                    .insert("defaults_only".into(), RoleState::default());
+                desired
+                    .schemas
+                    .insert("existing".into(), managed_schema("owner"));
+                desired
+                    .schemas
+                    .insert("new".into(), managed_schema("owner"));
+                for role in ["owner", "defaults_only"] {
+                    desired.memberships.insert(MembershipEdge {
+                        role: role.into(),
+                        member: "executor".into(),
+                        inherit,
+                        admin,
+                    });
+                    desired.default_privileges.insert(
+                        DefaultPrivKey {
+                            owner: role.into(),
+                            scope: DefaultPrivilegeScope::Global,
+                            on_type: ObjectType::Table,
+                            grantee: "executor".into(),
+                        },
+                        DefaultPrivState {
+                            privileges: BTreeSet::from([Privilege::Select]),
+                        },
+                    );
+                }
+                let changes = diff(&current, &desired);
+                let last_membership = changes
+                    .iter()
+                    .rposition(|c| matches!(c, Change::AddMember { .. }))
+                    .unwrap();
+                let first_use = changes
+                    .iter()
+                    .position(|c| {
+                        matches!(
+                            c,
+                            Change::CreateSchema { .. }
+                                | Change::AlterSchemaOwner { .. }
+                                | Change::SetDefaultPrivilege { .. }
+                        )
+                    })
+                    .unwrap();
+                assert!(last_membership < first_use, "{changes:?}");
+            }
+        }
     }
 
     #[test]
