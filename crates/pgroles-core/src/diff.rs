@@ -786,8 +786,17 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
         .filter_map(|schema| schema.owner.as_deref())
         .filter(|owner| !current.roles.contains_key(*owner) && desired.roles.contains_key(*owner))
         .collect();
-    let (owner_members, add_members): (Vec<_>, Vec<_>) = add_members.into_iter()
-        .partition(|change| matches!(change, Change::AddMember { role, inherit: true, .. } if fresh_owners.contains(role.as_str())));
+    let (owner_members, add_members): (Vec<_>, Vec<_>) =
+        add_members.into_iter().partition(|change| {
+            matches!(
+                change,
+                Change::AddMember {
+                    role,
+                    inherit: true,
+                    ..
+                } if fresh_owners.contains(role.as_str())
+            )
+        });
 
     // ----- Assemble in dependency order -----
     let mut changes = Vec::new();
