@@ -27,7 +27,7 @@ use crate::model::{
 ///
 /// Changes are produced in dependency order by [`diff`]:
 /// 1. Create roles (before granting anything to them)
-/// 2. Alter roles, then add memberships in roles this plan creates
+/// 2. Alter roles, then add memberships that have no existing edge
 /// 3. Grant privileges
 /// 4. Set default privileges
 /// 5. Revoke privileges (before membership removals: a grantor-targeted
@@ -778,24 +778,24 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
         });
     }
 
-    // A newly created role has no existing memberships to revoke or update.
-    // Establish its declared edges before statements that act through it.
-    let created: BTreeSet<&str> = creates
+    // A membership with no current edge has nothing to revoke or update first,
+    // while statements that act through the role need it. Re-adds of an
+    // existing pair keep their place after the removal.
+    let current_pairs: BTreeSet<(&str, &str)> = current
+        .memberships
         .iter()
-        .filter_map(|change| match change {
-            Change::CreateRole { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
+        .map(|edge| (edge.role.as_str(), edge.member.as_str()))
         .collect();
-    let (into_created, add_members): (Vec<_>, Vec<_>) = add_members
-        .into_iter()
-        .partition(|change| matches!(change, Change::AddMember { role, .. } if created.contains(role.as_str())));
+    let (new_edges, add_members): (Vec<_>, Vec<_>) = add_members.into_iter().partition(|change| {
+        matches!(change, Change::AddMember { role, member, .. }
+                if !current_pairs.contains(&(role.as_str(), member.as_str())))
+    });
 
     // ----- Assemble in dependency order -----
     let mut changes = Vec::new();
     changes.extend(creates);
     changes.extend(alters);
-    changes.extend(into_created);
+    changes.extend(new_edges);
     changes.extend(schema_changes);
     changes.extend(schema_grants);
     changes.extend(grants);
@@ -2986,6 +2986,83 @@ grants:
                 assert!(last_membership < first_use, "{changes:?}");
             }
         }
+    }
+
+    #[test]
+    fn new_memberships_in_existing_roles_precede_schema_creation_and_default_privileges() {
+        let mut current = empty_graph();
+        for role in ["executor", "owner"] {
+            current.roles.insert(role.into(), RoleState::default());
+        }
+        let mut desired = current.clone();
+        desired
+            .schemas
+            .insert("app".into(), managed_schema("owner"));
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: true,
+            admin: false,
+        });
+        desired.default_privileges.insert(
+            DefaultPrivKey {
+                owner: "owner".into(),
+                scope: DefaultPrivilegeScope::Global,
+                on_type: ObjectType::Table,
+                grantee: "executor".into(),
+            },
+            DefaultPrivState {
+                privileges: BTreeSet::from([Privilege::Select]),
+            },
+        );
+        let changes = diff(&current, &desired);
+        let membership = changes
+            .iter()
+            .position(|c| matches!(c, Change::AddMember { .. }))
+            .unwrap();
+        let first_use = changes
+            .iter()
+            .position(|c| {
+                matches!(
+                    c,
+                    Change::CreateSchema { .. } | Change::SetDefaultPrivilege { .. }
+                )
+            })
+            .unwrap();
+        assert!(membership < first_use, "{changes:?}");
+    }
+
+    #[test]
+    fn re_added_membership_stays_after_its_removal() {
+        // Without grantor attribution an option change is a removal followed
+        // by a re-add of the same pair; the re-add must not move ahead of it.
+        let mut current = empty_graph();
+        for role in ["executor", "owner"] {
+            current.roles.insert(role.into(), RoleState::default());
+        }
+        current.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: false,
+            admin: false,
+        });
+        let mut desired = current.clone();
+        desired.memberships.clear();
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: true,
+            admin: false,
+        });
+        desired
+            .schemas
+            .insert("app".into(), managed_schema("owner"));
+        let changes = diff(&current, &desired);
+        let position = |wanted: fn(&Change) -> bool| changes.iter().position(wanted).unwrap();
+        let schema = position(|c| matches!(c, Change::CreateSchema { .. }));
+        let removal = position(|c| matches!(c, Change::RemoveMember { .. }));
+        let re_add = position(|c| matches!(c, Change::AddMember { .. }));
+        assert!(schema < removal && removal < re_add, "{changes:?}");
     }
 
     #[test]

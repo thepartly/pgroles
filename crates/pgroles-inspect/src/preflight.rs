@@ -65,6 +65,14 @@ pub enum AuthorityIssue {
         executor: String,
     },
 
+    /// The executor lacks the privileges of a schema's current owner at the
+    /// position where the plan transfers the schema to another owner.
+    SchemaCurrentOwner {
+        schema: String,
+        owner: String,
+        executor: String,
+    },
+
     /// A planned `ALTER DEFAULT PRIVILEGES` names an owner that does not
     /// exist and that this plan does not create.
     MissingDefaultPrivilegeOwner { owner: String },
@@ -186,6 +194,7 @@ impl AuthorityIssue {
             Self::MembershipOptionsBlocked { .. } => "MembershipOptionsBlocked",
             Self::DefaultPrivilegeOwner { .. } => "DefaultPrivilegeOwner",
             Self::SchemaOwnerSet { .. } => "SchemaOwnerSet",
+            Self::SchemaCurrentOwner { .. } => "SchemaCurrentOwner",
             Self::MissingDefaultPrivilegeOwner { .. } => "MissingDefaultPrivilegeOwner",
             Self::PredefinedRoleGrant { .. } => "PredefinedRoleGrant",
             Self::MissingPredefinedRole { .. } => "MissingPredefinedRole",
@@ -208,6 +217,14 @@ impl std::fmt::Display for AuthorityIssue {
             } => write!(
                 f,
                 "UnsatisfiableSchemaOwner: cannot assign schema \"{schema}\" to owner \"{owner}\" as executor \"{executor}\"; requires SET ROLE permission on the owner before the schema change"
+            ),
+            AuthorityIssue::SchemaCurrentOwner {
+                schema,
+                owner,
+                executor,
+            } => write!(
+                f,
+                "UnsatisfiableSchemaOwner: cannot transfer schema \"{schema}\" away from its current owner \"{owner}\" as executor \"{executor}\"; requires an inheriting membership in the current owner before the schema change"
             ),
             AuthorityIssue::DefaultPrivilegeOwner { owner, executor } => write!(
                 f,
@@ -425,7 +442,7 @@ pub async fn preflight_authority_issues(
     };
 
     if !executor_is_superuser {
-        issues.extend(schema_owner_set_issues(pool, changes, &executor, server_major).await?);
+        issues.extend(schema_owner_issues(pool, changes, &executor, server_major).await?);
     }
 
     // --- Predefined-role membership authority ---
@@ -927,8 +944,8 @@ pub async fn preflight_authority_issues(
             _ => None,
         }))
         .collect();
-    // Default grants follow memberships in newly created roles but precede
-    // all other membership changes.
+    // Default grants follow memberships that have no existing edge but
+    // precede every other membership change.
     // The later phase check avoids duplicating that check's failures.
     let set_owners: BTreeSet<String> = changes
         .iter()
@@ -1376,10 +1393,39 @@ pub async fn preflight_authority_issues(
     Ok(issues)
 }
 
-/// Schema ownership requires SET reachability, independently of INHERIT.
-/// Project only changes preceding each schema statement; a later grant cannot
-/// authorize an earlier ownership change.
-async fn schema_owner_set_issues(
+/// What one membership edge lets its member do.
+#[derive(Clone, Copy)]
+struct EdgeOptions {
+    set: bool,
+    inherit: bool,
+}
+
+/// Roles `executor` reaches by following edges that `follow` accepts.
+fn roles_reached(
+    edges: &BTreeMap<(String, String, Option<String>), EdgeOptions>,
+    executor: &str,
+    follow: fn(&EdgeOptions) -> bool,
+) -> BTreeSet<String> {
+    let mut reachable = BTreeSet::from([executor.to_owned()]);
+    loop {
+        let before = reachable.len();
+        for ((role, member, _), options) in edges {
+            if follow(options) && reachable.contains(member) {
+                reachable.insert(role.clone());
+            }
+        }
+        if before == reachable.len() {
+            return reachable;
+        }
+    }
+}
+
+/// Schema ownership requires SET reachability to the new owner, independently
+/// of INHERIT. Transferring a schema also requires the privileges of its
+/// current owner, which follow INHERIT. Project only changes preceding each
+/// schema statement; a later grant cannot authorize an earlier ownership
+/// change. `CREATE` on the database is not checked.
+async fn schema_owner_issues(
     pool: &PgPool,
     changes: &[Change],
     executor: &str,
@@ -1396,52 +1442,116 @@ async fn schema_owner_set_issues(
     // Every edge can carry SET, so read `pg_auth_members` unfiltered: the
     // inspection queries skip `pg_*` roles, and their `LIKE 'pg_%'` also skips
     // ordinary roles such as `pgbouncer`. Before PostgreSQL 16 every
-    // membership permits SET ROLE and grants are not attributed.
-    let rows: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(if server_major >= 16 {
-        "SELECT r.rolname::text, m.rolname::text, g.rolname::text, a.set_option \
-         FROM pg_auth_members a \
-         JOIN pg_roles r ON r.oid = a.roleid \
-         JOIN pg_roles m ON m.oid = a.member \
-         LEFT JOIN pg_roles g ON g.oid = a.grantor"
-    } else {
-        "SELECT r.rolname::text, m.rolname::text, NULL::text, true \
-         FROM pg_auth_members a \
-         JOIN pg_roles r ON r.oid = a.roleid \
-         JOIN pg_roles m ON m.oid = a.member"
-    })
-    .fetch_all(pool)
-    .await?;
-    let mut edges: BTreeMap<(String, String, Option<String>), bool> = rows
+    // membership permits SET ROLE, inheritance follows the member's
+    // `rolinherit`, and grants are not attributed.
+    let rows: Vec<(String, String, Option<String>, bool, bool)> =
+        sqlx::query_as(if server_major >= 16 {
+            "SELECT r.rolname::text, m.rolname::text, g.rolname::text, \
+                    a.set_option, a.inherit_option \
+             FROM pg_auth_members a \
+             JOIN pg_roles r ON r.oid = a.roleid \
+             JOIN pg_roles m ON m.oid = a.member \
+             LEFT JOIN pg_roles g ON g.oid = a.grantor"
+        } else {
+            "SELECT r.rolname::text, m.rolname::text, NULL::text, true, m.rolinherit \
+             FROM pg_auth_members a \
+             JOIN pg_roles r ON r.oid = a.roleid \
+             JOIN pg_roles m ON m.oid = a.member"
+        })
+        .fetch_all(pool)
+        .await?;
+    let mut edges: BTreeMap<(String, String, Option<String>), EdgeOptions> = rows
         .into_iter()
-        .map(|(role, member, grantor, set)| ((role, member, grantor), set))
+        .map(|(role, member, grantor, set, inherit)| {
+            ((role, member, grantor), EdgeOptions { set, inherit })
+        })
         .collect();
-    let sets_created = if server_major >= 16 {
+    let self_grant = if server_major >= 16 {
         let setting: String = sqlx::query_scalar("SHOW createrole_self_grant")
             .fetch_one(pool)
             .await?;
-        setting
-            .split(',')
-            .any(|s| s.trim().trim_matches('"').eq_ignore_ascii_case("set"))
+        let has = |option: &str| {
+            setting
+                .split(',')
+                .any(|s| s.trim().trim_matches('"').eq_ignore_ascii_case(option))
+        };
+        EdgeOptions {
+            set: has("set"),
+            inherit: has("inherit"),
+        }
     } else {
-        false
+        EdgeOptions {
+            set: false,
+            inherit: false,
+        }
     };
+    let transferred: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::AlterSchemaOwner { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut schema_owners: BTreeMap<String, String> = sqlx::query_as(
+        "SELECT n.nspname::text, r.rolname::text \
+         FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner \
+         WHERE n.nspname = ANY($1)",
+    )
+    .bind(&transferred)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
     let mut issues = Vec::new();
     for change in changes {
         match change {
-            Change::CreateRole { name, .. } if sets_created => {
+            Change::CreateRole { name, .. } if self_grant.set || self_grant.inherit => {
                 // `createrole_self_grant` adds a second edge granted by the
                 // creator itself; the bootstrap superuser's edge carries only
-                // ADMIN. A later grant by this executor updates this edge and
-                // keeps its SET option.
-                edges.insert((name.clone(), executor.into(), Some(executor.into())), true);
+                // ADMIN. A later grant by this executor updates this edge.
+                edges.insert(
+                    (name.clone(), executor.into(), Some(executor.into())),
+                    self_grant,
+                );
             }
-            Change::AddMember { role, member, .. } => {
+            Change::AddMember {
+                role,
+                member,
+                inherit,
+                ..
+            } => {
                 // New grants default to SET TRUE; an existing grant keeps its
                 // SET option when only INHERIT/ADMIN are specified.
                 let grantor = (server_major >= 16).then(|| executor.to_owned());
                 edges
                     .entry((role.clone(), member.clone(), grantor))
-                    .or_insert(true);
+                    .and_modify(|options| options.inherit = *inherit)
+                    .or_insert(EdgeOptions {
+                        set: true,
+                        inherit: *inherit,
+                    });
+            }
+            Change::UpdateMemberOptions {
+                role,
+                member,
+                grantor,
+                inherit: Some(inherit),
+                binding,
+                ..
+            } => {
+                let key = (role.clone(), member.clone(), Some(grantor.clone()));
+                if let Some(options) = edges.get_mut(&key) {
+                    options.inherit = *inherit;
+                } else if *inherit {
+                    // A new attribution; resolution may pin it to SET FALSE.
+                    let set = !binding.as_ref().is_some_and(|binding| {
+                        matches!(
+                            binding.set_effect,
+                            pgroles_core::membership_options::MembershipSetEffect::CreateFalse
+                        )
+                    });
+                    edges.insert(key, EdgeOptions { set, inherit: true });
+                }
             }
             Change::RemoveMember {
                 role,
@@ -1456,30 +1566,42 @@ async fn schema_owner_set_issues(
                             .is_some_and(|target| g.as_ref() != Some(target))
                 });
             }
-            Change::CreateSchema {
-                name,
-                owner: Some(owner),
-            }
-            | Change::AlterSchemaOwner { name, owner } => {
-                let mut reachable = BTreeSet::from([executor.to_owned()]);
-                loop {
-                    let before = reachable.len();
-                    for ((role, member, _), set) in &edges {
-                        if *set && reachable.contains(member) {
-                            reachable.insert(role.clone());
-                        }
-                    }
-                    if before == reachable.len() {
-                        break;
-                    }
-                }
-                if !reachable.contains(owner) {
+            Change::CreateSchema { name, owner } => {
+                if let Some(owner) = owner
+                    && !roles_reached(&edges, executor, |options| options.set).contains(owner)
+                {
                     issues.push(AuthorityIssue::SchemaOwnerSet {
                         schema: name.clone(),
                         owner: owner.clone(),
                         executor: executor.into(),
                     });
                 }
+                schema_owners.insert(
+                    name.clone(),
+                    owner.clone().unwrap_or_else(|| executor.to_owned()),
+                );
+            }
+            Change::AlterSchemaOwner { name, owner } => {
+                if !roles_reached(&edges, executor, |options| options.set).contains(owner) {
+                    issues.push(AuthorityIssue::SchemaOwnerSet {
+                        schema: name.clone(),
+                        owner: owner.clone(),
+                        executor: executor.into(),
+                    });
+                }
+                // A schema this plan neither finds nor creates fails for a
+                // different reason, reported by PostgreSQL.
+                if let Some(current_owner) = schema_owners.get(name)
+                    && !roles_reached(&edges, executor, |options| options.inherit)
+                        .contains(current_owner)
+                {
+                    issues.push(AuthorityIssue::SchemaCurrentOwner {
+                        schema: name.clone(),
+                        owner: current_owner.clone(),
+                        executor: executor.into(),
+                    });
+                }
+                schema_owners.insert(name.clone(), owner.clone());
             }
             _ => {}
         }

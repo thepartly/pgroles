@@ -33,7 +33,7 @@ the migration window ends.
    default, then `{schema}-{profile}`. Bundles resolve schema → fragment →
    `shared.role_pattern` → built-in default. Every declared pattern requires
    `{profile}`. Review naming changes as role changes, not cosmetic edits.
-4. Declare managed roles and memberships explicitly. Use `external: true` for a role whose lifecycle belongs to a provider or another system. For roles the policy creates, declare the executor's membership explicitly. PostgreSQL 16+ gives the creating role only `ADMIN` unless its session sets `createrole_self_grant`, and a value set on a role reached through `SET ROLE` does not apply. pgroles grants memberships in roles it creates right after creating and altering roles, before schemas and default privileges.
+4. Declare managed roles and memberships explicitly. Use `external: true` for a role whose lifecycle belongs to a provider or another system. For roles the policy creates, declare the executor's membership explicitly. PostgreSQL 16+ gives the creating role only `ADMIN` unless its session sets `createrole_self_grant`, and a value set on a role reached through `SET ROLE` does not apply. pgroles grants a membership that has no existing edge right after creating and altering roles, before schemas and default privileges.
 5. Model current and future objects separately: ordinary grants cover existing
    objects; default privileges cover only future objects created by the named
    owner.
