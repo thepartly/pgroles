@@ -141,3 +141,85 @@ pub fn resolve_membership_options(
         })
         .collect()
 }
+
+/// Remove ADMIN from the executor's own grant in a role this plan creates.
+///
+/// Since PostgreSQL 16, `CREATE ROLE` run by a non-superuser gives the creator
+/// an ADMIN edge on the new role, granted by the bootstrap superuser. The
+/// executor's own `GRANT ... WITH ADMIN TRUE` is attributed to the executor,
+/// and PostgreSQL rejects it: "ADMIN option cannot be granted back to your own
+/// grantor". The creation edge already supplies ADMIN, and inspection combines
+/// a pair's edges, so the declared membership holds without it.
+///
+/// Callers apply this only for a non-superuser executor on PostgreSQL 16+.
+pub fn omit_creator_admin_grants(changes: Vec<Change>, executor: &str) -> Vec<Change> {
+    let created: BTreeSet<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::CreateRole { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    changes
+        .into_iter()
+        .map(|change| match change {
+            Change::AddMember {
+                role,
+                member,
+                inherit,
+                admin: true,
+            } if member == executor && created.contains(&role) => Change::AddMember {
+                role,
+                member,
+                inherit,
+                admin: false,
+            },
+            other => other,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::RoleState;
+
+    fn create(name: &str) -> Change {
+        Change::CreateRole {
+            name: name.into(),
+            state: RoleState::default(),
+        }
+    }
+
+    fn add(role: &str, member: &str, inherit: bool, admin: bool) -> Change {
+        Change::AddMember {
+            role: role.into(),
+            member: member.into(),
+            inherit,
+            admin,
+        }
+    }
+
+    #[test]
+    fn executor_admin_in_a_created_role_comes_from_creation() {
+        let changes = omit_creator_admin_grants(
+            vec![
+                create("owner"),
+                add("owner", "executor", true, true),
+                add("owner", "executor_group", false, true),
+                add("existing", "executor", false, true),
+            ],
+            "executor",
+        );
+        assert_eq!(
+            changes,
+            vec![
+                create("owner"),
+                add("owner", "executor", true, false),
+                // Other members and roles the plan does not create keep ADMIN.
+                add("owner", "executor_group", false, true),
+                add("existing", "executor", false, true),
+            ]
+        );
+    }
+}
