@@ -70,6 +70,14 @@ reviewed change binds the executor, selected grantor, exact prior tuple or absen
 all independently attributed tuples, and explicit SET effect. Apply checks those expectations again and requests a
 replacement review when they differ. SET-only paths cannot supply authority.
 
+The edge `CREATE ROLE` gives a non-superuser executor on PostgreSQL 16+ carries
+ADMIN only. When that is the executor's only edge into a role and a declared
+membership differs from it, the membership is planned as a new grant rather
+than an increase, so the executor
+gets PostgreSQL's default SET, as it would if the role were created in the same
+plan, and can create schemas the role owns. The grant omits ADMIN, which the
+creation edge already supplies.
+
 An already-correct effective option leaves differing per-grantor values intact.
 Missing or inconsistent per-grantor facts fail closed; there is no PG16+ fallback
 to unattributed revoke/regrant. Full membership absence still revokes every

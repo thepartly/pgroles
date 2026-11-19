@@ -440,6 +440,26 @@ impl RoleGraph {
         (!grantors.is_empty() && grantors.iter().eq(options.keys())).then_some(options)
     }
 
+    /// Whether the executor's only edges in `member`'s membership of `role`
+    /// are its own ADMIN authority without INHERIT or SET: the edge
+    /// `CREATE ROLE` gives a non-superuser creator on PostgreSQL 16+.
+    /// When a declaration differs from it, the diff plans the declared
+    /// membership as a new one.
+    pub fn holds_only_creator_admin(&self, role: &str, member: &str) -> bool {
+        self.complete_membership_options(role, member)
+            .is_some_and(|options| {
+                options.iter().all(|(grantor, options)| {
+                    !options.inherit
+                        && !options.set
+                        && self.executor_authority_edges.contains(&(
+                            role.to_string(),
+                            member.to_string(),
+                            grantor.clone(),
+                        ))
+                })
+            })
+    }
+
     /// Resolve catalog-proven equivalent routine targets before comparing grants.
     pub fn resolve_routine_aliases<'a>(
         &'a self,

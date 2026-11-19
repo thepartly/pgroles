@@ -779,8 +779,10 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
     }
 
     // A membership with no current edge has nothing to revoke or update first,
-    // while statements that act through the role need it. Re-adds of an
-    // existing pair keep their place after the removal.
+    // while statements that act through the role need it. That includes a
+    // pair holding only the executor's creation ADMIN edge, which the diff
+    // plans as a new membership. Re-adds of an existing pair keep their place
+    // after the removal.
     let current_pairs: BTreeSet<(&str, &str)> = current
         .memberships
         .iter()
@@ -788,7 +790,8 @@ pub fn diff(current: &RoleGraph, desired: &RoleGraph) -> Vec<Change> {
         .collect();
     let (new_edges, add_members): (Vec<_>, Vec<_>) = add_members.into_iter().partition(|change| {
         matches!(change, Change::AddMember { role, member, .. }
-                if !current_pairs.contains(&(role.as_str(), member.as_str())))
+                if !current_pairs.contains(&(role.as_str(), member.as_str()))
+                    || current.holds_only_creator_admin(role, member))
     });
 
     // ----- Assemble in dependency order -----
@@ -1540,6 +1543,25 @@ fn diff_memberships(
     // Desired and current but different flags → attributed option intents
     for (&(role, member), &desired_edge) in &desired_map {
         match current_map.get(&(role, member)) {
+            // The executor's creation edge gives it ADMIN but neither INHERIT
+            // nor SET. A declaration asking for something else is still
+            // missing: grant it as a new membership, which carries SET as it
+            // does when the role is created in the same plan. ADMIN is
+            // already held, and granting it to itself would fail with "ADMIN
+            // option cannot be granted back to your own grantor". A
+            // declaration matching the edge exactly stays a no-op.
+            Some(current_edge)
+                if (current_edge.inherit != desired_edge.inherit
+                    || current_edge.admin != desired_edge.admin)
+                    && current.holds_only_creator_admin(role, member) =>
+            {
+                add_out.push(Change::AddMember {
+                    role: desired_edge.role.clone(),
+                    member: desired_edge.member.clone(),
+                    inherit: desired_edge.inherit,
+                    admin: false,
+                });
+            }
             None => {
                 add_out.push(Change::AddMember {
                     role: desired_edge.role.clone(),
@@ -1629,7 +1651,8 @@ fn diff_memberships(
 mod tests {
     use super::*;
     use crate::model::{
-        DefaultPrivState, GrantState, SchemaState, default_schema_owner_privileges,
+        DefaultPrivState, GrantState, MembershipOptions, SchemaState,
+        default_schema_owner_privileges,
     };
 
     /// Helper: build an empty graph.
@@ -3030,6 +3053,132 @@ grants:
             })
             .unwrap();
         assert!(membership < first_use, "{changes:?}");
+    }
+
+    /// `executor` created `owner` in an earlier apply: PostgreSQL 16+ left it
+    /// an ADMIN-only edge granted by the bootstrap superuser.
+    fn graph_with_creator_edge(extra_grantor: Option<MembershipOptions>) -> RoleGraph {
+        let mut current = empty_graph();
+        for role in ["executor", "owner"] {
+            current.roles.insert(role.into(), RoleState::default());
+        }
+        let key = ("owner".to_string(), "executor".to_string());
+        let mut options = BTreeMap::from([(
+            "postgres".to_string(),
+            MembershipOptions {
+                inherit: false,
+                admin: true,
+                set: false,
+            },
+        )]);
+        if let Some(extra) = extra_grantor {
+            options.insert("dba".to_string(), extra);
+        }
+        current.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: options.values().any(|o| o.inherit),
+            admin: true,
+        });
+        current
+            .membership_edge_grantors
+            .insert(key.clone(), options.keys().cloned().collect());
+        current.membership_edge_options.insert(key, options);
+        current.executor_authority_edges.insert((
+            "owner".into(),
+            "executor".into(),
+            "postgres".into(),
+        ));
+        current
+    }
+
+    #[test]
+    fn membership_over_a_creator_admin_edge_is_granted_early_without_admin() {
+        for (inherit, admin) in [(true, false), (false, false), (true, true)] {
+            let current = graph_with_creator_edge(None);
+            let mut desired = current.clone();
+            desired.memberships.clear();
+            desired.memberships.insert(MembershipEdge {
+                role: "owner".into(),
+                member: "executor".into(),
+                inherit,
+                admin,
+            });
+            desired
+                .schemas
+                .insert("app".into(), managed_schema("owner"));
+            let changes = diff(&current, &desired);
+            let membership = changes
+                .iter()
+                .position(|c| {
+                    matches!(c, Change::AddMember { role, member, inherit: i, admin: false }
+                        if role == "owner" && member == "executor" && *i == inherit)
+                })
+                .unwrap_or_else(|| panic!("inherit {inherit}, admin {admin}: {changes:?}"));
+            let schema = changes
+                .iter()
+                .position(|c| matches!(c, Change::CreateSchema { .. }))
+                .unwrap();
+            assert!(membership < schema, "{changes:?}");
+            assert!(
+                !changes.iter().any(|c| matches!(
+                    c,
+                    Change::UpdateMemberOptions { .. } | Change::RemoveMember { .. }
+                )),
+                "{changes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn membership_matching_a_creator_admin_edge_plans_nothing() {
+        // What `pgroles generate` exports for the edge: no change, so the
+        // executor gains no SET it was not given.
+        let current = graph_with_creator_edge(None);
+        let mut desired = current.clone();
+        desired.memberships.clear();
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: false,
+            admin: true,
+        });
+        assert!(diff(&current, &desired).is_empty());
+    }
+
+    #[test]
+    fn membership_with_another_edge_keeps_the_option_change_path() {
+        // A DBA's own grant already gives SET, so only INHERIT is missing.
+        let current = graph_with_creator_edge(Some(MembershipOptions {
+            inherit: false,
+            admin: false,
+            set: true,
+        }));
+        let mut desired = current.clone();
+        desired.memberships.clear();
+        desired.memberships.insert(MembershipEdge {
+            role: "owner".into(),
+            member: "executor".into(),
+            inherit: true,
+            admin: true,
+        });
+        let changes = diff(&current, &desired);
+        assert!(
+            !changes
+                .iter()
+                .any(|c| matches!(c, Change::AddMember { .. })),
+            "{changes:?}"
+        );
+        assert!(
+            changes.iter().any(|c| matches!(
+                c,
+                Change::UpdateMemberOptions {
+                    inherit: Some(true),
+                    ..
+                }
+            )),
+            "{changes:?}"
+        );
     }
 
     #[test]
