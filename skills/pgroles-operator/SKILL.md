@@ -98,10 +98,11 @@ identity settings or `AZURE_AUTHORITY_HOST`. The assertion file is re-read on
 every exchange.
 
 Azure may attribute creator ADMIN memberships to `azuresu`; inspect and
-preserve their actual options. If CREATE ROLE followed by a self-ADMIN grant
-fails, separate role bootstrap from membership adoption and object-grant
-reconciliation. Token authentication success alone does not certify this SQL
-lifecycle. See the Azure connection guide for the observed constraint.
+preserve their actual options. When a plan creates a role and declares the
+executor as its member with `admin: true`, pgroles grants that membership
+without ADMIN, because `CREATE ROLE` already gave it. Token authentication
+success alone does not certify the SQL lifecycle; see the Azure connection
+guide.
 
 Observe-only and suspended policies do not block peers, since they cannot
 execute. An observe policy still reports its own conflict, and either kind runs

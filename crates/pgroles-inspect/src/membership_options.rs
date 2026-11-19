@@ -16,6 +16,7 @@ pub async fn resolve_membership_options(
     changes: Vec<Change>,
     current: &RoleGraph,
 ) -> Result<Vec<Change>, MembershipPlanningError> {
+    let changes = omit_creator_admin_grants(pool, changes).await?;
     let targets: BTreeSet<String> = changes
         .iter()
         .filter_map(|c| match c {
@@ -87,6 +88,33 @@ pub async fn resolve_membership_options(
             },
         )?,
     )
+}
+
+async fn omit_creator_admin_grants(
+    pool: &PgPool,
+    changes: Vec<Change>,
+) -> Result<Vec<Change>, sqlx::Error> {
+    let candidate = changes
+        .iter()
+        .any(|c| matches!(c, Change::AddMember { admin: true, .. }))
+        && changes
+            .iter()
+            .any(|c| matches!(c, Change::CreateRole { .. }));
+    if !candidate {
+        return Ok(changes);
+    }
+    let (executor, superuser, server_version): (String, bool, i32) = sqlx::query_as(
+        "SELECT current_user::text, rolsuper, current_setting('server_version_num')::int \
+         FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(pool)
+    .await?;
+    if superuser || server_version < 160000 {
+        return Ok(changes);
+    }
+    Ok(pgroles_core::membership_options::omit_creator_admin_grants(
+        changes, &executor,
+    ))
 }
 
 /// Project existing catalog rows through the removal phase per grantor.
