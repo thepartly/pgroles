@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.16.0] - 2026-11-12
+## [0.16.0] - 2026-11-19
 
 ### Highlights
 
@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A policy that creates a role and gives the executor `admin: true` membership in it no longer fails on PostgreSQL 16+ with "ADMIN option cannot be granted back to your own grantor". `CREATE ROLE` already gives a non-superuser creator ADMIN on the new role, so pgroles now grants the executor's membership without ADMIN. (#270)
 - The operator detects ownership conflicts between policies that reach one database through different Secrets or from different namespaces, and between policies on different databases of one server. Each policy records the target it reached, as reported by the server, in `status.resolved_database_target`, and policies compare those records across every namespace the operator watches. (#263, #265)
 - The bundle examples in the bundle composition guide and manifest reference failed composition: a shared `default_owner` made the bindings-only fragment claim schema ownership. The examples now set `owner` explicitly in the owning fragment, the reference explains the rule, and a test composes every bundle in the docs. (#263)
 
