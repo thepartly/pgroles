@@ -56,7 +56,9 @@ jobs:
       && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
       && github.actor != 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    # Playwright 1.55 cannot install Chromium on Ubuntu 26.04, which
+    # ubuntu-latest now resolves to. Move with the Playwright upgrade.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: docs
