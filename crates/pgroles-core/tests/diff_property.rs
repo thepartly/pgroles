@@ -517,6 +517,12 @@ fn derive_current(rng: &mut Rng, desired: &RoleGraph) -> RoleGraph {
         }
     }
 
+    // Dropping a role removes its memberships in PostgreSQL. Do not leave
+    // impossible edges that would require revoking from a newly created role.
+    c.memberships.retain(|edge| {
+        c.roles.contains_key(&edge.role)
+            && (!desired.roles.contains_key(&edge.member) || c.roles.contains_key(&edge.member))
+    });
     c
 }
 
