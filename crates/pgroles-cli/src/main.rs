@@ -1387,6 +1387,12 @@ fn authority_preflight_findings(
                 AuthorityIssue::MembershipOptionsBlocked { role, .. } => {
                     ("membership_options_blocked", Some(role.clone()))
                 }
+                AuthorityIssue::SchemaOwnerSet { owner, .. } => {
+                    ("schema_owner_set", Some(owner.clone()))
+                }
+                AuthorityIssue::SchemaCurrentOwner { owner, .. } => {
+                    ("schema_current_owner", Some(owner.clone()))
+                }
                 AuthorityIssue::DefaultPrivilegeOwner { owner, .. }
                 | AuthorityIssue::MissingDefaultPrivilegeOwner { owner } => {
                     ("default_privilege_owner", Some(owner.clone()))

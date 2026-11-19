@@ -24,6 +24,8 @@ annotations:
       description: 'The PostgresPolicy CRD adds status.resolved_database_target; apply the 0.16 CRDs before the controller. Chart values are unchanged from 0.15.0.'
     - kind: fixed
       description: 'A policy that creates a role and gives the executor admin membership in it no longer fails on PostgreSQL 16+; the executor is granted that membership without ADMIN, which CREATE ROLE already supplies.'
+    - kind: fixed
+      description: 'Memberships with no existing edge are granted before the schemas, grants and default privileges that use them, so bootstrapping an owner role and its schemas applies in one plan. Preflight reports missing SET ROLE or current-owner authority for schema creation and transfers.'
     - kind: security
       description: 'Updated rustls-webpki, webpki-roots and ctutils for RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0385.'
   artifacthub.io/category: database
