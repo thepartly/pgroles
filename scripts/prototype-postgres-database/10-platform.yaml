@@ -1,0 +1,42 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata:
+  name: team-roles
+  namespace: platform
+spec:
+  roles:
+  - name: team_payments
+    login: false
+    comment: Payments team access role
+  - name: team_fulfillment
+    login: false
+    comment: Fulfillment team access role
+  - name: alice_payments
+    login: true
+    comment: Payments engineer; inherits team_payments
+  - name: bob_fulfillment
+    login: true
+    comment: Fulfillment engineer; inherits team_fulfillment
+  memberships:
+  - role: team_payments
+    members:
+    - name: alice_payments
+  - role: team_fulfillment
+    members:
+    - name: bob_fulfillment
+  grants:
+  - role: team_payments
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: team_fulfillment
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  databaseRef:
+    name: appdb
+    namespace: platform

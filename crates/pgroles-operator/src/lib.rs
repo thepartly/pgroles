@@ -9,6 +9,7 @@ pub mod concurrency;
 pub mod context;
 pub mod controller_health;
 pub mod crd;
+pub mod database;
 pub mod ephemeral;
 pub mod events;
 pub mod k8s_names;

@@ -20,3 +20,12 @@ it supersedes.
   shared policy-content schema instead of forking it; whole-spec CEL
   immutability; candidate ownership, planning context, overlay-overlap rules,
   and the execution preflight a preview runs with its parent's settings.
+- [ADR-002: Share a database through a PostgresDatabase and attached
+  policies](adr-002-postgres-database.md) — a platform-owned
+  `PostgresDatabase` holds the connection and delegates roles and schema
+  facets to namespaces; attached policies compose into one plan, oldest first,
+  with a rejected edit keeping its last accepted content.
+- [ADR-003: Run each delegation as its own PostgreSQL
+  role](adr-003-executor-per-delegation.md) — an optional executor per
+  delegation, routed by which delegation asserted a change, never by which
+  identity can run it; one generated policy per executor.

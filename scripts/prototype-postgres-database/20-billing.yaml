@@ -1,0 +1,154 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata:
+  name: billing
+  namespace: billing
+spec:
+  roles:
+  - name: billing_migrator
+    login: true
+    comment: Runs billing service migrations and owns billing objects
+  - name: billing_api
+    login: true
+    connection_limit: 20
+    comment: Billing HTTP API runtime role
+  - name: billing_worker
+    login: true
+    connection_limit: 10
+    comment: Billing async worker runtime role
+  schemas:
+  - name: billing
+    owner: billing_migrator
+  grants:
+  - role: billing_migrator
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: billing_api
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: billing_worker
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: billing_migrator
+    privileges:
+    - SELECT
+    - INSERT
+    - UPDATE
+    - DELETE
+    - TRUNCATE
+    - REFERENCES
+    - TRIGGER
+    object:
+      type: table
+      schema: billing
+      name: '*'
+  - role: billing_migrator
+    privileges:
+    - USAGE
+    - SELECT
+    - UPDATE
+    object:
+      type: sequence
+      schema: billing
+      name: '*'
+  - role: billing_migrator
+    privileges:
+    - EXECUTE
+    object:
+      type: function
+      schema: billing
+      name: '*'
+  - role: billing_api
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: billing
+  - role: billing_api
+    privileges:
+    - SELECT
+    - INSERT
+    - UPDATE
+    object:
+      type: table
+      schema: billing
+      name: '*'
+  - role: billing_api
+    privileges:
+    - USAGE
+    - SELECT
+    object:
+      type: sequence
+      schema: billing
+      name: '*'
+  - role: billing_worker
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: billing
+  - role: billing_worker
+    privileges:
+    - SELECT
+    - UPDATE
+    object:
+      type: table
+      schema: billing
+      name: invoices
+  - role: shipping_migrator
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: billing
+  - role: shipping_migrator
+    privileges:
+    - REFERENCES
+    object:
+      type: table
+      schema: billing
+      name: invoices
+  - role: team_payments
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: billing
+  - role: team_payments
+    privileges:
+    - SELECT
+    object:
+      type: table
+      schema: billing
+      name: '*'
+  default_privileges:
+  - owner: billing_migrator
+    schema: billing
+    grant:
+    - role: billing_api
+      privileges:
+      - SELECT
+      - INSERT
+      - UPDATE
+      on_type: table
+    - role: billing_api
+      privileges:
+      - USAGE
+      - SELECT
+      on_type: sequence
+    - role: team_payments
+      privileges:
+      - SELECT
+      on_type: table
+  databaseRef:
+    name: appdb
+    namespace: platform

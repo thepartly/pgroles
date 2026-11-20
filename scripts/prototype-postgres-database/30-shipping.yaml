@@ -1,0 +1,144 @@
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata:
+  name: shipping
+  namespace: shipping
+spec:
+  roles:
+  - name: shipping_migrator
+    login: true
+    comment: Runs shipping service migrations and owns shipping objects
+  - name: shipping_api
+    login: true
+    connection_limit: 20
+    comment: Shipping API runtime role
+  - name: shipping_reports
+    login: true
+    connection_limit: 5
+    comment: Shipping read-only reporting runtime role
+  schemas:
+  - name: shipping
+    owner: shipping_migrator
+  grants:
+  - role: shipping_migrator
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: shipping_api
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: shipping_reports
+    privileges:
+    - CONNECT
+    object:
+      type: database
+      name: appdb
+  - role: shipping_migrator
+    privileges:
+    - SELECT
+    - INSERT
+    - UPDATE
+    - DELETE
+    - TRUNCATE
+    - REFERENCES
+    - TRIGGER
+    object:
+      type: table
+      schema: shipping
+      name: '*'
+  - role: shipping_migrator
+    privileges:
+    - USAGE
+    - SELECT
+    - UPDATE
+    object:
+      type: sequence
+      schema: shipping
+      name: '*'
+  - role: shipping_migrator
+    privileges:
+    - EXECUTE
+    object:
+      type: function
+      schema: shipping
+      name: '*'
+  - role: shipping_api
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: shipping
+  - role: shipping_api
+    privileges:
+    - SELECT
+    - INSERT
+    - UPDATE
+    object:
+      type: table
+      schema: shipping
+      name: '*'
+  - role: shipping_api
+    privileges:
+    - USAGE
+    - SELECT
+    object:
+      type: sequence
+      schema: shipping
+      name: '*'
+  - role: shipping_reports
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: shipping
+  - role: shipping_reports
+    privileges:
+    - SELECT
+    object:
+      type: table
+      schema: shipping
+      name: '*'
+  - role: team_fulfillment
+    privileges:
+    - USAGE
+    object:
+      type: schema
+      name: shipping
+  - role: team_fulfillment
+    privileges:
+    - SELECT
+    object:
+      type: table
+      schema: shipping
+      name: '*'
+  default_privileges:
+  - owner: shipping_migrator
+    schema: shipping
+    grant:
+    - role: shipping_api
+      privileges:
+      - SELECT
+      - INSERT
+      - UPDATE
+      on_type: table
+    - role: shipping_api
+      privileges:
+      - USAGE
+      - SELECT
+      on_type: sequence
+    - role: shipping_reports
+      privileges:
+      - SELECT
+      on_type: table
+    - role: team_fulfillment
+      privileges:
+      - SELECT
+      on_type: table
+  databaseRef:
+    name: appdb
+    namespace: platform

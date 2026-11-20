@@ -1,0 +1,42 @@
+# Billing tries to add its runtime role to the platform-owned team role.
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata: {name: escalate, namespace: billing}
+spec:
+  databaseRef: {name: appdb, namespace: platform}
+  roles:
+    - name: billing_escalator
+  memberships:
+    - role: team_payments
+      members: [{name: billing_escalator}]
+---
+# Analytics has no delegation on appdb at all.
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata: {name: reporting, namespace: analytics}
+spec:
+  databaseRef: {name: appdb, namespace: platform}
+  roles:
+    - name: analytics_reader
+---
+# Shipping tries to open CREATE on the database to everyone.
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata: {name: open-up, namespace: shipping}
+spec:
+  databaseRef: {name: appdb, namespace: platform}
+  grants:
+    - role: PUBLIC
+      privileges: [CREATE]
+      object: {type: database, name: appdb}
+---
+# A second billing policy redefines a role the first one already owns.
+apiVersion: pgroles.io/v1alpha1
+kind: PostgresPolicy
+metadata: {name: late-duplicate, namespace: billing}
+spec:
+  databaseRef: {name: appdb, namespace: platform}
+  roles:
+    - name: billing_api
+      login: true
+      superuser: true

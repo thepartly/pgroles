@@ -25,6 +25,7 @@ use pgroles_operator::crd::{
     EphemeralAccessPolicy, EphemeralAccessRequest, PostgresPolicy, PostgresPolicyCandidate,
     PostgresPolicyPlan, REQUESTED_RECONCILE_ANNOTATION,
 };
+use pgroles_operator::database::{PostgresDatabase, database_error_policy, reconcile_database};
 use pgroles_operator::ephemeral::{
     access_policy_error_policy, access_request_error_policy, reconcile_access_policy,
     reconcile_access_request,
@@ -505,7 +506,11 @@ async fn main() -> anyhow::Result<()> {
     .reconcile_on(access_policy_request_triggers)
     .graceful_shutdown_on(shutdown.clone())
     .shutdown_on_signal()
-    .run(reconcile_access_request, access_request_error_policy, ctx)
+    .run(
+        reconcile_access_request,
+        access_request_error_policy,
+        ctx.clone(),
+    )
     .for_each(|result| {
         observability.record_controller_progress(ControllerKind::AccessRequest, result.is_ok());
         async move {
@@ -515,7 +520,46 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // PostgresDatabase: composes attached policies into one operator-owned
+    // policy per database. Woken by its own changes and by any attached
+    // policy's spec change; the composed policy's readiness is polled.
+    let databases: Api<PostgresDatabase> = match &watch_namespace {
+        Some(namespace) => Api::namespaced(client.clone(), namespace),
+        None => Api::all(client.clone()),
+    };
+    let (database_reader, database_writer) = reflector::store();
+    let database_stream = watcher(databases, watcher::Config::default())
+        .default_backoff()
+        .reflect(database_writer)
+        .applied_objects();
+    let attached_policies: Api<PostgresPolicy> = match &watch_namespace {
+        Some(namespace) => Api::namespaced(client.clone(), namespace),
+        None => Api::all(client.clone()),
+    };
+    let database_triggers = watcher(attached_policies, watcher::Config::default())
+        .default_backoff()
+        .touched_objects()
+        .predicate_filter(predicates::generation, Default::default())
+        .filter_map(|policy| async move { policy.ok() })
+        .filter_map(|policy| async move {
+            let reference = policy.spec.database_ref.as_ref()?;
+            let namespace = reference.namespace.clone().or_else(|| policy.namespace())?;
+            Some(ObjectRef::<PostgresDatabase>::new(&reference.name).within(&namespace))
+        });
+    let database_controller =
+        configured_controller(database_stream, database_reader, reconcile_concurrency)
+            .reconcile_on(database_triggers)
+            .graceful_shutdown_on(shutdown.clone())
+            .shutdown_on_signal()
+            .run(reconcile_database, database_error_policy, ctx.clone())
+            .for_each(|result| async move {
+                if let Err(error) = result {
+                    tracing::error!(%error, "postgres database reconcile failed");
+                }
+            });
+
     let controllers = futures::stream::FuturesUnordered::new();
+    controllers.push(database_controller.boxed());
     controllers.push(policy_controller.boxed());
     controllers.push(access_policy_controller.boxed());
     controllers.push(access_request_controller.boxed());
@@ -575,6 +619,7 @@ mod tests {
 
     fn test_policy() -> PostgresPolicy {
         let spec = PostgresPolicySpec {
+            database_ref: None,
             connection: ConnectionSpec {
                 secret_ref: Some(SecretReference {
                     name: "db-credentials".to_string(),
