@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.16.0] - 2026-11-19
+## [0.16.0] - 2026-11-20
 
 ### Highlights
 
 - **Conflict detection across namespaces, Secrets and databases.** The operator compares policies by what the server reports about the database each one reached, not by the Secret they connect through. Policies reaching one database from different namespaces or through different Secrets are now checked against each other, and so are policies on different databases of one server, for the roles and memberships every database of a server shares. Previously only policies sharing a namespace and Secret were compared, so overlapping policies elsewhere could revoke each other's grants on every reconcile. (#263, #265)
 - **Policies can share a role.** A policy now claims only what it manages: the roles it creates, the schemas it declares and the grants it asserts. Granting to a role is a reference. Two policies conflict only where one can undo the other's work, judged by what each inspects, and the `ConflictingPolicy` message names the rule. One policy can create `app_runtime` in any mode while others declare it `external: true` and grant on their own schemas. See [policy conflicts](https://thepartly.github.io/pgroles/docs/operator-troubleshooting/#policy-conflicts). (#265)
-- **Bootstrapping new owners on PostgreSQL 16+.** pgroles grants a declared membership before the schemas, grants and default privileges that act through it, so a policy that creates an owner role, declares the executor's membership and creates the owner's schemas applies in one plan. Preflight now reports missing `SET ROLE` or current-owner authority for schema creation and transfers before anything runs. (#268, #270)
+- **Bootstrapping new owners on PostgreSQL 16+.** pgroles grants a declared membership before the schemas, grants and default privileges that act through it, so a policy that creates an owner role, declares the executor's membership and creates the owner's schemas applies in one plan. The same holds when the executor created the owner in an earlier apply and the policy declares its membership later. Preflight now reports missing `SET ROLE` or current-owner authority for schema creation and transfers before anything runs. (#268, #270, #272)
 
 ### Upgrade notes
 
@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bundle examples in the bundle composition guide and manifest reference failed composition: a shared `default_owner` made the bindings-only fragment claim schema ownership. The examples now set `owner` explicitly in the owning fragment, the reference explains the rule, and a test composes every bundle in the docs. (#263)
 - A policy that declares the executor's membership in a role no longer fails when the same apply creates a schema owned by that role, transfers a schema to it, or sets its default privileges. pgroles now grants a membership that has no existing edge right after creating and altering roles, before schemas, grants and default privileges, whatever the membership's options and whether the plan creates the role or it already exists. PostgreSQL 16+ gives the creating role only `ADMIN` unless its session sets `createrole_self_grant`, so the declared membership used to arrive too late. Option changes and removals keep their place in the plan. (#268)
 - The authority preflight reports schema ownership changes that used to fail partway through an apply. `SchemaOwnerSet` means the executor cannot `SET ROLE` to the schema's new owner at the point where the plan creates or transfers the schema ("must be able to SET ROLE"). `SchemaCurrentOwner` means the executor does not inherit the privileges of the schema's current owner when the plan transfers it ("must be owner of schema"). `CREATE` on the database is not checked. The preflight also reports `DefaultPrivilegeOwner` when a declared `inherit: false` membership replaces the inheriting access that `createrole_self_grant` gave the executor before a default-privilege change for that owner. (#268)
+- An executor that created a role in an earlier apply can now create schemas for it once the policy declares its membership. On PostgreSQL 16+, `CREATE ROLE` leaves a non-superuser executor an ADMIN-only edge, and pgroles used to plan the declared membership as an option increase with `SET FALSE`, so `CREATE SCHEMA ... AUTHORIZATION` stayed blocked by `SchemaOwnerSet` on every reconcile. When that edge is the executor's only edge into the role and the declaration differs from it, the membership is now granted as a new one, with PostgreSQL's default SET and without ADMIN, before the statements that use it. (#272)
 
 ### Security
 

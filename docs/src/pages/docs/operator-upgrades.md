@@ -52,6 +52,7 @@ helm upgrade pgroles-operator oci://ghcr.io/thepartly/charts/pgroles-operator \
 - Policies that only grant to a shared role no longer conflict, and `status.owned_roles` lists only the roles a policy manages.
 - Memberships with no existing edge now run before schemas, grants and default privileges, so a policy that creates an owner role, declares the executor's membership and creates the owner's schemas applies in one plan. Expect plans to show such `GRANT` statements earlier. A policy that declares the executor's membership in a role it creates as `inherit: false`, and sets default privileges for that role, now needs `inherit: true`; preflight reports `DefaultPrivilegeOwner` until it does.
 - Preflight reports `SchemaOwnerSet` and `SchemaCurrentOwner` for schema creation and transfers the executor cannot perform, instead of failing partway through an apply.
+- Where the executor created a role in an earlier apply and the policy declares the executor's membership in it, the next plan grants that membership (with SET, without ADMIN) instead of an option change, unless the declaration matches the executor's existing ADMIN-only edge exactly.
 
 ## Moving from 0.14 to 0.15
 

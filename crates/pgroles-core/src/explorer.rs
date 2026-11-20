@@ -1769,11 +1769,20 @@ fn apply_change(
             admin,
             ..
         } => {
+            // A GRANT without ADMIN never removes ADMIN another attribution
+            // supplies, such as the executor's creation edge (#272).
+            let existing_admin = graph
+                .memberships
+                .iter()
+                .any(|edge| &edge.role == role && &edge.member == member && edge.admin);
+            graph
+                .memberships
+                .retain(|edge| &edge.role != role || &edge.member != member);
             graph.memberships.insert(MembershipEdge {
                 role: role.clone(),
                 member: member.clone(),
                 inherit: *inherit,
-                admin: *admin,
+                admin: *admin || existing_admin,
             });
             // pgroles grants membership without a SET option; before
             // PostgreSQL 16 that option does not exist and every membership
@@ -1794,14 +1803,12 @@ fn apply_change(
                     SetRoleCapability::Denied
                 },
             );
-            admin_options.insert(
-                (role.clone(), member.clone()),
-                if *admin {
-                    SetRoleCapability::Allowed
-                } else {
-                    SetRoleCapability::Denied
-                },
-            );
+            let admin_option = admin_options
+                .entry((role.clone(), member.clone()))
+                .or_insert(SetRoleCapability::Denied);
+            if *admin {
+                *admin_option = SetRoleCapability::Allowed;
+            }
         }
         Change::UpdateMemberOptions {
             role,
@@ -2756,6 +2763,47 @@ mod tests {
                 .findings
                 .iter()
                 .any(|finding| finding.message.contains("ADMIN OPTION for role target"))
+        );
+    }
+
+    #[test]
+    fn membership_grant_without_admin_keeps_the_creator_admin_edge() {
+        let key = ("owner".to_string(), "deployer".to_string());
+        let mut graph = RoleGraph::default();
+        graph.memberships.insert(MembershipEdge {
+            role: key.0.clone(),
+            member: key.1.clone(),
+            inherit: false,
+            admin: true,
+        });
+        let mut set = BTreeMap::from([(key.clone(), SetRoleCapability::Denied)]);
+        let mut usage = set.clone();
+        let mut admin = BTreeMap::from([(key.clone(), SetRoleCapability::Allowed)]);
+        let executor = request(ReconciliationMode::Authoritative).executor;
+        apply_change(
+            &mut graph,
+            &mut set,
+            &mut usage,
+            &mut admin,
+            &executor,
+            DEFAULT_PG_MAJOR_VERSION,
+            &Change::AddMember {
+                role: key.0.clone(),
+                member: key.1.clone(),
+                inherit: true,
+                admin: false,
+            },
+        );
+        assert_eq!(admin[&key], SetRoleCapability::Allowed);
+        assert_eq!(usage[&key], SetRoleCapability::Allowed);
+        assert_eq!(
+            graph.memberships.iter().collect::<Vec<_>>(),
+            vec![&MembershipEdge {
+                role: key.0.clone(),
+                member: key.1.clone(),
+                inherit: true,
+                admin: true,
+            }]
         );
     }
 

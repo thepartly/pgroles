@@ -141,7 +141,9 @@ ADMIN-revoke dependency checks. Stage explicitly reviewed onward-grant removals
 before a last-support ADMIN reduction, then replan. Never add CASCADE.
 
 Increases prefer an existing usable attribution, then create a usable attribution
-with SET FALSE and only required positive options. The actual executor must inherit
+with SET FALSE and only required positive options. Exception: when the executor's
+only edge into a role is its ADMIN-only creation edge, a declared membership that
+differs from it is a new grant with default SET, as in a same-plan creation. The actual executor must inherit
 the selected grantor's direct ADMIN authority; SET-only paths do not qualify.
 Independent foreign edges stay intact. The reviewed change binds executor,
 grantor, exact tuple/absence, every independent tuple and SET effect. Apply rechecks and requires replacement

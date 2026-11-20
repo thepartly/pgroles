@@ -665,19 +665,20 @@ fn declared_executor_membership_never_reduces_its_own_admin() {
         .into();
         pgroles_core::diff::diff(&current, &desired)
     };
-    // `{ name: executor }` declares admin: false; only the increase remains.
-    assert_eq!(
-        declare(true, false),
-        vec![Change::UpdateMemberOptions {
+    // The executor's only edge is its ADMIN authority from creating the role,
+    // with neither INHERIT nor SET. A differing declaration is planned as a
+    // new grant (which carries SET), never as an ADMIN reduction or an
+    // increase; a matching one plans nothing.
+    let added = |inherit| {
+        vec![Change::AddMember {
             role: "reader".into(),
             member: "app".into(),
-            grantor: "alloydbadmin".into(),
-            inherit: Some(true),
-            admin: None,
-            binding: None,
+            inherit,
+            admin: false,
         }]
-    );
-    assert!(declare(false, false).is_empty());
+    };
+    assert_eq!(declare(true, false), added(true));
+    assert_eq!(declare(false, false), added(false));
     assert!(declare(false, true).is_empty());
 
     // Only ADMIN is protected: an explicitly declared INHERIT reduction is
